@@ -82,7 +82,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 基础属性
     webview.setAttribute('src', 'https://www.doubao.com/chat/');
-    webview.setAttribute('partition', `persist:doubao_${activeAccount.id}`);
+    webview.setAttribute('partition', `persist:doubao_${activeAccount.partition}`);
     webview.setAttribute('allowpopups', 'true');
     webview.setAttribute('useragent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -362,52 +362,37 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
 // ==================== 工具函数 ====================
 
-/** 等待 webview 加载完成 */
+/**
+ * 等待 webview 页面完全就绪（DOM 已渲染 textarea）
+ *
+ * 策略：
+ * 1. 先等 did-finish-load 事件（主框架加载完成）
+ * 2. 然后用 waitForChatReady 轮询 DOM，确认 textarea 真实可见后再 resolve
+ *    避免 did-finish-load 触发时 DOM 尚未完全渲染的问题
+ */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
-  // 用 waitForChatReady 做 DOM 轮询（检查 textarea 是否出现），比等待事件可靠
-  // 同时作为 fallback，如果 URL 不是 about:blank 也直接返回
-  return new Promise(async (resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
+      webview.removeEventListener('did-finish-load', onLoad);
       reject(new Error('页面就绪检测超时（' + timeoutMs + 'ms）'));
     }, timeoutMs);
 
-    try {
-      // 先等 URL 加载（非 about:blank）
-      const checkURL = () => {
-        try {
-          const url = webview.getURL();
-          return url && !url.startsWith('about:') && !url.startsWith('data:text/html');
-        } catch {
-          return false;
+    const onLoad = async () => {
+      clearTimeout(timer);
+      try {
+        // did-finish-load 触发后，用 waitForChatReady 做 DOM 轮询确认 textarea 可见
+        const ready = await waitForChatReady(webview, 15000);
+        if (ready) {
+          resolve();
+        } else {
+          reject(new Error('页面 DOM 就绪检测失败：textarea 未在 15 秒内出现'));
         }
-      };
+      } catch (err) {
+        reject(new Error('页面就绪检测失败: ' + (err as Error).message));
+      }
+    };
 
-      // 轮询检查 URL（每 500ms）
-      const waitForURL = () => new Promise<void>((res) => {
-        const interval = setInterval(() => {
-          if (checkURL()) {
-            clearInterval(interval);
-            res();
-          }
-        }, 500);
-        setTimeout(() => { clearInterval(interval); res(); }, 8000); // 最多等 8 秒让 URL 就绪
-      });
-
-      await waitForURL();
-
-      // URL 就绪后，用 waitForChatReady 检查 DOM 是否完全加载
-      await waitForChatReady({
-        executeJavaScript: (code: string) => webview.executeJavaScript(code),
-        loadURL: (url: string) => webview.loadURL(url),
-        getURL: () => webview.getURL(),
-      }, 10000);
-
-      clearTimeout(timer);
-      resolve();
-    } catch (err) {
-      clearTimeout(timer);
-      reject(new Error('页面就绪检测失败: ' + (err as Error).message));
-    }
+    webview.addEventListener('did-finish-load', onLoad, { once: true });
   });
 }
 
