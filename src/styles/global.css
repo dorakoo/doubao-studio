@@ -49,6 +49,83 @@ body {
   background: #50507a;
 }
 
+/* ---- App 布局 ---- */
+.app-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.app-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+}
+
+.app-sidebar {
+  height: 100%;
+  overflow-y: auto;
+  flex-shrink: 0;
+  border-right: 1px solid #2a2a3e;
+  transition: width 0.2s ease;
+}
+
+.app-sidebar.collapsed {
+  width: 0 !important;
+  overflow: hidden;
+  border-right: none;
+}
+
+.app-resizer {
+  width: 4px;
+  cursor: col-resize;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.app-resizer:hover {
+  background: rgba(108, 92, 231, 0.3);
+}
+
+.app-resizer .resizer-handle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 4px;
+  height: 40px;
+  background: #38385a;
+  border-radius: 2px;
+}
+
+.app-browser {
+  flex: 1;
+  overflow: hidden;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- 工具栏 ---- */
+.toolbar {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  background: #0f0f14;
+  border-bottom: 1px solid #2a2a3e;
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+}
+
+.toolbar > * {
+  -webkit-app-region: no-drag;
+}
+
 /* ---- 自定义工具类 ---- */
 @layer components {
   /* 面板容器 */
@@ -186,8 +263,10 @@ body {
 
 /* ---- webview 容器样式 ---- */
 .webview-container {
-  flex: 1;
   position: relative;
+  width: 100%;
+  height: 100%;
+  flex: 1;
   overflow: hidden;
 }
 
