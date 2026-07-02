@@ -200,7 +200,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             ? { ...t, status: 'queued' as TaskStatus }
             : t
         );
-        set({ tasks });
+        set({
+          tasks,
+          activeTaskId: null,
+          automationState: 'idle',
+          pollingTimerId: null,
+        });
         return true;
       }
       return false;

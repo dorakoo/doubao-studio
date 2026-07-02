@@ -176,6 +176,9 @@ async function tryInjectOnce(
           input.dispatchEvent(new Event('input', { bubbles: true }));
         }, 100);
 
+        // 让输入框获得焦点
+        input.focus();
+
         return { ok: true, tag: input.tagName };
       } catch (e) {
         return { ok: false, error: e.message || '未知错误' };

@@ -380,6 +380,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
  */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
+    // 先检查是否已经加载完成（避免 did-finish-load 已错过）
+    const isLoading = (webview as any).isLoading?.() ?? true;
+    if (!isLoading) {
+      console.log('[BrowserPanel] webview 已加载完成，直接检查 DOM 就绪');
+      waitForChatReady(webview, 15000).then((ready) => {
+        if (ready) resolve();
+        else reject(new Error('页面 DOM 就绪检测失败：textarea 未在 15 秒内出现'));
+      }).catch((err) => reject(new Error('页面就绪检测失败: ' + err.message)));
+      return;
+    }
+
+    // 还没加载完，等 did-finish-load
+    console.log('[BrowserPanel] webview 加载中，等待 did-finish-load...');
     const timer = setTimeout(() => {
       webview.removeEventListener('did-finish-load', onLoad);
       reject(new Error('页面就绪检测超时（' + timeoutMs + 'ms）'));
@@ -387,8 +400,8 @@ function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Pr
 
     const onLoad = async () => {
       clearTimeout(timer);
+      console.log('[BrowserPanel] did-finish-load 触发，开始 DOM 轮询');
       try {
-        // did-finish-load 触发后，用 waitForChatReady 做 DOM 轮询确认 textarea 可见
         const ready = await waitForChatReady(webview, 15000);
         if (ready) {
           resolve();
