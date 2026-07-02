@@ -7,6 +7,7 @@
 
 import { create } from 'zustand';
 import type { Task, TaskStatus } from '../types';
+import { useAccountStore } from './useAccountStore';
 
 // ==================== 类型 ====================
 
@@ -122,6 +123,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             : t
         );
         set({ tasks });
+        // 自动切换到被指派的账号
+        useAccountStore.getState().selectAccount(accountId);
+        // 如果当前没有正在执行的任务，自动启动
+        if (get().automationState === 'idle' && !get().activeTaskId) {
+          get().startAutomation(taskId);
+        }
         return true;
       } else {
         set({ error: result.error || '指派失败' });
@@ -155,7 +162,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const result = await window.electronAPI.tasks.delete(taskId);
       if (result.success) {
         const tasks = get().tasks.filter((t) => t.id !== taskId);
-        set({ tasks });
+        const newState: any = { tasks };
+        if (get().activeTaskId === taskId) {
+          newState.activeTaskId = null;
+          newState.automationState = 'idle';
+        }
+        set(newState);
         return true;
       } else {
         set({ error: result.error || '删除失败' });

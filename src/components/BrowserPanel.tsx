@@ -130,6 +130,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
    */
   useEffect(() => {
     if (!activeTask || !webviewTagRef.current) return;
+    // 守卫：确保任务指派的账号匹配当前活跃账号
+    if (activeTask.assignedAccountId !== activeAccount?.id) return;
 
     const webview = webviewTagRef.current;
 
@@ -206,7 +208,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
       }
     })();
-  }, [activeTask?.id]);
+  }, [activeTask?.id, activeAccount?.id]);
 
   /**
    * 同步 automationState 到本地 autoStage
