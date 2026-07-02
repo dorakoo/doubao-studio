@@ -100,7 +100,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const result = await window.electronAPI.tasks.add(prompts);
       if (result.success && result.tasks) {
         const tasks = [...get().tasks, ...result.tasks];
-        set({ tasks });
+        set({
+          tasks,
+          activeTaskId: null,
+          automationState: 'idle',
+          pollingTimerId: null,
+        });
         return true;
       } else {
         set({ error: result.error || '添加失败' });

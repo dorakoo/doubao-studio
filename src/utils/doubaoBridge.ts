@@ -50,7 +50,7 @@ export async function injectPrompt(webview: WebviewHandle, prompt: string): Prom
         if (nativeInputValueSetter) {
           nativeInputValueSetter.call(input, ${JSON.stringify(prompt)});
         } else if ('value' in input) {
-          (input as HTMLTextAreaElement).value = ${JSON.stringify(prompt)};
+          input.value = ${JSON.stringify(prompt)};
         } else {
           input.textContent = ${JSON.stringify(prompt)};
         }
@@ -63,22 +63,33 @@ export async function injectPrompt(webview: WebviewHandle, prompt: string): Prom
         input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: ${JSON.stringify(prompt)} }));
         input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: ${JSON.stringify(prompt)} }));
 
+        // 注入前调试信息
+        const info = document.querySelector('textarea[role="textbox"]') ||
+                     document.querySelector('[contenteditable="true"]');
+        console.log('[doubaoBridge] 注入前 input 存在:', !!info, 'tag:', info?.tagName);
         return { ok: true };
       } catch (e) {
+        console.error('[doubaoBridge] 注入异常:', e);
         return { ok: false, error: e.message };
       }
     })();
   `;
 
   try {
-    const result = await webview.executeJavaScript(code);
+    // 10 秒超时保护
+    const result = await Promise.race([
+      webview.executeJavaScript(code),
+      new Promise<{ ok: boolean; error?: string }>((_, reject) =>
+        setTimeout(() => reject(new Error('injectPrompt executeJavaScript 超时（10s）')), 10000)
+      ),
+    ]);
     if (!result.ok) {
       console.error('[doubaoBridge] injectPrompt 失败:', result.error);
       return false;
     }
     return true;
   } catch (err: any) {
-    console.error('[doubaoBridge] executeJavaScript 异常:', err.message);
+    console.error('[doubaoBridge] injectPrompt 异常:', err.message);
     return false;
   }
 }
@@ -108,7 +119,7 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           'button[class*="submit"]',
         ];
 
-        let sendBtn: HTMLElement | null = null;
+        let sendBtn = null;
         for (const selector of selectors) {
           try {
             const el = document.querySelector(selector);
@@ -147,21 +158,27 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
         // 模拟点击
         sendBtn.click();
         return { ok: true };
-      } catch (e: any) {
+      } catch (e) {
         return { ok: false, error: e.message };
       }
     })();
   `;
 
   try {
-    const result = await webview.executeJavaScript(code);
+    // 10 秒超时保护
+    const result = await Promise.race([
+      webview.executeJavaScript(code),
+      new Promise<{ ok: boolean; error?: string }>((_, reject) =>
+        setTimeout(() => reject(new Error('submitPrompt executeJavaScript 超时（10s）')), 10000)
+      ),
+    ]);
     if (!result.ok) {
       console.error('[doubaoBridge] submitPrompt 失败:', result.error);
       return false;
     }
     return true;
   } catch (err: any) {
-    console.error('[doubaoBridge] executeJavaScript 异常:', err.message);
+    console.error('[doubaoBridge] submitPrompt 异常:', err.message);
     return false;
   }
 }
@@ -235,7 +252,13 @@ export async function checkGenerating(webview: WebviewHandle): Promise<boolean> 
   `;
 
   try {
-    const result = await webview.executeJavaScript(code);
+    // 10 秒超时保护
+    const result = await Promise.race([
+      webview.executeJavaScript(code),
+      new Promise<{ generating: boolean }>((_, reject) =>
+        setTimeout(() => reject(new Error('checkGenerating executeJavaScript 超时（10s）')), 10000)
+      ),
+    ]);
     return result.generating === true;
   } catch {
     return false;
