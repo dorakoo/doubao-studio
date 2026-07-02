@@ -166,6 +166,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         if (get().activeTaskId === taskId) {
           newState.activeTaskId = null;
           newState.automationState = 'idle';
+          newState.automationPrompt = '';
+          newState.automationTaskId = '';
         }
         set(newState);
         return true;

@@ -11,10 +11,7 @@
 import React, { useRef, useEffect, useCallback, useState } from 'react';
 import type { Account, Task } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
-import {
-  useTaskStore,
-  type AutomationState,
-} from '../store/useTaskStore';
+import { useTaskStore } from '../store/useTaskStore';
 import {
   injectPrompt,
   submitPrompt,
@@ -50,8 +47,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const [loading, setLoading] = useState(true);
   /** 加载进度文字 */
   const [loadText, setLoadText] = useState('加载豆包中...');
-  /** 自动化阶段 UI 状态 */
-  const [autoStage, setAutoStage] = useState<AutomationState>('idle');
+  /** 自动化阶段 UI 状态（从 store 读取） */
+  const autoStage = useTaskStore((s) => s.automationState);
   /** 自动化消息 */
   const [autoMessage, setAutoMessage] = useState('');
 
@@ -71,7 +68,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     setLoading(true);
     setLoadText('加载豆包中...');
-    setAutoStage('idle');
+    useTaskStore.getState().setAutomationState('idle');
     setAutoMessage('');
 
     // 创建 webview
@@ -138,8 +135,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 执行自动化流程
     (async () => {
       try {
+        // 并发守卫：已有自动化在执行则跳过
+        if (useTaskStore.getState().automationState !== 'idle') return;
+
         // 1. 等待 webview 加载完成
-        setAutoStage('injecting');
+        useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('等待页面就绪...');
         await waitForWebviewReady(webview, 15000);
 
@@ -148,7 +148,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await sleep(2000);
 
         // 3. 注入提示词
-        setAutoStage('injecting');
+        useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('正在注入提示词...');
         const injected = await injectPrompt(webview, activeTask.prompt);
         if (!injected) {
@@ -157,7 +157,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await sleep(800);
 
         // 4. 提交
-        setAutoStage('submitting');
+        useTaskStore.getState().setAutomationState('submitting');
         setAutoMessage('正在发送...');
         const submitted = await submitPrompt(webview);
         if (!submitted) {
@@ -165,7 +165,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
 
         // 5. 轮询等待生成
-        setAutoStage('generating');
+        useTaskStore.getState().setAutomationState('generating');
         setAutoMessage('等待豆包生成回复...');
 
         // 先等一小段时间让生成开始
@@ -190,7 +190,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
 
         // 6. 获取结果 URL
-        setAutoStage('completed');
+        useTaskStore.getState().setAutomationState('completed');
         setAutoMessage('生成完成！');
         const resultUrl = await getResultUrl(webview);
 
@@ -199,7 +199,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await completeAutomation(activeTask.id, resultUrl);
       } catch (err: any) {
         console.error('[BrowserPanel] 自动化执行失败:', err.message);
-        setAutoStage('failed');
+        useTaskStore.getState().setAutomationState('failed');
         setAutoMessage(err.message);
 
         if (activeTask) {
@@ -209,18 +209,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     })();
   }, [activeTask?.id, activeAccount?.id]);
-
-  /**
-   * 同步 automationState 到本地 autoStage
-   */
-  useEffect(() => {
-    const unsub = useTaskStore.subscribe((state) => {
-      if (state.automationState !== autoStage) {
-        setAutoStage(state.automationState);
-      }
-    });
-    return unsub;
-  }, [autoStage]);
 
   // ---- 导航方法 ----
 
@@ -356,6 +344,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 /** 等待 webview 加载完成 */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
+    // 先检查 webview 是否已经加载了非 about: 的页面
+    const currentSrc = webview.getAttribute('src') || '';
+    if (currentSrc && !currentSrc.startsWith('about:') && !currentSrc.startsWith('data:text/html')) {
+      resolve();
+      return;
+    }
+
     const timer = setTimeout(() => {
       webview.removeEventListener('did-finish-load', onReady);
       reject(new Error('webview 加载超时'));
