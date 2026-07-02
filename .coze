@@ -1,13 +1,18 @@
 [project]
-requires = ["nodejs-24"]
+requires = [ "nodejs-24" ]
+template = "vite"
+version = "legacy"
+appliedPatches = [ "vite/validate@0.0.20" ]
 
 [dev]
-build = ["pnpm", "install"]
-# 开发模式：编译主进程 TypeScript + 启动 Vite 开发服务器
-# Electron GUI 需要桌面环境，沙箱中仅做编译验证
-run = ["pnpm", "run", "build:main"]
+build = [ "pnpm", "install" ]
+run = [ "pnpm", "run", "build:main" ]
+validate = [ "bash", "./scripts/validate.sh" ]
 
 [deploy]
-build = ["pnpm", "run", "build"]
-# 生产构建后输出 release/ 目录，在本地机器上执行 electron .
-run = ["sh", "-c", "echo 'Electron 桌面应用已构建完成，请在本地机器上运行: pnpm start'"]
+build = [ "pnpm", "run", "build" ]
+run = [
+  "sh",
+  "-c",
+  "echo 'Electron 桌面应用已构建完成，请在本地机器上运行: pnpm start'"
+]

@@ -91,6 +91,8 @@ export const BrowserPanel: React.FC = () => {
     webview.setAttribute('useragent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
+    webview.setAttribute('width', '100%');
+    webview.setAttribute('height', '100%');
     webview.style.cssText = `
       position: absolute;
       top: 0;
@@ -301,7 +303,7 @@ export const BrowserPanel: React.FC = () => {
         )}
 
         {/* webview 挂载点 */}
-        <div ref={webviewRef} className="webview-container" />
+        <div ref={webviewRef} style={{ position: 'relative', width: '100%', height: '100%' }} />
       </div>
     </div>
   );
