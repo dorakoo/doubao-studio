@@ -18,6 +18,7 @@ import {
   checkGenerating,
   getResultUrl,
   navigateToChat,
+  waitForChatReady,
 } from '../utils/doubaoBridge';
 
 // ==================== 类型 ====================
@@ -62,14 +63,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   useEffect(() => {
     if (!webviewRef.current || !activeAccount) return;
 
+    const container = webviewRef.current; // 提前捕获，避免 TS 窄化失效
+    (async () => {
     // 清理旧 webview
-    const container = webviewRef.current;
     container.innerHTML = '';
 
     setLoading(true);
     setLoadText('加载豆包中...');
     useTaskStore.getState().setAutomationState('idle');
     setAutoMessage('');
+
+    // 确保主进程 session 已初始化（重启后 partition 可能未被预创建）
+    await window.electronAPI.accounts.getPartition(activeAccount.id);
 
     // 创建 webview
     const webview = document.createElement('webview') as HTMLWebViewElement;
@@ -111,6 +116,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     });
 
     container.appendChild(webview);
+    })();
 
     return () => {
       if (webviewTagRef.current) {
@@ -343,28 +349,50 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
 /** 等待 webview 加载完成 */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
-  return new Promise((resolve, reject) => {
+  // 用 waitForChatReady 做 DOM 轮询（检查 textarea 是否出现），比等待事件可靠
+  // 同时作为 fallback，如果 URL 不是 about:blank 也直接返回
+  return new Promise(async (resolve, reject) => {
     const timer = setTimeout(() => {
-      webview.removeEventListener('did-finish-load', onReady);
-      reject(new Error('webview 加载超时'));
+      reject(new Error('页面就绪检测超时（' + timeoutMs + 'ms）'));
     }, timeoutMs);
-    const onReady = () => {
+
+    try {
+      // 先等 URL 加载（非 about:blank）
+      const checkURL = () => {
+        try {
+          const url = webview.getURL();
+          return url && !url.startsWith('about:') && !url.startsWith('data:text/html');
+        } catch {
+          return false;
+        }
+      };
+
+      // 轮询检查 URL（每 500ms）
+      const waitForURL = () => new Promise<void>((res) => {
+        const interval = setInterval(() => {
+          if (checkURL()) {
+            clearInterval(interval);
+            res();
+          }
+        }, 500);
+        setTimeout(() => { clearInterval(interval); res(); }, 8000); // 最多等 8 秒让 URL 就绪
+      });
+
+      await waitForURL();
+
+      // URL 就绪后，用 waitForChatReady 检查 DOM 是否完全加载
+      await waitForChatReady({
+        executeJavaScript: (code: string) => webview.executeJavaScript(code),
+        loadURL: (url: string) => webview.loadURL(url),
+        getURL: () => webview.getURL(),
+      }, 10000);
+
       clearTimeout(timer);
-      webview.removeEventListener('did-finish-load', onReady);
       resolve();
-    };
-    
-    // 预检查：如果页面已经加载完成，直接 resolve
-    const currentSrc = webview.getAttribute('src') || '';
-    const currentURL = webview.getURL?.() || '';
-    if (currentSrc && !currentSrc.startsWith('about:') && !currentSrc.startsWith('data:text/html')
-        && currentURL && !currentURL.startsWith('about:') && !currentURL.startsWith('data:text/html')) {
+    } catch (err) {
       clearTimeout(timer);
-      resolve();
-      return;
+      reject(new Error('页面就绪检测失败: ' + (err as Error).message));
     }
-    
-    webview.addEventListener('did-finish-load', onReady, { once: true });
   });
 }
 
