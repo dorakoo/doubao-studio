@@ -82,7 +82,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 基础属性
     webview.setAttribute('src', 'https://www.doubao.com/chat/');
-    webview.setAttribute('partition', `persist:doubao_${activeAccount.partition}`);
+    webview.setAttribute('partition', `persist:doubao_${activeAccount.id}`);
     webview.setAttribute('allowpopups', 'true');
     webview.setAttribute('useragent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -149,23 +149,33 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         setAutoMessage('等待页面就绪...');
         await waitForWebviewReady(webview, 15000);
 
-        // 2. 导航到豆包聊天页
+        // 2. 导航到豆包聊天页，用 waitForChatReady 等 DOM 就绪
         await navigateToChat(webview);
-        await sleep(2000);
+        await waitForWebviewReady(webview, 15000);
 
-        // 3. 注入提示词
+        // 3. 注入提示词（10s 超时保护）
         useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('正在注入提示词...');
-        const injected = await injectPrompt(webview, activeTask.prompt);
+        const injected = await Promise.race([
+          injectPrompt(webview, activeTask.prompt),
+          new Promise<boolean>((_, reject) =>
+            setTimeout(() => reject(new Error('注入提示词超时（10s）')), 10000)
+          ),
+        ]);
         if (!injected) {
           throw new Error('注入提示词失败：未找到输入框');
         }
         await sleep(800);
 
-        // 4. 提交
+        // 4. 提交（10s 超时保护）
         useTaskStore.getState().setAutomationState('submitting');
         setAutoMessage('正在发送...');
-        const submitted = await submitPrompt(webview);
+        const submitted = await Promise.race([
+          submitPrompt(webview),
+          new Promise<boolean>((_, reject) =>
+            setTimeout(() => reject(new Error('提交超时（10s）')), 10000)
+          ),
+        ]);
         if (!submitted) {
           throw new Error('提交失败：未找到发送按钮');
         }
@@ -184,7 +194,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
         for (let i = 0; i < maxAttempts; i++) {
           await sleep(intervalMs);
-          generating = await checkGenerating(webview);
+          generating = await Promise.race([
+            checkGenerating(webview),
+            new Promise<boolean>((_, reject) =>
+              setTimeout(() => reject(new Error('生成检测超时（10s）')), 10000)
+            ),
+          ]);
           if (!generating) {
             break;
           }
