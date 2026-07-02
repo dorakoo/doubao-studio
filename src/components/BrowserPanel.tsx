@@ -77,7 +77,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 基础属性
     webview.setAttribute('src', 'https://www.doubao.com/chat/');
-    webview.setAttribute('partition', activeAccount.partition);
+    webview.setAttribute('partition', `persist:doubao_${activeAccount.partition}`);
     webview.setAttribute('allowpopups', 'true');
     webview.setAttribute('useragent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -344,23 +344,26 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 /** 等待 webview 加载完成 */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
-    // 先检查 webview 是否已经加载了非 about: 的页面
-    const currentSrc = webview.getAttribute('src') || '';
-    if (currentSrc && !currentSrc.startsWith('about:') && !currentSrc.startsWith('data:text/html')) {
-      resolve();
-      return;
-    }
-
     const timer = setTimeout(() => {
       webview.removeEventListener('did-finish-load', onReady);
       reject(new Error('webview 加载超时'));
     }, timeoutMs);
-
     const onReady = () => {
       clearTimeout(timer);
+      webview.removeEventListener('did-finish-load', onReady);
       resolve();
     };
-
+    
+    // 预检查：如果页面已经加载完成，直接 resolve
+    const currentSrc = webview.getAttribute('src') || '';
+    const currentURL = webview.getURL?.() || '';
+    if (currentSrc && !currentSrc.startsWith('about:') && !currentSrc.startsWith('data:text/html')
+        && currentURL && !currentURL.startsWith('about:') && !currentURL.startsWith('data:text/html')) {
+      clearTimeout(timer);
+      resolve();
+      return;
+    }
+    
     webview.addEventListener('did-finish-load', onReady, { once: true });
   });
 }
