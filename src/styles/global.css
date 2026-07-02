@@ -1,0 +1,201 @@
+/* ============================================
+   豆包工作室 Doubao Studio Desktop
+   全局样式 - 深色创作者工具主题
+   ============================================ */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- 基础重置 ---- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background-color: #0f0f14;
+  color: #e8e8f0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ---- 滚动条样式（深色主题） ---- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #38385a;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #50507a;
+}
+
+/* ---- 自定义工具类 ---- */
+@layer components {
+  /* 面板容器 */
+  .panel {
+    @apply bg-db-bg-secondary border border-db-border rounded-db;
+  }
+
+  /* 面板标题栏 */
+  .panel-header {
+    @apply flex items-center justify-between px-4 py-3 border-b border-db-border;
+  }
+
+  .panel-title {
+    @apply text-sm font-semibold text-db-text-primary tracking-wide;
+  }
+
+  /* 按钮变体 */
+  .btn-ghost {
+    @apply flex items-center justify-center w-8 h-8 rounded-md
+           text-db-text-secondary hover:text-db-text-primary
+           hover:bg-db-surface-hover transition-all duration-200
+           cursor-pointer select-none;
+  }
+
+  .btn-accent {
+    @apply flex items-center justify-center gap-2 px-4 py-2
+           bg-db-accent hover:bg-db-accent-dark text-white
+           rounded-db font-medium text-sm transition-all duration-200
+           cursor-pointer select-none;
+  }
+
+  .btn-surface {
+    @apply flex items-center justify-center gap-2 px-4 py-2
+           bg-db-surface hover:bg-db-surface-hover text-db-text-primary
+           border border-db-border rounded-db font-medium text-sm
+           transition-all duration-200 cursor-pointer select-none;
+  }
+
+  /* 状态指示点 */
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full flex-shrink-0;
+  }
+
+  .status-dot.idle {
+    @apply bg-db-status-idle;
+  }
+
+  .status-dot.busy {
+    @apply bg-db-status-busy animate-pulse;
+  }
+
+  .status-dot.error {
+    @apply bg-db-status-error;
+  }
+
+  /* 可拖拽分隔线 */
+  .resize-handle {
+    @apply w-1 cursor-col-resize hover:bg-db-accent/30 transition-colors duration-150;
+    flex-shrink: 0;
+  }
+
+  /* 任务状态标签 */
+  .task-tag {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-2xs font-medium;
+  }
+
+  .task-tag.queued {
+    @apply bg-blue-500/15 text-blue-400;
+  }
+
+  .task-tag.running {
+    @apply bg-amber-500/15 text-amber-400;
+  }
+
+  .task-tag.done {
+    @apply bg-emerald-500/15 text-emerald-400;
+  }
+
+  .task-tag.fail {
+    @apply bg-red-500/15 text-red-400;
+  }
+}
+
+/* ---- Ant Design 深色主题覆盖 ---- */
+/* 让 Ant Design 组件融入深色主题 */
+.ant-btn {
+  border-radius: 8px;
+}
+
+.ant-input {
+  background-color: #1a1a24;
+  border-color: #2a2a3e;
+  color: #e8e8f0;
+}
+
+.ant-input:hover,
+.ant-input:focus {
+  border-color: #6c5ce7;
+}
+
+.ant-input::placeholder {
+  color: #686888;
+}
+
+.ant-modal-content {
+  background-color: #1e1e2e;
+  border: 1px solid #2a2a3e;
+}
+
+.ant-modal-header {
+  background-color: transparent;
+}
+
+.ant-modal-title {
+  color: #e8e8f0;
+}
+
+.ant-dropdown-menu {
+  background-color: #1e1e2e;
+  border: 1px solid #2a2a3e;
+}
+
+.ant-dropdown-menu-item {
+  color: #e8e8f0;
+}
+
+.ant-dropdown-menu-item:hover {
+  background-color: #2a2a3e;
+}
+
+.ant-tag {
+  border-radius: 9999px;
+  font-size: 0.65rem;
+}
+
+/* ---- webview 容器样式 ---- */
+.webview-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.webview-container webview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+}
