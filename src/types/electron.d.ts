@@ -11,6 +11,31 @@ declare global {
     webview: Electron.WebviewTag;
   }
 
+  // 运行时 webview 元素类型（用于 document.createElement('webview')）
+  interface HTMLWebViewElement extends HTMLElement {
+    src: string;
+    reload(): void;
+    goBack(): void;
+    goForward(): void;
+    canGoBack(): boolean;
+    canGoForward(): boolean;
+    loadURL(url: string): void;
+    getURL(): string;
+    executeJavaScript(code: string): Promise<any>;
+    addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions
+    ): void;
+    removeEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions
+    ): void;
+    setAttribute(name: string, value: string): void;
+    getAttribute(name: string): string | null;
+  }
+
   namespace JSX {
     interface IntrinsicElements {
       webview: React.DetailedHTMLProps<

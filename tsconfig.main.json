@@ -11,7 +11,8 @@
     "outDir": "dist/main",
     "rootDir": "main",
     "sourceMap": true,
-    "declaration": false
+    "declaration": false,
+    "ignoreDeprecations": "6.0"
   },
   "include": [
     "main/**/*.ts"

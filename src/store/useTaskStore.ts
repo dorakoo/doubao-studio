@@ -1,14 +1,17 @@
 /**
  * src/store/useTaskStore.ts
- * 任务调度状态（Zustand）
+ * 任务调度状态（Zustand） — V2 自动化执行
  *
- * 管理任务队列、添加/指派/状态流转、批量操作
+ * 管理任务队列、添加/指派/状态流转、批量操作、自动化执行
  */
 
 import { create } from 'zustand';
 import type { Task, TaskStatus } from '../types';
 
 // ==================== 类型 ====================
+
+/** 自动化执行状态 */
+export type AutomationState = 'idle' | 'injecting' | 'submitting' | 'generating' | 'completed' | 'failed';
 
 interface TaskState {
   /** 所有任务列表 */
@@ -17,6 +20,13 @@ interface TaskState {
   loading: boolean;
   /** 错误信息 */
   error: string | null;
+
+  /** 当前正在自动化执行的任务 ID */
+  activeTaskId: string | null;
+  /** 自动化执行状态 */
+  automationState: AutomationState;
+  /** 自动化轮询定时器引用（用于清理） */
+  pollingTimerId: ReturnType<typeof setInterval> | null;
 
   // Actions
   /** 从主进程加载任务列表 */
@@ -35,6 +45,20 @@ interface TaskState {
   getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
   /** 清除错误 */
   clearError: () => void;
+
+  // V2 自动化方法
+  /** 启动自动化执行：将任务设为 executing 状态 */
+  startAutomation: (taskId: string) => void;
+  /** 更新自动化状态 */
+  setAutomationState: (state: AutomationState) => void;
+  /** 完成任务：记录结果 URL 并更新状态 */
+  completeAutomation: (taskId: string, resultUrl: string) => Promise<void>;
+  /** 任务失败 */
+  failAutomation: (taskId: string, errorMsg: string) => Promise<void>;
+  /** 清除自动化状态 */
+  clearAutomation: () => void;
+  /** 获取下一个排队任务 */
+  getNextQueuedTask: () => Task | null;
 }
 
 // ==================== Store ====================
@@ -43,8 +67,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   loading: false,
   error: null,
+  activeTaskId: null,
+  automationState: 'idle',
+  pollingTimerId: null,
 
-  // 加载任务列表
+  // ---- 基础操作 ----
+
   loadTasks: async () => {
     set({ loading: true, error: null });
     try {
@@ -55,10 +83,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  // 批量添加任务
   addTasks: async (text: string) => {
     set({ error: null });
-    // 按行拆分，过滤空行
     const prompts = text
       .split('\n')
       .map((line) => line.trim())
@@ -85,7 +111,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  // 指派任务给账号
   assignTask: async (taskId: string, accountId: string) => {
     set({ error: null });
     try {
@@ -108,7 +133,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  // 更新任务状态
   updateTaskStatus: async (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => {
     await window.electronAPI.tasks.updateStatus(taskId, status, result, outputs);
     const tasks = get().tasks.map((t) =>
@@ -125,7 +149,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     set({ tasks });
   },
 
-  // 删除任务
   deleteTask: async (taskId: string) => {
     set({ error: null });
     try {
@@ -144,13 +167,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  // 批量暂停
   batchPause: async () => {
     try {
       const result = await window.electronAPI.tasks.batchPause();
       if (result.success) {
         const tasks = get().tasks.map((t) =>
-          t.status === 'running' ? { ...t, status: 'queued' as TaskStatus } : t
+          t.status === 'executing' || t.status === 'generating'
+            ? { ...t, status: 'queued' as TaskStatus }
+            : t
         );
         set({ tasks });
         return true;
@@ -161,11 +185,113 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  // 获取已完成产物
   getCompletedOutputs: async () => {
     return window.electronAPI.tasks.getCompletedOutputs();
   },
 
-  // 清除错误
   clearError: () => set({ error: null }),
+
+  // ---- V2 自动化方法 ----
+
+  startAutomation: (taskId: string) => {
+    const tasks = get().tasks.map((t) =>
+      t.id === taskId
+        ? { ...t, status: 'executing' as TaskStatus, updatedAt: new Date().toISOString() }
+        : t
+    );
+    // 清除之前的定时器
+    const prevTimer = get().pollingTimerId;
+    if (prevTimer) clearInterval(prevTimer);
+
+    set({
+      tasks,
+      activeTaskId: taskId,
+      automationState: 'injecting',
+    });
+  },
+
+  setAutomationState: (state: AutomationState) => {
+    set({ automationState: state });
+  },
+
+  completeAutomation: async (taskId: string, resultUrl: string) => {
+    // 清除轮询定时器
+    const timer = get().pollingTimerId;
+    if (timer) {
+      clearInterval(timer);
+    }
+
+    await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, [resultUrl]);
+    const tasks = get().tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            status: 'done' as TaskStatus,
+            result: resultUrl,
+            outputs: [resultUrl],
+            updatedAt: new Date().toISOString(),
+          }
+        : t
+    );
+    set({
+      tasks,
+      activeTaskId: null,
+      automationState: 'completed',
+      pollingTimerId: null,
+    });
+
+    // 完成后将对应账号状态设回 idle
+    const task = tasks.find((t) => t.id === taskId);
+    if (task?.assignedAccountId) {
+      window.electronAPI.accounts.setStatus(task.assignedAccountId, 'idle');
+    }
+  },
+
+  failAutomation: async (taskId: string, errorMsg: string) => {
+    const timer = get().pollingTimerId;
+    if (timer) {
+      clearInterval(timer);
+    }
+
+    await window.electronAPI.tasks.updateStatus(taskId, 'fail', errorMsg);
+    const tasks = get().tasks.map((t) =>
+      t.id === taskId
+        ? {
+            ...t,
+            status: 'fail' as TaskStatus,
+            result: errorMsg,
+            updatedAt: new Date().toISOString(),
+          }
+        : t
+    );
+    set({
+      tasks,
+      activeTaskId: null,
+      automationState: 'failed',
+      pollingTimerId: null,
+    });
+
+    // 失败后将对应账号状态设回 idle
+    const task = tasks.find((t) => t.id === taskId);
+    if (task?.assignedAccountId) {
+      window.electronAPI.accounts.setStatus(task.assignedAccountId, 'idle');
+    }
+  },
+
+  clearAutomation: () => {
+    const timer = get().pollingTimerId;
+    if (timer) {
+      clearInterval(timer);
+    }
+    set({
+      activeTaskId: null,
+      automationState: 'idle',
+      pollingTimerId: null,
+    });
+  },
+
+  getNextQueuedTask: () => {
+    const tasks = get().tasks;
+    return tasks.find((t) => t.status === 'queued' && t.assignedAccountId !== null) || null;
+  },
 }));

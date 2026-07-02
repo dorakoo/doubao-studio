@@ -1,310 +1,375 @@
 /**
  * src/components/BrowserPanel.tsx
- * 内嵌浏览器面板
+ * 内嵌浏览器面板 — V2 自动化执行
  *
- * 功能：
- * - 使用 Electron webview 标签加载豆包网页
- * - 每个账号的浏览器会话完全隔离（通过 partition 属性）
- * - 支持刷新、前进、后退导航
- * - 显示当前加载状态
+ * 核心职责：
+ * 1. 展示对应账号的 webview，隔离 session
+ * 2. 接收自动化任务 → 注入提示词 → 提交 → 轮询结果
+ * 3. 管理 webview 导航（前进/后退/刷新/首页）
  */
 
-import React, { useRef, useEffect, useState, useCallback } from 'react';
-import {
-  ReloadOutlined,
-  ArrowLeftOutlined,
-  ArrowRightOutlined,
-  HomeOutlined,
-  GlobalOutlined,
-  LoadingOutlined,
-} from '@ant-design/icons';
-import { Tooltip, Empty, Spin } from 'antd';
+import React, { useRef, useEffect, useCallback, useState } from 'react';
+import type { Account, Task } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
+import {
+  useTaskStore,
+  type AutomationState,
+} from '../store/useTaskStore';
+import {
+  injectPrompt,
+  submitPrompt,
+  checkGenerating,
+  getResultUrl,
+  navigateToChat,
+} from '../utils/doubaoBridge';
 
-/** webview 标签的类型（Electron 渲染进程中可用） */
-interface WebviewElement extends HTMLElement {
-  getURL(): string;
-  loadURL(url: string): void;
-  reload(): void;
-  goBack(): void;
-  goForward(): void;
-  canGoBack(): boolean;
-  canGoForward(): boolean;
-  addEventListener(
-    type: string,
-    listener: EventListenerOrEventListenerObject,
-    options?: boolean | AddEventListenerOptions
-  ): void;
-  removeEventListener(
-    type: string,
-    listener: EventListenerOrEventListenerObject,
-    options?: boolean | EventListenerOptions
-  ): void;
-  setAttribute(name: string, value: string): void;
+// ==================== 类型 ====================
+
+interface BrowserPanelProps {
+  /** 当前活跃账号 */
+  activeAccount: Account | null;
+  /** 浏览器刷新触发器 */
+  refreshKey: number;
+  /** 当前自动化任务 */
+  activeTask: Task | null;
 }
 
-/** 豆包首页 URL */
-const DOUBAO_URL = 'https://www.doubao.com';
+// ==================== 组件 ====================
 
-export const BrowserPanel: React.FC = () => {
-  const { accounts, selectedAccountId } = useAccountStore();
+const BrowserPanel: React.FC<BrowserPanelProps> = ({
+  activeAccount,
+  refreshKey,
+  activeTask,
+}) => {
+  /** webview 容器 DOM ref */
   const webviewRef = useRef<HTMLDivElement>(null);
-  const webviewTagRef = useRef<WebviewElement | null>(null);
+  /** webview 元素直接引用 */
+  const webviewTagRef = useRef<HTMLWebViewElement | null>(null);
 
-  const [currentUrl, setCurrentUrl] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [canGoForward, setCanGoForward] = useState(false);
-  const [webviewReady, setWebviewReady] = useState(false);
+  /** 加载状态 */
+  const [loading, setLoading] = useState(true);
+  /** 加载进度文字 */
+  const [loadText, setLoadText] = useState('加载豆包中...');
+  /** 自动化阶段 UI 状态 */
+  const [autoStage, setAutoStage] = useState<AutomationState>('idle');
+  /** 自动化消息 */
+  const [autoMessage, setAutoMessage] = useState('');
 
-  // 选中的账号
-  const selectedAccount = accounts.find((a) => a.id === selectedAccountId);
+  const updateAccountStatus = useAccountStore((s) => s.updateAccountStatus);
 
-  // ---- 当选中账号变化时，切换 webview ----
+  // ---- webview 生命周期 ----
+
+  /**
+   * 当 activeAccount 或 refreshKey 变化时，销毁旧 webview 并创建新的
+   */
   useEffect(() => {
-    if (!webviewRef.current || !selectedAccount) {
-      // 没有选中账号时清理
-      if (webviewTagRef.current) {
-        webviewTagRef.current.remove();
-        webviewTagRef.current = null;
-      }
-      setWebviewReady(false);
-      setCurrentUrl('');
-      return;
-    }
+    if (!webviewRef.current || !activeAccount) return;
 
-    // 清除旧 webview
-    if (webviewTagRef.current) {
-      webviewTagRef.current.remove();
-      webviewTagRef.current = null;
-    }
+    // 清理旧 webview
+    const container = webviewRef.current;
+    container.innerHTML = '';
 
-    setWebviewReady(false);
-    setCurrentUrl('');
-    setIsLoading(true);
+    setLoading(true);
+    setLoadText('加载豆包中...');
+    setAutoStage('idle');
+    setAutoMessage('');
 
-    // 创建新 webview 元素（使用独立的 session partition 实现隔离）
-    const webview = document.createElement('webview') as unknown as WebviewElement;
-    webview.setAttribute('src', DOUBAO_URL);
-    webview.setAttribute('partition', `persist:doubao_${selectedAccount.partition}`);
-    webview.setAttribute('allowpopups', 'false');
+    // 创建 webview
+    const webview = document.createElement('webview') as HTMLWebViewElement;
+    webviewTagRef.current = webview;
+
+    // 基础属性
+    webview.setAttribute('src', 'https://www.doubao.com/chat/');
+    webview.setAttribute('partition', activeAccount.partition);
+    webview.setAttribute('allowpopups', 'true');
     webview.setAttribute('useragent',
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
     webview.setAttribute('width', '100%');
     webview.setAttribute('height', '100%');
-    webview.style.cssText = `
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      border: none;
-      border-radius: 0;
-    `;
+    webview.style.width = '100%';
+    webview.style.height = '100%';
+    webview.style.border = 'none';
+    webview.style.outline = 'none';
 
-    // ---- webview 事件监听 ----
-    webview.addEventListener('dom-ready', () => {
-      setWebviewReady(true);
-      setIsLoading(false);
-      setCurrentUrl(webview.getURL());
-    });
-
+    // 事件监听
     webview.addEventListener('did-start-loading', () => {
-      setIsLoading(true);
+      setLoading(true);
+      setLoadText('页面加载中...');
     });
 
     webview.addEventListener('did-stop-loading', () => {
-      setIsLoading(false);
-      setCurrentUrl(webview.getURL());
+      setLoading(false);
     });
 
-    webview.addEventListener('did-navigate', (e: any) => {
-      setCurrentUrl(e.url);
+    webview.addEventListener('did-finish-load', () => {
+      setLoading(false);
+      setLoadText('豆包已就绪');
+      setTimeout(() => setLoadText(''), 1500);
     });
 
-    webview.addEventListener('did-navigate-in-page', (e: any) => {
-      if (e.isMainFrame) {
-        setCurrentUrl(e.url);
-      }
+    webview.addEventListener('did-fail-load', () => {
+      setLoading(false);
+      setLoadText('加载失败，请检查网络');
     });
 
-    // 更新导航状态
-    const updateNavState = () => {
-      try {
-        setCanGoBack(webview.canGoBack());
-        setCanGoForward(webview.canGoForward());
-      } catch {
-        // webview 可能尚未就绪
+    container.appendChild(webview);
+
+    return () => {
+      if (webviewTagRef.current) {
+        webviewTagRef.current.remove();
+        webviewTagRef.current = null;
       }
     };
+  }, [activeAccount?.id, refreshKey]);
 
-    webview.addEventListener('did-navigate', updateNavState);
-    webview.addEventListener('did-navigate-in-page', updateNavState);
-    webview.addEventListener('did-stop-loading', updateNavState);
+  // ---- V2 自动化执行 ----
 
-    // 错误处理
-    webview.addEventListener('did-fail-load', (e: any) => {
-      if (e.errorCode !== -3) {
-        // -3 是用户取消导航，忽略
-        console.error('[WebView] 加载失败:', e.errorDescription);
-        setIsLoading(false);
+  /**
+   * 监听 activeTask 变化，当有新任务到来时自动执行
+   */
+  useEffect(() => {
+    if (!activeTask || !webviewTagRef.current) return;
+
+    const webview = webviewTagRef.current;
+
+    // 执行自动化流程
+    (async () => {
+      try {
+        // 1. 等待 webview 加载完成
+        setAutoStage('injecting');
+        setAutoMessage('等待页面就绪...');
+        await waitForWebviewReady(webview, 15000);
+
+        // 2. 导航到豆包聊天页
+        await navigateToChat(webview);
+        await sleep(2000);
+
+        // 3. 注入提示词
+        setAutoStage('injecting');
+        setAutoMessage('正在注入提示词...');
+        const injected = await injectPrompt(webview, activeTask.prompt);
+        if (!injected) {
+          throw new Error('注入提示词失败：未找到输入框');
+        }
+        await sleep(800);
+
+        // 4. 提交
+        setAutoStage('submitting');
+        setAutoMessage('正在发送...');
+        const submitted = await submitPrompt(webview);
+        if (!submitted) {
+          throw new Error('提交失败：未找到发送按钮');
+        }
+
+        // 5. 轮询等待生成
+        setAutoStage('generating');
+        setAutoMessage('等待豆包生成回复...');
+
+        // 先等一小段时间让生成开始
+        await sleep(3000);
+
+        // 开始轮询（最多 5 分钟）
+        const maxAttempts = 100;
+        const intervalMs = 3000;
+        let generating = true;
+
+        for (let i = 0; i < maxAttempts; i++) {
+          await sleep(intervalMs);
+          generating = await checkGenerating(webview);
+          if (!generating) {
+            break;
+          }
+          setAutoMessage(`等待豆包生成回复... (${Math.round((i * intervalMs) / 1000)}s)`);
+        }
+
+        if (generating) {
+          throw new Error('生成超时（超过 5 分钟）');
+        }
+
+        // 6. 获取结果 URL
+        setAutoStage('completed');
+        setAutoMessage('生成完成！');
+        const resultUrl = await getResultUrl(webview);
+
+        // 7. 通知 store 完成任务
+        const { completeAutomation } = useTaskStore.getState();
+        await completeAutomation(activeTask.id, resultUrl);
+      } catch (err: any) {
+        console.error('[BrowserPanel] 自动化执行失败:', err.message);
+        setAutoStage('failed');
+        setAutoMessage(err.message);
+
+        if (activeTask) {
+          const { failAutomation } = useTaskStore.getState();
+          await failAutomation(activeTask.id, err.message);
+        }
+      }
+    })();
+  }, [activeTask?.id]);
+
+  /**
+   * 同步 automationState 到本地 autoStage
+   */
+  useEffect(() => {
+    const unsub = useTaskStore.subscribe((state) => {
+      if (state.automationState !== autoStage) {
+        setAutoStage(state.automationState);
       }
     });
+    return unsub;
+  }, [autoStage]);
 
-    webviewRef.current.appendChild(webview);
-    webviewTagRef.current = webview;
-  }, [selectedAccountId, selectedAccount?.partition]);
+  // ---- 导航方法 ----
 
-  // ---- 导航操作 ----
-  const handleGoBack = useCallback(() => {
-    if (webviewTagRef.current && webviewTagRef.current.canGoBack()) {
-      webviewTagRef.current.goBack();
-    }
-  }, []);
-
-  const handleGoForward = useCallback(() => {
-    if (webviewTagRef.current && webviewTagRef.current.canGoForward()) {
-      webviewTagRef.current.goForward();
-    }
-  }, []);
-
-  const handleReload = useCallback(() => {
+  /** 刷新 */
+  const handleRefresh = useCallback(() => {
     if (webviewTagRef.current) {
       webviewTagRef.current.reload();
     }
   }, []);
 
-  const handleGoHome = useCallback(() => {
-    if (webviewTagRef.current) {
-      webviewTagRef.current.loadURL(DOUBAO_URL);
+  /** 后退 */
+  const handleGoBack = useCallback(() => {
+    if (webviewTagRef.current?.canGoBack()) {
+      webviewTagRef.current.goBack();
     }
   }, []);
 
-  // ---- 空状态：未选中账号 ----
-  if (!selectedAccount) {
+  /** 前进 */
+  const handleGoForward = useCallback(() => {
+    if (webviewTagRef.current?.canGoForward()) {
+      webviewTagRef.current.goForward();
+    }
+  }, []);
+
+  /** 回到首页 */
+  const handleGoHome = useCallback(() => {
+    if (webviewTagRef.current) {
+      webviewTagRef.current.loadURL('https://www.doubao.com/chat/');
+    }
+  }, []);
+
+  // ---- 渲染 ----
+
+  if (!activeAccount) {
     return (
-      <div className="flex flex-col h-full bg-db-bg">
-        {/* 导航栏（禁用状态） */}
-        <div className="flex items-center gap-1 px-3 py-2 bg-db-bg-secondary border-b border-db-border">
-          <Tooltip title="后退">
-            <button className="btn-ghost opacity-30 cursor-not-allowed">
-              <ArrowLeftOutlined />
-            </button>
-          </Tooltip>
-          <Tooltip title="前进">
-            <button className="btn-ghost opacity-30 cursor-not-allowed">
-              <ArrowRightOutlined />
-            </button>
-          </Tooltip>
-          <Tooltip title="刷新">
-            <button className="btn-ghost opacity-30 cursor-not-allowed">
-              <ReloadOutlined />
-            </button>
-          </Tooltip>
-          <Tooltip title="主页">
-            <button className="btn-ghost opacity-30 cursor-not-allowed">
-              <HomeOutlined />
-            </button>
-          </Tooltip>
-
-          {/* URL 栏 */}
-          <div className="flex-1 mx-3 px-3 py-1.5 rounded-db bg-db-bg border border-db-border text-xs text-db-text-muted">
-            请在左侧选择一个账号以加载浏览器
-          </div>
-        </div>
-
-        {/* 空状态 */}
-        <div className="flex-1 flex items-center justify-center bg-db-bg">
-          <Empty
-            image={
-              <GlobalOutlined
-                style={{ fontSize: 64, color: '#38385a' }}
-              />
-            }
-            description={
-              <div className="text-db-text-muted">
-                <p className="text-sm mb-1">未选择账号</p>
-                <p className="text-xs">点击左侧账号列表中的一个账号</p>
-                <p className="text-xs">即可在此处打开隔离的豆包浏览器</p>
-              </div>
-            }
-          />
+      <div className="browser-panel-empty">
+        <div className="browser-empty-content">
+          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
+            <rect x="4" y="8" width="56" height="40" rx="4" stroke="#38385a" strokeWidth="2" />
+            <path d="M4 16h56" stroke="#38385a" strokeWidth="2" />
+            <circle cx="12" cy="12" r="2" fill="#38385a" />
+            <circle cx="19" cy="12" r="2" fill="#38385a" />
+            <circle cx="26" cy="12" r="2" fill="#38385a" />
+          </svg>
+          <p>选择一个账号以打开浏览器</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col h-full bg-db-bg">
+    <div className="browser-panel">
       {/* 导航栏 */}
-      <div className="flex items-center gap-1 px-3 py-2 bg-db-bg-secondary border-b border-db-border">
-        {/* 导航按钮 */}
-        <Tooltip title="后退">
-          <button
-            className={`btn-ghost ${!canGoBack ? 'opacity-30 cursor-not-allowed' : ''}`}
-            onClick={handleGoBack}
-            disabled={!canGoBack}
-          >
-            <ArrowLeftOutlined />
+      <div className="browser-toolbar">
+        <div className="browser-nav-buttons">
+          <button onClick={handleGoBack} title="后退">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M10.5 3L5.5 8l5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
-        </Tooltip>
-        <Tooltip title="前进">
-          <button
-            className={`btn-ghost ${!canGoForward ? 'opacity-30 cursor-not-allowed' : ''}`}
-            onClick={handleGoForward}
-            disabled={!canGoForward}
-          >
-            <ArrowRightOutlined />
+          <button onClick={handleGoForward} title="前进">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M5.5 3l5 5-5 5" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
-        </Tooltip>
-        <Tooltip title="刷新">
-          <button className="btn-ghost" onClick={handleReload}>
-            <ReloadOutlined className={isLoading ? 'animate-spin' : ''} />
+          <button onClick={handleRefresh} title="刷新">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M13.5 8a5.5 5.5 0 00-10-2.5M2.5 8a5.5 5.5 0 0010 2.5" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+              <path d="M2 3v3h3M14 13v-3h-3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
-        </Tooltip>
-        <Tooltip title="主页">
-          <button className="btn-ghost" onClick={handleGoHome}>
-            <HomeOutlined />
+          <button onClick={handleGoHome} title="回到豆包首页">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M2 6l6-4.5L14 6v7.5a.5.5 0 01-.5.5h-3.5V9H6v5H2.5a.5.5 0 01-.5-.5V6z" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round" />
+            </svg>
           </button>
-        </Tooltip>
-
-        {/* URL 栏 */}
-        <div className="flex-1 mx-3 px-3 py-1.5 rounded-db bg-db-bg border border-db-border flex items-center gap-2">
-          {isLoading ? (
-            <LoadingOutlined className="text-db-accent text-xs flex-shrink-0" />
-          ) : (
-            <GlobalOutlined className="text-db-text-muted text-xs flex-shrink-0" />
-          )}
-          <span className="text-xs text-db-text-secondary truncate flex-1">
-            {currentUrl || '加载中...'}
-          </span>
         </div>
-
-        {/* 当前账号指示 */}
-        <Tooltip title={`当前账号：${selectedAccount.name}`}>
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-db bg-db-accent/10 border border-db-accent/30 text-xs text-db-accent-light">
-            <span className="status-dot idle" />
-            {selectedAccount.name}
-          </div>
-        </Tooltip>
+        <div className="browser-url-bar">
+          <span className="browser-url-text">doubao.com</span>
+        </div>
       </div>
 
       {/* webview 容器 */}
-      <div className="flex-1 relative bg-db-bg">
-        {/* 加载覆盖层 */}
-        {isLoading && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-db-bg/60 backdrop-blur-sm">
-            <div className="flex flex-col items-center gap-3">
-              <Spin size="large" />
-              <span className="text-sm text-db-text-secondary">正在加载豆包页面...</span>
+      <div className="browser-viewport">
+        {loading && (
+          <div className="browser-loading-overlay">
+            <div className="browser-loading-spinner" />
+            <span>{loadText}</span>
+          </div>
+        )}
+
+        {/* V2 自动化状态覆盖层 */}
+        {autoStage !== 'idle' && autoStage !== 'completed' && (
+          <div className="automation-overlay">
+            <div className="automation-indicator">
+              <div className="automation-spinner" />
+              <span>{autoMessage}</span>
             </div>
           </div>
         )}
 
-        {/* webview 挂载点 */}
-        <div ref={webviewRef} style={{ position: 'relative', width: '100%', height: '100%' }} />
+        {autoStage === 'completed' && (
+          <div className="automation-toast completed">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <circle cx="9" cy="9" r="8" stroke="#34d399" strokeWidth="2" />
+              <path d="M5.5 9l2.5 2.5 4.5-5" stroke="#34d399" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>{autoMessage}</span>
+          </div>
+        )}
+
+        {autoStage === 'failed' && (
+          <div className="automation-toast failed">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <circle cx="9" cy="9" r="8" stroke="#fb7185" strokeWidth="2" />
+              <path d="M6 6l6 6M12 6l-6 6" stroke="#fb7185" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <span>执行失败: {autoMessage}</span>
+          </div>
+        )}
+
+        <div
+          ref={webviewRef}
+          style={{ position: 'relative', width: '100%', height: '100%' }}
+        />
       </div>
     </div>
   );
 };
+
+// ==================== 工具函数 ====================
+
+/** 等待 webview 加载完成 */
+function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      webview.removeEventListener('did-finish-load', onReady);
+      reject(new Error('webview 加载超时'));
+    }, timeoutMs);
+
+    const onReady = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+
+    webview.addEventListener('did-finish-load', onReady, { once: true });
+  });
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export default BrowserPanel;

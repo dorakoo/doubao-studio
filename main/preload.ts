@@ -22,7 +22,7 @@ export interface Task {
   id: string;
   prompt: string;
   assignedAccountId: string | null;
-  status: 'queued' | 'running' | 'done' | 'fail';
+  status: 'queued' | 'executing' | 'generating' | 'done' | 'fail';
   result: string | null;
   outputs: string[];
   createdAt: string;

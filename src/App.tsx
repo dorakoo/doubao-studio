@@ -1,112 +1,129 @@
 /**
  * src/App.tsx
- * 应用根组件 - 主布局
+ * 主布局组件 — 三栏式 + V2 自动化任务流
  *
- * 布局结构（三栏式）：
- * ┌──────────────────────────────────────────────────┐
- * │              顶部工具栏 (Toolbar)                  │
- * ├──────────────┬───────────────────────────────────┤
- * │  左侧面板     │                                   │
- * │  (可折叠)     │       右侧浏览器区域                │
- * │  320px       │       (BrowserPanel)               │
- * │              │                                   │
- * │  账号列表     │                                   │
- * │  (AccountList│                                   │
- * │              │                                   │
- * │  任务控制台   │                                   │
- * │  (TaskConsole│                                   │
- * │              │                                   │
- * └──────────────┴───────────────────────────────────┘
+ * 左侧：Sidebar（账号列表 + 任务控制台）
+ * 右侧：BrowserPanel（内嵌 webview + 自动化执行）
+ * 拖拽分隔线可调整左右宽度
  */
 
-import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { App as AntApp, message } from 'antd';
-import { Toolbar } from './components/Toolbar';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { BrowserPanel } from './components/BrowserPanel';
+import BrowserPanel from './components/BrowserPanel';
+import { Toolbar } from './components/Toolbar';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
+import './styles/global.css';
+
+// ==================== 常量 ====================
+
+const MIN_SIDEBAR_WIDTH = 280;
+const MAX_SIDEBAR_WIDTH = 500;
+const DEFAULT_SIDEBAR_WIDTH = 340;
+
+// ==================== 组件 ====================
 
 const App: React.FC = () => {
-  // 左侧面板折叠状态
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // 左侧面板宽度
-  const [sidebarWidth, setSidebarWidth] = useState(340);
-  // 是否正在拖拽调整宽度
-  const [isResizing, setIsResizing] = useState(false);
+  /** 左侧面板宽度 */
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  /** 是否折叠左侧面板 */
+  const [collapsed, setCollapsed] = useState(false);
 
-  const { loadAccounts, accounts, selectedAccountId } = useAccountStore();
-  const { loadTasks } = useTaskStore();
+  /** 分隔线拖拽状态 */
+  const dragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
-  // 初始加载数据
+  // Store
+  const activeAccountId = useAccountStore((s) => s.selectedAccountId);
+  const accounts = useAccountStore((s) => s.accounts);
+  const activeTaskId = useTaskStore((s) => s.activeTaskId);
+  const tasks = useTaskStore((s) => s.tasks);
+  const loadAccounts = useAccountStore((s) => s.loadAccounts);
+  const loadTasks = useTaskStore((s) => s.loadTasks);
+
+  /** 当前活跃账号对象 */
+  const activeAccount = accounts.find((a) => a.id === activeAccountId) || null;
+  /** 当前自动化任务对象 */
+  const activeTask = tasks.find((t) => t.id === activeTaskId) || null;
+
+  // ---- 初始化加载 ----
+
   useEffect(() => {
     loadAccounts();
     loadTasks();
-  }, [loadAccounts, loadTasks]);
+  }, []);
 
-  // ---- 拖拽调整面板宽度 ----
+  // ---- 面板折叠 ----
+
+  const handleToggleCollapse = useCallback(() => {
+    setCollapsed((prev) => !prev);
+  }, []);
+
+  // ---- 分隔线拖拽 ----
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
-    setIsResizing(true);
-  }, []);
+    dragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
 
-  useEffect(() => {
-    if (!isResizing) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const newWidth = Math.max(280, Math.min(500, e.clientX));
-      setSidebarWidth(newWidth);
+    const handleMouseMove = (ev: MouseEvent) => {
+      if (!dragRef.current) return;
+      const delta = ev.clientX - dragRef.current.startX;
+      const next = Math.min(
+        MAX_SIDEBAR_WIDTH,
+        Math.max(MIN_SIDEBAR_WIDTH, dragRef.current.startWidth + delta)
+      );
+      setSidebarWidth(next);
     };
 
     const handleMouseUp = () => {
-      setIsResizing(false);
+      dragRef.current = null;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isResizing]);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  }, [sidebarWidth]);
+
+  // ==================== 渲染 ====================
 
   return (
-    <AntApp>
-      <div className="flex flex-col h-screen w-screen overflow-hidden bg-db-bg select-none">
-        {/* 顶部工具栏 */}
-        <Toolbar
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed(!sidebarCollapsed)}
-        />
+    <div className="app-root">
+      {/* 顶部工具栏 */}
+      <Toolbar
+        onToggleSidebar={handleToggleCollapse}
+        sidebarCollapsed={collapsed}
+      />
 
-        {/* 主内容区 */}
-        <div className="flex flex-1 overflow-hidden">
-          {/* 左侧面板（可折叠） */}
+      {/* 主体区域 */}
+      <div className="app-body">
+        {/* 左侧面板 */}
+        <div
+          className={`app-sidebar ${collapsed ? 'collapsed' : ''}`}
+          style={{ width: collapsed ? 0 : sidebarWidth }}
+        >
+          {!collapsed && <Sidebar />}
+        </div>
+
+        {/* 分隔线 */}
+        {!collapsed && (
           <div
-            className={`flex-shrink-0 overflow-hidden transition-all duration-300 ${
-              sidebarCollapsed ? 'w-0 border-r-0' : 'border-r border-db-border'
-            }`}
-            style={{ width: sidebarCollapsed ? 0 : sidebarWidth }}
+            className="app-resizer"
+            onMouseDown={handleMouseDown}
           >
-            <Sidebar />
+            <div className="resizer-handle" />
           </div>
+        )}
 
-          {/* 拖拽分隔线 */}
-          {!sidebarCollapsed && (
-            <div
-              className={`resize-handle ${isResizing ? 'bg-db-accent/50' : ''}`}
-              onMouseDown={handleMouseDown}
-            />
-          )}
-
-          {/* 右侧浏览器面板 */}
-          <div className="flex-1 overflow-hidden">
-            <BrowserPanel />
-          </div>
+        {/* 右侧浏览器 */}
+        <div className="app-browser">
+          <BrowserPanel
+            activeAccount={activeAccount}
+            refreshKey={0}
+            activeTask={activeTask}
+          />
         </div>
       </div>
-    </AntApp>
+    </div>
   );
 };
 

@@ -32,8 +32,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   const { tasks, batchPause, getCompletedOutputs } = useTaskStore();
   const [isPaused, setIsPaused] = React.useState(false);
 
-  // 运行中的任务数
-  const runningCount = tasks.filter((t) => t.status === 'running').length;
+  // 运行中的任务数（包含 executing + generating）
+  const runningCount = tasks.filter(
+    (t) => t.status === 'executing' || t.status === 'generating'
+  ).length;
   // 排队中的任务数
   const queuedCount = tasks.filter((t) => t.status === 'queued').length;
   // 已完成且有产物的任务数

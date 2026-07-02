@@ -10,8 +10,8 @@ import { v4 as uuidv4 } from 'uuid';
 
 // ==================== 类型定义 ====================
 
-/** 任务状态 */
-export type TaskStatus = 'queued' | 'running' | 'done' | 'fail';
+/** 任务状态（V2 扩展） */
+export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
 
 /** 任务数据结构 */
 export interface Task {
@@ -92,8 +92,8 @@ export function registerTaskIPC(): void {
       if (!task) {
         return { success: false, error: '任务不存在' };
       }
-      if (task.status === 'running') {
-        return { success: false, error: '任务正在执行中，无法重新指派' };
+      if (task.status === 'executing' || task.status === 'generating') {
+        return { success: false, error: '任务正在自动化执行中，无法重新指派' };
       }
 
       task.assignedAccountId = params.accountId;
@@ -150,7 +150,7 @@ export function registerTaskIPC(): void {
     async (): Promise<{ success: boolean }> => {
       const tasks = loadTasks();
       for (const task of tasks) {
-        if (task.status === 'running') {
+        if (task.status === 'executing' || task.status === 'generating') {
           task.status = 'queued';
           task.updatedAt = new Date().toISOString();
         }

@@ -9,7 +9,7 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { AccountList } from './AccountList';
-import { TaskConsole } from './TaskConsole';
+import TaskConsole from './TaskConsole';
 
 export const Sidebar: React.FC = () => {
   // 上下两部分的分隔比例（0.4 = 账号区占 40%，任务区占 60%）

@@ -17,8 +17,8 @@ export interface Account {
   updatedAt: string;
 }
 
-/** 任务状态 */
-export type TaskStatus = 'queued' | 'running' | 'done' | 'fail';
+/** 任务状态（V2 扩展） */
+export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
 
 /** 任务数据结构 */
 export interface Task {
@@ -35,7 +35,8 @@ export interface Task {
 /** 任务状态标签配置 */
 export const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; className: string }> = {
   queued: { label: '排队中', color: '#60a5fa', className: 'queued' },
-  running: { label: '执行中', color: '#fbbf24', className: 'running' },
+  executing: { label: '注入中', color: '#a78bfa', className: 'executing' },
+  generating: { label: '生成中', color: '#fbbf24', className: 'generating' },
   done: { label: '已完成', color: '#34d399', className: 'done' },
   fail: { label: '失败', color: '#fb7185', className: 'fail' },
 };

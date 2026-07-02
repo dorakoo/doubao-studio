@@ -199,3 +199,151 @@ body {
   height: 100%;
   border: none;
 }
+
+/* ============================================
+   V2 自动化执行样式
+   ============================================ */
+
+/* 自动化覆盖层 */
+.automation-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  background: rgba(15, 15, 20, 0.7);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.automation-indicator {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 40px;
+  background: #1a1a24;
+  border: 1px solid #2a2a3e;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+}
+
+.automation-indicator span {
+  color: #a29bfe;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.automation-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #2a2a3e;
+  border-top-color: #6c5ce7;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 自动化 Toast 提示 */
+.automation-toast {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  animation: toastSlideIn 0.3s ease-out;
+}
+
+.automation-toast.completed {
+  background: rgba(52, 211, 153, 0.15);
+  border: 1px solid rgba(52, 211, 153, 0.3);
+  color: #34d399;
+}
+
+.automation-toast.failed {
+  background: rgba(251, 113, 133, 0.15);
+  border: 1px solid rgba(251, 113, 133, 0.3);
+  color: #fb7185;
+}
+
+@keyframes toastSlideIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* 任务状态标签 */
+.task-status-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border: 1px solid;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.task-status-tag.queued { background: rgba(96,165,250,0.1); border-color: rgba(96,165,250,0.3); color: #60a5fa; }
+.task-status-tag.executing { background: rgba(167,139,250,0.1); border-color: rgba(167,139,250,0.3); color: #a78bfa; }
+.task-status-tag.generating { background: rgba(251,191,36,0.1); border-color: rgba(251,191,36,0.3); color: #fbbf24; }
+.task-status-tag.done { background: rgba(52,211,153,0.1); border-color: rgba(52,211,153,0.3); color: #34d399; }
+.task-status-tag.fail { background: rgba(251,113,133,0.1); border-color: rgba(251,113,133,0.3); color: #fb7185; }
+
+/* 任务项高亮 */
+.task-item-active {
+  border-left: 2px solid #a78bfa !important;
+  background: rgba(108, 92, 231, 0.08) !important;
+}
+
+/* 任务进度文字 */
+.task-progress-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #a29bfe;
+  font-size: 12px;
+}
+
+/* 任务结果链接 */
+.task-result-link {
+  color: #a29bfe;
+  font-size: 12px;
+  text-decoration: none;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-result-link:hover { color: #6c5ce7; text-decoration: underline; }
+
+/* 任务错误信息 */
+.task-error-text { color: #fb7185; font-size: 11px; margin-top: 4px; line-height: 1.4; word-break: break-all; }
+
+/* 统计徽章 */
+.stat-badge { display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+.stat-badge.queued { background: rgba(96,165,250,0.12); color: #60a5fa; }
+.stat-badge.running { background: rgba(167,139,250,0.12); color: #a78bfa; }
+.stat-badge.done { background: rgba(52,211,153,0.12); color: #34d399; }
+.stat-badge.fail { background: rgba(251,113,133,0.12); color: #fb7185; }
+
+/* 任务控制台错误 */
+.task-console-error {
+  display: flex; align-items: center; padding: 8px 12px; margin: 0 8px 8px;
+  background: rgba(251,113,133,0.1); border: 1px solid rgba(251,113,133,0.25);
+  border-radius: 6px; color: #fb7185; font-size: 12px;
+}
