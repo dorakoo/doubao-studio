@@ -127,7 +127,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             ? { ...t, assignedAccountId: accountId, updatedAt: new Date().toISOString() }
             : t
         );
-        set({ tasks });
+        set({
+          tasks,
+          activeTaskId: null,
+          automationState: 'idle',
+          pollingTimerId: null,
+        });
         // 自动切换到被指派的账号
         useAccountStore.getState().selectAccount(accountId);
         // 如果当前没有正在执行的任务，自动启动

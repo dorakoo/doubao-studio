@@ -145,15 +145,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (useTaskStore.getState().automationState !== 'idle') return;
 
         // 1. 等待 webview 加载完成
+        console.log('[BrowserPanel] waitForWebviewReady 开始');
         useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('等待页面就绪...');
         await waitForWebviewReady(webview, 15000);
+        console.log('[BrowserPanel] waitForWebviewReady 完成');
 
         // 2. 导航到豆包聊天页，用 waitForChatReady 等 DOM 就绪
+        console.log('[BrowserPanel] navigateToChat 开始');
         await navigateToChat(webview);
         await waitForWebviewReady(webview, 15000);
+        console.log('[BrowserPanel] navigateToChat + waitForWebviewReady 完成');
 
         // 3. 注入提示词（10s 超时保护）
+        console.log('[BrowserPanel] injectPrompt 开始, prompt:', activeTask.prompt.substring(0, 50));
         useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('正在注入提示词...');
         const injected = await Promise.race([
@@ -162,12 +167,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             setTimeout(() => reject(new Error('注入提示词超时（10s）')), 10000)
           ),
         ]);
+        console.log('[BrowserPanel] injectPrompt 结果:', injected);
         if (!injected) {
           throw new Error('注入提示词失败：未找到输入框');
         }
         await sleep(800);
 
         // 4. 提交（10s 超时保护）
+        console.log('[BrowserPanel] submitPrompt 开始');
         useTaskStore.getState().setAutomationState('submitting');
         setAutoMessage('正在发送...');
         const submitted = await Promise.race([
@@ -176,6 +183,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             setTimeout(() => reject(new Error('提交超时（10s）')), 10000)
           ),
         ]);
+        console.log('[BrowserPanel] submitPrompt 结果:', submitted);
         if (!submitted) {
           throw new Error('提交失败：未找到发送按钮');
         }
