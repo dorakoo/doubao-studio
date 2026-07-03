@@ -14,6 +14,7 @@ export interface Account {
   avatar: string;
   partition: string;
   status: 'idle' | 'busy' | 'error';
+  pinned: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -56,6 +57,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** 更新账号状态 */
     setStatus: (id: string, status: string): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('accounts:setStatus', { id, status }),
+
+    /** 切换账号置顶状态 */
+    setPinned: (id: string, pinned: boolean): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('accounts:setPinned', { id, pinned }),
 
     /** 获取账号的 Session 分区名 */
     getPartition: (id: string): Promise<string | null> =>

@@ -64,6 +64,7 @@ export interface ElectronAPI {
     delete: (id: string) => Promise<{ success: boolean; error?: string }>;
     refresh: (id: string) => Promise<{ success: boolean; error?: string }>;
     setStatus: (id: string, status: string) => Promise<{ success: boolean }>;
+    setPinned: (id: string, pinned: boolean) => Promise<{ success: boolean }>;
     getPartition: (id: string) => Promise<string | null>;
   };
   tasks: {

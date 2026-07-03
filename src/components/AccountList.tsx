@@ -1,16 +1,15 @@
 /**
  * src/components/AccountList.tsx
- * 账号列表组件
+ * 账号列表组件 — V2 实时状态 + 自动排序 + 手动置顶
  *
  * 功能：
- * - 展示已添加的豆包账号（头像+昵称+状态标签）
- * - 添加账号按钮
- * - 点击选中账号，右侧加载对应浏览器
- * - 右键菜单：编辑、删除、刷新
- * - 账号数据通过 IPC 持久化到本地 JSON
+ * - 实时显示每个账号的执行状态（空闲/注入中/生成中等）
+ * - 自动排序：置顶账号 → 空闲账号 → 忙碌账号
+ * - 手动置顶/取消置顶，优先级最高
+ * - 添加/编辑/删除/刷新账号
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   PlusOutlined,
   UserOutlined,
@@ -18,12 +17,16 @@ import {
   DeleteOutlined,
   ReloadOutlined,
   MoreOutlined,
+  PushpinOutlined,
+  PushpinFilled,
 } from '@ant-design/icons';
 import { Input, Modal, Dropdown, message, Empty, Tooltip } from 'antd';
 import type { MenuProps } from 'antd';
 import { useAccountStore } from '../store/useAccountStore';
-import { ACCOUNT_STATUS_CONFIG } from '../types';
+import { useTaskStore } from '../store/useTaskStore';
+import { AUTO_STATE_DISPLAY } from '../types';
 import type { Account } from '../types';
+import type { AutomationState } from '../store/useTaskStore';
 
 export const AccountList: React.FC = () => {
   const {
@@ -36,8 +39,14 @@ export const AccountList: React.FC = () => {
     deleteAccount,
     refreshAccount,
     selectAccount,
+    togglePinned,
     clearError,
   } = useAccountStore();
+
+  // 订阅任务 store，获取实时执行状态
+  const accountBusy = useTaskStore(s => s.accountBusy);
+  const accountAutomationState = useTaskStore(s => s.accountAutomationState);
+  const accountAutoMessage = useTaskStore(s => s.accountAutoMessage);
 
   // 添加账号弹窗
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -49,6 +58,46 @@ export const AccountList: React.FC = () => {
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editName, setEditName] = useState('');
   const [editing, setEditing] = useState(false);
+
+  // ---- 实时状态计算 ----
+  /** 获取账号的实时展示状态 */
+  const getAccountDisplay = useCallback(
+    (accountId: string): { label: string; color: string; animated: boolean; detail: string } => {
+      const autoState = accountAutomationState[accountId] as AutomationState | undefined;
+      if (autoState && autoState !== 'idle') {
+        const display = AUTO_STATE_DISPLAY[autoState] || AUTO_STATE_DISPLAY.idle;
+        return {
+          ...display,
+          detail: accountAutoMessage[accountId] || '',
+        };
+      }
+      const isBusy = accountBusy[accountId];
+      if (isBusy) {
+        return { label: '忙碌', color: '#fbbf24', animated: true, detail: '' };
+      }
+      return { label: '空闲', color: '#4ade80', animated: false, detail: '' };
+    },
+    [accountAutomationState, accountBusy, accountAutoMessage]
+  );
+
+  // ---- 排序逻辑 ----
+  /** 置顶优先 → 空闲靠前 → 忙碌靠后 */
+  const sortedAccounts = useMemo(() => {
+    return [...accounts].sort((a, b) => {
+      // 1. 置顶优先
+      if (a.pinned !== b.pinned) {
+        return a.pinned ? -1 : 1;
+      }
+      // 2. 空闲 vs 忙碌
+      const aBusy = accountBusy[a.id] || false;
+      const bBusy = accountBusy[b.id] || false;
+      if (aBusy !== bBusy) {
+        return aBusy ? 1 : -1;
+      }
+      // 3. 同为空闲或同为忙碌，按原始顺序
+      return 0;
+    });
+  }, [accounts, accountBusy]);
 
   // ---- 添加账号 ----
   const handleAddAccount = useCallback(async () => {
@@ -111,9 +160,24 @@ export const AccountList: React.FC = () => {
     [refreshAccount]
   );
 
+  // ---- 置顶/取消置顶 ----
+  const handleTogglePinned = useCallback(
+    async (account: Account, e?: React.MouseEvent) => {
+      e?.stopPropagation();
+      await togglePinned(account.id);
+    },
+    [togglePinned]
+  );
+
   // ---- 右键菜单 ----
   const getContextMenuItems = useCallback(
     (account: Account): MenuProps['items'] => [
+      {
+        key: 'pin',
+        label: account.pinned ? '取消置顶' : '置顶',
+        icon: account.pinned ? <PushpinFilled /> : <PushpinOutlined />,
+        onClick: () => handleTogglePinned(account),
+      },
       {
         key: 'edit',
         label: '编辑',
@@ -139,7 +203,7 @@ export const AccountList: React.FC = () => {
         onClick: () => handleDeleteAccount(account),
       },
     ],
-    [handleDeleteAccount, handleRefreshAccount]
+    [handleDeleteAccount, handleRefreshAccount, handleTogglePinned]
   );
 
   return (
@@ -159,7 +223,7 @@ export const AccountList: React.FC = () => {
 
       {/* 账号列表 */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {accounts.length === 0 ? (
+        {sortedAccounts.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -171,9 +235,9 @@ export const AccountList: React.FC = () => {
             />
           </div>
         ) : (
-          accounts.map((account) => {
-            const statusConfig = ACCOUNT_STATUS_CONFIG[account.status];
+          sortedAccounts.map((account) => {
             const isSelected = selectedAccountId === account.id;
+            const display = getAccountDisplay(account.id);
 
             return (
               <Dropdown
@@ -206,23 +270,53 @@ export const AccountList: React.FC = () => {
                     )}
                   </div>
 
-                  {/* 名称 + 状态 */}
+                  {/* 名称 + 实时状态 */}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-db-text-primary truncate">
-                      {account.name}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span
-                        className="status-dot"
-                        style={{
-                          backgroundColor: statusConfig.color,
-                        }}
-                      />
-                      <span className="text-2xs text-db-text-muted">
-                        {statusConfig.label}
+                    <div className="flex items-center gap-1.5">
+                      {/* 置顶标记 */}
+                      {account.pinned && (
+                        <PushpinFilled
+                          className="text-[10px] text-db-accent flex-shrink-0"
+                          title="已置顶"
+                        />
+                      )}
+                      <span className="text-sm font-medium text-db-text-primary truncate">
+                        {account.name}
                       </span>
                     </div>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      {/* 状态指示点 */}
+                      <span
+                        className={`status-dot ${display.animated ? 'animate-pulse' : ''}`}
+                        style={{ backgroundColor: display.color }}
+                      />
+                      <span className="text-2xs text-db-text-muted">
+                        {display.label}
+                      </span>
+                      {/* 详细状态信息 */}
+                      {display.detail && (
+                        <span className="text-2xs text-db-text-muted truncate ml-1 opacity-70">
+                          {display.detail}
+                        </span>
+                      )}
+                    </div>
                   </div>
+
+                  {/* 置顶快捷按钮 */}
+                  <Tooltip title={account.pinned ? '取消置顶' : '置顶'}>
+                    <button
+                      className={`btn-ghost w-6 h-6 flex-shrink-0 ${
+                        account.pinned ? 'text-db-accent' : 'text-db-text-muted opacity-40 hover:opacity-100'
+                      }`}
+                      onClick={(e) => handleTogglePinned(account, e)}
+                    >
+                      {account.pinned ? (
+                        <PushpinFilled style={{ fontSize: 12 }} />
+                      ) : (
+                        <PushpinOutlined style={{ fontSize: 12 }} />
+                      )}
+                    </button>
+                  </Tooltip>
 
                   {/* 操作按钮 */}
                   <Dropdown

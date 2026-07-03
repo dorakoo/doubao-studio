@@ -35,6 +35,8 @@ interface AccountState {
   selectAccount: (id: string | null) => void;
   /** 更新账号状态 */
   updateAccountStatus: (id: string, status: AccountStatus) => Promise<void>;
+  /** 切换置顶状态 */
+  togglePinned: (id: string) => Promise<void>;
   /** 清除错误 */
   clearError: () => void;
 }
@@ -52,7 +54,9 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const accounts = await window.electronAPI.accounts.list();
-      set({ accounts, loading: false });
+      // 兼容旧数据：如果没有 pinned 字段，默认为 false
+      const normalized = accounts.map(a => ({ ...a, pinned: a.pinned ?? false }));
+      set({ accounts: normalized, loading: false });
     } catch (err: any) {
       set({ error: err.message, loading: false });
     }
@@ -146,6 +150,18 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     await window.electronAPI.accounts.setStatus(id, status);
     const accounts = get().accounts.map((a) =>
       a.id === id ? { ...a, status } : a
+    );
+    set({ accounts });
+  },
+
+  // 切换置顶状态
+  togglePinned: async (id: string) => {
+    const account = get().accounts.find(a => a.id === id);
+    if (!account) return;
+    const newPinned = !account.pinned;
+    await window.electronAPI.accounts.setPinned(id, newPinned);
+    const accounts = get().accounts.map((a) =>
+      a.id === id ? { ...a, pinned: newPinned, updatedAt: new Date().toISOString() } : a
     );
     set({ accounts });
   },

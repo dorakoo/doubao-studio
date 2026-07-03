@@ -22,6 +22,8 @@ export interface Account {
   /** Session 分区名（每个账号独立） */
   partition: string;
   status: AccountStatus;
+  /** 是否手动置顶 */
+  pinned: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -102,6 +104,7 @@ export function registerAccountIPC(): void {
           avatar: '', // 后续从豆包页面抓取
           partition: `account_${uuidv4().slice(0, 8)}`,
           status: 'idle',
+          pinned: false,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
@@ -186,6 +189,21 @@ export function registerAccountIPC(): void {
       const account = accounts.find((a) => a.id === params.id);
       if (account) {
         account.status = params.status;
+        account.updatedAt = new Date().toISOString();
+        saveAccounts(accounts);
+      }
+      return { success: true };
+    }
+  );
+
+  // ---- 切换置顶状态 ----
+  ipcMain.handle(
+    'accounts:setPinned',
+    async (_event, params: { id: string; pinned: boolean }): Promise<{ success: boolean }> => {
+      const accounts = loadAccounts();
+      const account = accounts.find((a) => a.id === params.id);
+      if (account) {
+        account.pinned = params.pinned;
         account.updatedAt = new Date().toISOString();
         saveAccounts(accounts);
       }
