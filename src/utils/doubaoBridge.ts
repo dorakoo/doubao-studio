@@ -255,38 +255,70 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           }
         }
 
-        // ========== 策略D：AI创作页面的发送按钮 ==========
-        // 可能是带 SVG 图标的蓝色圆形按钮，或者 div/span 带 click handler
-        if (!sendBtn) {
-          // 找发送图标附近的可点击元素
-          var sendIcons = document.querySelectorAll('[class*="send"], [class*="Send"], [class*="submit"], [class*="arrow-up"]');
-          for (var i = 0; i < sendIcons.length; i++) {
-            var el = sendIcons[i];
-            if (el.offsetParent !== null && !el.disabled) {
-              sendBtn = el;
-              break;
+        // ========== 策略D：AI创作页面的蓝色圆形发送按钮 ==========
+        // 在 textarea 右下方，通常是蓝色圆形带箭头图标
+        if (!sendBtn && foundTa) {
+          var taRect = foundTa.getBoundingClientRect();
+          var searchArea = document.elementsFromPoint(
+            taRect.right - 40,
+            taRect.bottom - 20
+          );
+          for (var i = 0; i < searchArea.length; i++) {
+            var el = searchArea[i];
+            if (el.tagName === 'BUTTON' || el.getAttribute('role') === 'button' ||
+                (el.click && window.getComputedStyle(el).cursor === 'pointer')) {
+              // 排除 tag/label 类元素（如"图像生成 x"）
+              var cls = (el.className || '').toLowerCase();
+              var text = (el.textContent || '').trim();
+              if (text.length < 30 && !cls.includes('tag') && !text.includes('x') && !text.includes('×')) {
+                sendBtn = el;
+                break;
+              }
             }
           }
         }
 
-        // ========== 策略E：通过 SVG 路径或图标找发送按钮 ==========
+        // ========== 策略E：通过 SVG 箭头图标找发送按钮 ==========
         if (!sendBtn) {
           var allSvg = document.querySelectorAll('svg');
           for (var i = 0; i < allSvg.length; i++) {
             var svg = allSvg[i];
-            var parent = svg.parentElement;
-            while (parent && parent !== document.body) {
-              if (parent.click && parent.offsetParent !== null) {
-                // 检查是否是按钮状元素
-                var style = window.getComputedStyle(parent);
-                if (style.cursor === 'pointer' || parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'button') {
-                  sendBtn = parent;
-                  break;
+            // 找向上箭头 SVG（发送图标通常是 arrow-up）
+            var svgHtml = svg.outerHTML || '';
+            if (svgHtml.includes('arrow') || svgHtml.includes('Arrow') || svgHtml.includes('send')) {
+              var parent = svg.parentElement;
+              while (parent && parent !== document.body) {
+                if (parent.click && parent.offsetParent !== null) {
+                  var style = window.getComputedStyle(parent);
+                  if (style.cursor === 'pointer' || parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'button') {
+                    sendBtn = parent;
+                    break;
+                  }
                 }
+                parent = parent.parentElement;
               }
-              parent = parent.parentElement;
+              if (sendBtn) break;
             }
-            if (sendBtn) break;
+          }
+        }
+
+        // ========== 策略F：textarea 附近右下角的可点击元素 ==========
+        if (!sendBtn && foundTa) {
+          var taRect2 = foundTa.getBoundingClientRect();
+          // 在 textarea 右下角区域搜索
+          var nearbyEls = document.querySelectorAll('button, [role="button"], [onclick]');
+          for (var i = 0; i < nearbyEls.length; i++) {
+            var el = nearbyEls[i];
+            var rect = el.getBoundingClientRect();
+            // 在 textarea 右侧或下方 60px 范围内
+            if (rect.left > taRect2.right - 80 && rect.top > taRect2.bottom - 60 &&
+                rect.top < taRect2.bottom + 20 && !el.disabled) {
+              var text2 = (el.textContent || '').trim();
+              if (text2.length < 20) {
+                sendBtn = el;
+                break;
+              }
+            }
           }
         }
 
@@ -519,35 +551,76 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
 
 /**
  * 在 AI 创作页面点击 Tab 切换模式（图像/视频）
- * 豆包统一页面底部有「图像」「视频」Tab
+ * 豆包统一页面底部输入框下方有「图像」「视频」Tab
+ * 注意：必须排除左侧边栏菜单中的同名元素
  */
 export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'): Promise<boolean> {
   const tabLabel = mode === 'image' ? '图像' : '视频';
   const code = `
     (function() {
       try {
-        // 策略1：找包含目标文字的 tab 元素
         var allEls = document.querySelectorAll('div, span, button, a, [role="tab"]');
+
+        // 先找到 textarea 输入框的位置
+        var textarea = document.querySelector('textarea');
+        var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
+        var viewportHeight = window.innerHeight;
+
+        // 收集所有文本匹配的元素
+        var candidates = [];
         for (var i = 0; i < allEls.length; i++) {
           var el = allEls[i];
           var text = (el.textContent || '').trim();
-          if (text === '${tabLabel}' && el.offsetParent !== null) {
-            el.click();
-            return { ok: true, method: 'text-match', tag: el.tagName };
+          if (text !== '${tabLabel}') continue;
+          if (el.offsetParent === null) continue;
+
+          var rect = el.getBoundingClientRect();
+          // 必须在视口内
+          if (rect.top < 0 || rect.left < 0) continue;
+
+          candidates.push({
+            el: el,
+            rect: rect,
+            tag: el.tagName,
+            // 优先：在 textarea 下方且靠近底部（Tab 在输入框下面）
+            nearTextarea: textareaRect && rect.top > textareaRect.bottom && rect.top < viewportHeight,
+            // 次优先：在页面下半部分（排除顶部导航/侧边栏）
+            inBottomHalf: rect.top > viewportHeight * 0.5,
+            // 排除：左侧边栏区域（x < 300 通常是侧边栏）
+            notInSidebar: rect.left > 280,
+            // 元素大小（Tab 按钮通常较小）
+            isSmall: rect.width < 120 && rect.height < 50,
+          });
+        }
+
+        // 优先选择：在 textarea 下方 + 不在侧边栏 + 小元素
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (c.nearTextarea && c.notInSidebar && c.isSmall) {
+            c.el.click();
+            return { ok: true, method: 'near-textarea', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
           }
         }
 
-        // 策略2：模糊匹配（包含目标文字）
-        for (var i = 0; i < allEls.length; i++) {
-          var el = allEls[i];
-          var text = (el.textContent || '').trim();
-          if (text.includes('${tabLabel}') && el.offsetParent !== null && text.length < 10) {
-            el.click();
-            return { ok: true, method: 'text-contains', tag: el.tagName };
+        // 次优先：在页面下半部分 + 不在侧边栏
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (c.inBottomHalf && c.notInSidebar) {
+            c.el.click();
+            return { ok: true, method: 'bottom-half', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
           }
         }
 
-        return { ok: false, error: '未找到${tabLabel}Tab' };
+        // 兜底：不在侧边栏的任何匹配元素
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (c.notInSidebar) {
+            c.el.click();
+            return { ok: true, method: 'not-sidebar', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+          }
+        }
+
+        return { ok: false, error: '未找到${tabLabel}Tab, candidates=' + candidates.length };
       } catch (e) {
         return { ok: false, error: e.message };
       }
@@ -555,11 +628,11 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
   `;
 
   try {
-    const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string; tag?: string }>(
+    const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string; tag?: string; pos?: string }>(
       webview, code, 5000, 'clickAITab'
     );
     if (result.ok) {
-      console.log(`[doubaoBridge] 已点击${tabLabel}Tab, 方法: ${result.method}, tag: ${result.tag}`);
+      console.log(`[doubaoBridge] 已点击${tabLabel}Tab, 方法: ${result.method}, tag: ${result.tag}, pos: ${result.pos}`);
     } else {
       console.warn(`[doubaoBridge] 点击${tabLabel}Tab 失败:`, result.error);
     }
