@@ -377,7 +377,142 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
   }
 }
 
-// ==================== 检查是否正在生成 ====================
+// ==================== 生成状态网络监控（后台 webview 可用） ====================
+
+/**
+ * 注入生成状态监听器（基于 fetch/XHR 拦截，不依赖 DOM）
+ * 监听 /chat/completion 的 SSE 流开始和结束，写入 window.__genState
+ * 后台 webview DOM 被节流时，网络层仍然正常工作
+ */
+export async function injectGenerationMonitor(webview: WebviewHandle): Promise<boolean> {
+  const injectCode = `
+    (function() {
+      if (window.__genMonitorInstalled) return;
+      window.__genMonitorInstalled = true;
+      window.__genState = { generating: false, startTime: 0, endTime: 0, lastUpdate: 0, sseDataCount: 0 };
+
+      function markStart() {
+        window.__genState.generating = true;
+        window.__genState.startTime = Date.now();
+        window.__genState.lastUpdate = Date.now();
+        window.__genState.endTime = 0;
+        window.__genState.sseDataCount = 0;
+        console.log('[GenMonitor] 生成开始');
+      }
+
+      function markEnd() {
+        if (window.__genState.generating) {
+          window.__genState.generating = false;
+          window.__genState.endTime = Date.now();
+          window.__genState.lastUpdate = Date.now();
+          console.log('[GenMonitor] 生成结束, 共收到 SSE 数据帧:', window.__genState.sseDataCount);
+        }
+      }
+
+      function countSSEData(chunk) {
+        var lines = chunk.split('\\n');
+        var count = 0;
+        for (var i = 0; i < lines.length; i++) {
+          if (lines[i].indexOf('data:') === 0 && lines[i].length > 6) {
+            count++;
+          }
+        }
+        if (count > 0) {
+          window.__genState.sseDataCount += count;
+          window.__genState.lastUpdate = Date.now();
+        }
+      }
+
+      // ---- 拦截 fetch ----
+      var originalFetch = window.fetch;
+      window.fetch = function patchedFetch(input, init) {
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        var isCompletion = url.indexOf('/chat/completion') >= 0 || url.indexOf('chain/single') >= 0;
+
+        var promise = originalFetch.apply(this, [input, init]);
+
+        if (isCompletion) {
+          markStart();
+          return promise.then(function(resp) {
+            var ct = resp.headers.get('content-type') || '';
+            if (ct.indexOf('text/event-stream') >= 0 && resp.body) {
+              var teed = resp.body.tee();
+              var reader = teed[1].getReader();
+              var decoder = new TextDecoder();
+              var buffer = '';
+              function pump() {
+                return reader.read().then(function(result) {
+                  if (result.done) {
+                    if (buffer.length > 0) countSSEData(buffer);
+                    markEnd();
+                    return;
+                  }
+                  var text = decoder.decode(result.value, { stream: true });
+                  buffer += text;
+                  var idx = buffer.lastIndexOf('\\n');
+                  if (idx >= 0) {
+                    countSSEData(buffer.substring(0, idx + 1));
+                    buffer = buffer.substring(idx + 1);
+                  }
+                  return pump();
+                });
+              }
+              pump().catch(function() { markEnd(); });
+              return new Response(teed[0], {
+                status: resp.status,
+                statusText: resp.statusText,
+                headers: resp.headers,
+              });
+            } else {
+              // 非流式响应，直接结束
+              markEnd();
+            }
+            return resp;
+          }).catch(function(e) {
+            markEnd();
+            throw e;
+          });
+        }
+
+        return promise;
+      };
+
+      // ---- 拦截 XHR ----
+      var originalXHROpen = XMLHttpRequest.prototype.open;
+      var originalXHRSend = XMLHttpRequest.prototype.send;
+      var xhrUrlMap = new WeakMap();
+
+      XMLHttpRequest.prototype.open = function(method, url) {
+        xhrUrlMap.set(this, url);
+        return originalXHROpen.apply(this, arguments);
+      };
+
+      XMLHttpRequest.prototype.send = function(body) {
+        var url = xhrUrlMap.get(this) || '';
+        var isCompletion = url.indexOf('/chat/completion') >= 0 || url.indexOf('chain/single') >= 0;
+
+        if (isCompletion) {
+          markStart();
+          this.addEventListener('loadend', function() {
+            markEnd();
+          });
+        }
+
+        return originalXHRSend.call(this, body);
+      };
+
+      console.log('[GenMonitor] 生成状态监听器已安装');
+    })();
+  `;
+
+  try {
+    await safeExecuteJS(webview, injectCode, 5000, 'injectGenerationMonitor');
+    return true;
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 注入生成状态监听器失败:', err.message);
+    return false;
+  }
+}
 
 /**
  * 检查豆包页面当前是否正在生成回复
@@ -410,6 +545,20 @@ export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<G
   const code = `
     (function() {
       try {
+        // ========== 维度0：网络层监控（最可靠，后台 webview 也能用） ==========
+        if (window.__genState && window.__genMonitorInstalled) {
+          var gs = window.__genState;
+          // 正在生成中
+          if (gs.generating && gs.startTime > 0) {
+            return { generating: true, status: 'detected', reason: 'network-monitor', sseDataCount: gs.sseDataCount, lastUpdate: gs.lastUpdate };
+          }
+          // 已完成（有明确的开始和结束时间）
+          if (!gs.generating && gs.endTime > 0 && gs.startTime > 0) {
+            return { generating: false, status: 'detected', reason: 'network-monitor', sseDataCount: gs.sseDataCount, endTime: gs.endTime };
+          }
+          // 状态未初始化（还没发过请求），继续走 DOM 检测
+        }
+
         // ========== 维度1：停止按钮 / 生成中指示器 ==========
         var stopSelectors = [
           'button[aria-label*="停止"]',

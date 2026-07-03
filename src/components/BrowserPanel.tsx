@@ -27,6 +27,7 @@ import {
   configureVideoOptions,
   uploadReferenceImages,
   inject15sVideoPatch,
+  injectGenerationMonitor,
   getCachedVideoUrl,
   getVideoPlayUrl,
 } from '../utils/doubaoBridge';
@@ -279,6 +280,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await navigateToChat(webview);
         await waitForWebviewReady(webview, 15000);
       }
+
+      // 注入生成状态网络监听器（后台 webview 也能准确检测生成完成）
+      await injectGenerationMonitor(webview);
 
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       const injected = await Promise.race([
