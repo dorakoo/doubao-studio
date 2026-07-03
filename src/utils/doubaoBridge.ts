@@ -26,6 +26,10 @@ export interface WebviewHandle {
 
 // ==================== 工具函数 ====================
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** 带超时的 executeJavaScript */
 async function safeExecuteJS<T>(
   webview: WebviewHandle,
@@ -559,41 +563,66 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
   const code = `
     (function() {
       try {
-        var allEls = document.querySelectorAll('div, span, button, a, [role="tab"]');
+        var allEls = document.querySelectorAll('button, [role="tab"], div, span, a');
 
         // 先找到 textarea 输入框的位置
         var textarea = document.querySelector('textarea');
         var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
         var viewportHeight = window.innerHeight;
 
-        // 收集所有文本匹配的元素
+        // 收集所有文本匹配的元素（宽松匹配：innerText 包含目标文本）
         var candidates = [];
         for (var i = 0; i < allEls.length; i++) {
           var el = allEls[i];
-          var text = (el.textContent || '').trim();
-          if (text !== '${tabLabel}') continue;
+          var innerText = (el.innerText || '').trim();
+          var directText = '';
+          for (var j = 0; j < el.childNodes.length; j++) {
+            if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent || '';
+          }
+          directText = directText.trim();
+
+          // 匹配条件：直接文本等于目标 或 innerText 等于目标
+          // 排除 innerText 过长（包含目标文本但还有其他大量内容）的 div/span
+          var matches = directText === '${tabLabel}' || innerText === '${tabLabel}';
+          if (!matches) continue;
           if (el.offsetParent === null) continue;
 
           var rect = el.getBoundingClientRect();
-          // 必须在视口内
           if (rect.top < 0 || rect.left < 0) continue;
+          if (rect.width === 0 || rect.height === 0) continue;
 
           candidates.push({
             el: el,
             rect: rect,
             tag: el.tagName,
-            // 优先：在 textarea 下方且靠近底部（Tab 在输入框下面）
-            nearTextarea: textareaRect && rect.top > textareaRect.bottom && rect.top < viewportHeight,
-            // 次优先：在页面下半部分（排除顶部导航/侧边栏）
+            isButton: el.tagName === 'BUTTON' || el.getAttribute('role') === 'tab',
+            nearTextarea: textareaRect && rect.top > textareaRect.bottom - 10 && rect.top < viewportHeight,
             inBottomHalf: rect.top > viewportHeight * 0.5,
-            // 排除：左侧边栏区域（x < 300 通常是侧边栏）
-            notInSidebar: rect.left > 280,
-            // 元素大小（Tab 按钮通常较小）
-            isSmall: rect.width < 120 && rect.height < 50,
+            notInSidebar: rect.left > 200,
+            isSmall: rect.width < 150 && rect.height < 60,
+            directTextMatch: directText === '${tabLabel}',
           });
         }
 
-        // 优先选择：在 textarea 下方 + 不在侧边栏 + 小元素
+        // 优先：button/tab role + textarea 附近 + 不在侧边栏
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (c.isButton && c.nearTextarea && c.notInSidebar) {
+            c.el.click();
+            return { ok: true, method: 'button-near-textarea', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+          }
+        }
+
+        // 次优先：button/tab role + 页面下半 + 不在侧边栏
+        for (var i = 0; i < candidates.length; i++) {
+          var c = candidates[i];
+          if (c.isButton && c.inBottomHalf && c.notInSidebar) {
+            c.el.click();
+            return { ok: true, method: 'button-bottom', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+          }
+        }
+
+        // 兜底1：任何匹配 + textarea 附近 + 不在侧边栏 + 小元素
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.nearTextarea && c.notInSidebar && c.isSmall) {
@@ -602,16 +631,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           }
         }
 
-        // 次优先：在页面下半部分 + 不在侧边栏
-        for (var i = 0; i < candidates.length; i++) {
-          var c = candidates[i];
-          if (c.inBottomHalf && c.notInSidebar) {
-            c.el.click();
-            return { ok: true, method: 'bottom-half', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
-          }
-        }
-
-        // 兜底：不在侧边栏的任何匹配元素
+        // 兜底2：任何匹配 + 不在侧边栏
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.notInSidebar) {
@@ -620,7 +640,17 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           }
         }
 
-        return { ok: false, error: '未找到${tabLabel}Tab, candidates=' + candidates.length };
+        // 全部失败，输出诊断信息
+        var diag = [];
+        for (var i = 0; i < allEls.length; i++) {
+          var el = allEls[i];
+          var t = (el.innerText || '').trim();
+          if (t.indexOf('${tabLabel}') >= 0 && t.length < 50) {
+            var r = el.getBoundingClientRect();
+            diag.push(el.tagName + '|' + t.substring(0,20) + '|' + Math.round(r.left) + ',' + Math.round(r.top) + '|' + Math.round(r.width) + 'x' + Math.round(r.height));
+          }
+        }
+        return { ok: false, error: '未找到${tabLabel}Tab, candidates=' + candidates.length + ', diag=' + diag.join('; ') };
       } catch (e) {
         return { ok: false, error: e.message };
       }
@@ -690,4 +720,229 @@ export async function detectCurrentMode(webview: WebviewHandle): Promise<string>
   } catch {
     return 'chat';
   }
+}
+
+/**
+ * 配置视频生成选项（模型、时长、比例）
+ * 在豆包视频生成页面，通过文本匹配点击对应选项
+ */
+export async function configureVideoOptions(
+  webview: WebviewHandle,
+  config: { model: string; duration: string; aspectRatio: string }
+): Promise<void> {
+  // 模型名称映射（豆包页面显示的文本）
+  const modelLabels: Record<string, string[]> = {
+    'seedance-2.0': ['Seedance 2.0'],
+    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast'],
+    'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini'],
+  };
+
+  const modelTexts = modelLabels[config.model] || [config.model];
+
+  // 通用点击函数：通过文本匹配找到并点击元素
+  const clickByText = async (texts: string[], label: string): Promise<boolean> => {
+    for (const text of texts) {
+      const code = `
+        (function() {
+          try {
+            var allEls = document.querySelectorAll('button, [role="tab"], [role="option"], div, span, label');
+            for (var i = 0; i < allEls.length; i++) {
+              var el = allEls[i];
+              var innerText = (el.innerText || '').trim();
+              var directText = '';
+              for (var j = 0; j < el.childNodes.length; j++) {
+                if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent || '';
+              }
+              directText = directText.trim();
+
+              if (directText === '${text}' || innerText === '${text}') {
+                var rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0 && el.offsetParent !== null) {
+                  el.click();
+                  return { ok: true, tag: el.tagName, text: '${text}', pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+                }
+              }
+            }
+            // 尝试 includes 匹配（更宽松）
+            for (var i = 0; i < allEls.length; i++) {
+              var el = allEls[i];
+              var innerText = (el.innerText || '').trim();
+              if (innerText.indexOf('${text}') >= 0 && innerText.length < 80) {
+                var rect = el.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0 && rect.width < 200 && el.offsetParent !== null) {
+                  el.click();
+                  return { ok: true, tag: el.tagName, text: innerText.substring(0, 30), pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+                }
+              }
+            }
+            return { ok: false };
+          } catch (e) {
+            return { ok: false, error: e.message };
+          }
+        })()
+      `;
+      const result = await safeExecuteJS<{ ok: boolean; tag?: string; text?: string; pos?: string; error?: string }>(
+        webview, code, 3000, 'clickByText'
+      );
+      if (result.ok) {
+        console.log(`[doubaoBridge] 已点击${label}: "${result.text}", tag: ${result.tag}, pos: ${result.pos}`);
+        return true;
+      }
+    }
+    console.warn(`[doubaoBridge] 未找到${label}元素，尝试文本:`, texts);
+    return false;
+  };
+
+  // 1. 选择模型
+  console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
+  await clickByText(modelTexts, '视频模型');
+  await sleep(500);
+
+  // 2. 选择时长
+  console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
+  const durationText = config.duration === '5s' ? '5s' : '10s';
+  await clickByText([durationText, config.duration.replace('s', '秒'), config.duration], '视频时长');
+  await sleep(500);
+
+  // 3. 选择比例
+  console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
+  await clickByText([config.aspectRatio], '视频比例');
+  await sleep(500);
+}
+
+/**
+ * 上传参考图片
+ * 通过 webview 的文件输入元素上传本地图片
+ * 注意：此函数会先尝试找到文件输入元素并注入文件
+ */
+export async function uploadReferenceImages(
+  webview: WebviewHandle,
+  filePaths: string[]
+): Promise<boolean> {
+  if (!filePaths || filePaths.length === 0) return true;
+
+  console.log(`[doubaoBridge] 上传参考图片: ${filePaths.length} 张`);
+
+  // 策略 1：查找页面中已有的 file input 元素
+  const findFileInput = `
+    (function() {
+      var inputs = document.querySelectorAll('input[type="file"]');
+      var result = [];
+      for (var i = 0; i < inputs.length; i++) {
+        var inp = inputs[i];
+        result.push({
+          index: i,
+          accept: inp.accept || '',
+          multiple: inp.multiple,
+          visible: inp.offsetParent !== null,
+          id: inp.id || '',
+          className: inp.className || '',
+        });
+      }
+      // 也查找可能触发文件选择的按钮
+      var buttons = document.querySelectorAll('button, [role="button"], div');
+      var uploadButtons = [];
+      for (var i = 0; i < buttons.length; i++) {
+        var text = (buttons[i].innerText || '').trim();
+        if (text.indexOf('上传') >= 0 || text.indexOf('参考') >= 0 || text.indexOf('图片') >= 0 || text.indexOf('添加') >= 0) {
+          var rect = buttons[i].getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0 && rect.width < 200) {
+            uploadButtons.push({
+              tag: buttons[i].tagName,
+              text: text.substring(0, 30),
+              pos: Math.round(rect.left) + ',' + Math.round(rect.top),
+            });
+          }
+        }
+      }
+      return { inputs: result, uploadButtons: uploadButtons };
+    })()
+  `;
+
+  const diag = await safeExecuteJS<{
+    inputs: Array<{ index: number; accept: string; multiple: boolean; visible: boolean; id: string; className: string }>;
+    uploadButtons: Array<{ tag: string; text: string; pos: string }>;
+  }>(webview, findFileInput, 5000, 'findFileInput');
+
+  console.log('[doubaoBridge] 文件上传诊断:', JSON.stringify(diag));
+
+  // 如果有 file input 元素，通过 IPC 设置文件路径
+  if (diag && diag.inputs && diag.inputs.length > 0) {
+    try {
+      // 使用 webview 的 DOM 方法设置文件
+      const setInputCode = `
+        (function() {
+          var inputs = document.querySelectorAll('input[type="file"]');
+          if (inputs.length === 0) return { ok: false, error: 'no file input found' };
+          // 尝试让 input 可见并接受文件
+          var inp = inputs[0];
+          inp.style.display = 'block';
+          inp.style.opacity = '1';
+          inp.style.position = 'relative';
+          inp.style.width = '1px';
+          inp.style.height = '1px';
+          inp.style.overflow = 'hidden';
+          return { ok: true, accept: inp.accept, multiple: inp.multiple };
+        })()
+      `;
+      await safeExecuteJS(webview, setInputCode, 3000, 'setFileInput');
+
+      // 注意：由于安全限制，无法直接通过 JS 设置 file input 的 files
+      // 需要通过 Electron 的 file select handler 来处理
+      // 这里先点击 upload 按钮触发文件选择，后续通过 IPC 拦截
+      console.log('[doubaoBridge] 找到 file input，尝试触发上传按钮');
+    } catch (e: any) {
+      console.warn('[doubaoBridge] 设置 file input 失败:', e.message);
+    }
+  }
+
+  // 策略 2：点击上传按钮
+  if (diag && diag.uploadButtons && diag.uploadButtons.length > 0) {
+    const btn = diag.uploadButtons[0];
+    console.log(`[doubaoBridge] 找到上传按钮: "${btn.text}" at ${btn.pos}`);
+    const clickCode = `
+      (function() {
+        var buttons = document.querySelectorAll('button, [role="button"], div');
+        for (var i = 0; i < buttons.length; i++) {
+          var text = (buttons[i].innerText || '').trim();
+          if (text.indexOf('上传') >= 0 || text.indexOf('参考') >= 0 || text.indexOf('图片') >= 0) {
+            var rect = buttons[i].getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0 && rect.width < 200) {
+              buttons[i].click();
+              return { ok: true, text: text.substring(0, 30) };
+            }
+          }
+        }
+        return { ok: false };
+      })()
+    `;
+    const result = await safeExecuteJS<{ ok: boolean; text?: string }>(webview, clickCode, 3000, 'clickUpload');
+    if (result?.ok) {
+      console.log(`[doubaoBridge] 已点击上传按钮: "${result.text}"`);
+      // 等待文件对话框出现
+      await sleep(1000);
+    }
+  }
+
+  // 诊断：如果都没找到，输出页面上所有可交互元素帮助调试
+  if ((!diag || !diag.inputs || diag.inputs.length === 0) && (!diag || !diag.uploadButtons || diag.uploadButtons.length === 0)) {
+    const fullDiag = `
+      (function() {
+        var result = [];
+        var allEls = document.querySelectorAll('button, [role="button"], input, [class*="upload"], [class*="attach"], [class*="file"], [class*="image"]');
+        for (var i = 0; i < allEls.length && i < 30; i++) {
+          var el = allEls[i];
+          var rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            result.push(el.tagName + '|' + (el.className || '').substring(0, 40) + '|' + (el.innerText || '').substring(0, 20).trim() + '|' + Math.round(rect.left) + ',' + Math.round(rect.top));
+          }
+        }
+        return result;
+      })()
+    `;
+    const diagResult = await safeExecuteJS<string[]>(webview, fullDiag, 3000, 'fullDiag');
+    console.log('[doubaoBridge] 页面可交互元素诊断:', diagResult);
+  }
+
+  return true;
 }

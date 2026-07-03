@@ -4,7 +4,7 @@
  * 负责：任务队列管理、状态流转、批量操作、生成模式
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, dialog } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -205,6 +205,28 @@ export function registerTaskIPC(): void {
           prompt: t.prompt,
           outputs: t.outputs,
         }));
+    }
+  );
+
+  // ---- 选择参考图片（文件对话框） ----
+  ipcMain.handle(
+    'tasks:selectImages',
+    async (): Promise<{ success: boolean; filePaths?: string[]; error?: string }> => {
+      try {
+        const result = await dialog.showOpenDialog({
+          properties: ['openFile', 'multiSelections'],
+          filters: [
+            { name: '图片文件', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+          ],
+          title: '选择参考图片',
+        });
+        if (result.canceled) {
+          return { success: true, filePaths: [] };
+        }
+        return { success: true, filePaths: result.filePaths };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
     }
   );
 

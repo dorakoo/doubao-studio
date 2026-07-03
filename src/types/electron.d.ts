@@ -80,6 +80,7 @@ export interface ElectronAPI {
     delete: (taskId: string) => Promise<{ success: boolean; error?: string }>;
     batchPause: () => Promise<{ success: boolean }>;
     getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
+    selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
   };
   system: {
     getVersion: () => Promise<string>;

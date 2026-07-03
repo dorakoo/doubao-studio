@@ -9,7 +9,7 @@
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import type { Account } from '../types';
+import type { Account, Task } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import type { AutomationState } from '../store/useTaskStore';
@@ -23,6 +23,8 @@ import {
   waitForModeReady,
   waitForChatReady,
   clickAITab,
+  configureVideoOptions,
+  uploadReferenceImages,
 } from '../utils/doubaoBridge';
 
 interface BrowserPanelProps {
@@ -160,7 +162,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!task) return;
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
       runningRef.current.add(accountId);
-      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview);
+      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview, task.videoConfig, task.attachments);
     });
   }, [accountBusy, executingTasks]);
 
@@ -170,7 +172,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     taskId: string,
     prompt: string,
     mode: string,
-    webview: HTMLWebViewElement
+    webview: HTMLWebViewElement,
+    videoConfig?: Task['videoConfig'],
+    attachments?: string[]
   ) => {
     const { setAccountAutomationState, completeAutomation, failAutomation } =
       useTaskStore.getState();
@@ -190,6 +194,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           setAccountAutomationState(accountId, 'injecting', '点击' + modeLabel + 'Tab...');
           await clickAITab(webview, mode);
           await sleep(1500); // 等待 Tab 切换动画
+        }
+
+        // 视频模式：配置模型、时长、比例
+        if (mode === 'video' && videoConfig) {
+          setAccountAutomationState(accountId, 'injecting', '配置视频参数...');
+          await configureVideoOptions(webview, videoConfig);
+          await sleep(500);
+        }
+
+        // 有参考图片时上传
+        if (attachments && attachments.length > 0) {
+          setAccountAutomationState(accountId, 'injecting', '上传参考图片...');
+          await uploadReferenceImages(webview, attachments);
+          await sleep(1000);
         }
       } else {
         await navigateToChat(webview);

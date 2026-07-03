@@ -23,10 +23,22 @@ import {
   ClockCircleOutlined,
   ThunderboltOutlined,
   SyncOutlined,
+  PictureOutlined,
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
-import { TASK_STATUS_CONFIG, GENERATION_MODE_CONFIG, type TaskStatus, type GenerationMode } from '../types';
+import {
+  TASK_STATUS_CONFIG,
+  GENERATION_MODE_CONFIG,
+  VIDEO_MODEL_LABELS,
+  VIDEO_MODEL_COST,
+  DEFAULT_VIDEO_CONFIG,
+  type TaskStatus,
+  type GenerationMode,
+  type VideoModel,
+  type VideoDuration,
+  type VideoAspectRatio,
+} from '../types';
 
 const { TextArea } = Input;
 
@@ -83,17 +95,31 @@ const TaskConsole: React.FC = () => {
   const [inputText, setInputText] = useState('');
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<GenerationMode>('chat');
+  const [videoConfig, setVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
+  const [attachments, setAttachments] = useState<string[]>([]);
 
   // ---- 添加任务 ----
 
   const handleAddTasks = useCallback(async () => {
-    const ok = await addTasks(inputText, selectedMode);
+    const vc = selectedMode === 'video' ? videoConfig : undefined;
+    const att = (selectedMode === 'video' || selectedMode === 'image') && attachments.length > 0 ? attachments : undefined;
+    const ok = await addTasks(inputText, selectedMode, vc, att);
     if (ok) {
       setInputText('');
       setAddModalOpen(false);
       setSelectedMode('chat');
+      setVideoConfig({ ...DEFAULT_VIDEO_CONFIG });
+      setAttachments([]);
     }
-  }, [inputText, selectedMode, addTasks]);
+  }, [inputText, selectedMode, videoConfig, attachments, addTasks]);
+
+  // ---- 选择参考图片 ----
+  const handleSelectImages = useCallback(async () => {
+    const result = await window.electronAPI.tasks.selectImages();
+    if (result.success && result.filePaths && result.filePaths.length > 0) {
+      setAttachments((prev) => [...prev, ...result.filePaths!]);
+    }
+  }, []);
 
   // ---- 指派账号 ----
 
@@ -336,6 +362,8 @@ const TaskConsole: React.FC = () => {
           setAddModalOpen(false);
           setInputText('');
           setSelectedMode('chat');
+          setVideoConfig({ ...DEFAULT_VIDEO_CONFIG });
+          setAttachments([]);
         }}
         okText="添加"
         cancelText="取消"
@@ -351,6 +379,129 @@ const TaskConsole: React.FC = () => {
             {GENERATION_MODE_CONFIG[selectedMode].description}
           </div>
         </div>
+
+        {/* 视频配置（仅视频模式） */}
+        {selectedMode === 'video' && (
+          <div style={{ marginBottom: 16 }}>
+            {/* 模型选择 */}
+            <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>视频模型</div>
+            <Segmented
+              value={videoConfig.model}
+              onChange={(val) => setVideoConfig({ ...videoConfig, model: val as VideoModel })}
+              options={Object.entries(VIDEO_MODEL_LABELS).map(([key, label]) => ({
+                label: (
+                  <div className="flex flex-col items-center py-1 px-2">
+                    <span className="text-xs font-medium">{label}</span>
+                    <span className="text-[10px] mt-0.5" style={{ color: '#6b6b88' }}>{VIDEO_MODEL_COST[key as VideoModel]}</span>
+                  </div>
+                ),
+                value: key,
+              }))}
+              block
+              style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
+            />
+
+            {/* 时长选择 */}
+            <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>视频时长</div>
+            <Segmented
+              value={videoConfig.duration}
+              onChange={(val) => setVideoConfig({ ...videoConfig, duration: val as VideoDuration })}
+              options={[
+                { label: '5 秒', value: '5s' },
+                { label: '10 秒', value: '10s' },
+              ]}
+              block
+              style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
+            />
+
+            {/* 比例选择 */}
+            <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>画面比例</div>
+            <Segmented
+              value={videoConfig.aspectRatio}
+              onChange={(val) => setVideoConfig({ ...videoConfig, aspectRatio: val as VideoAspectRatio })}
+              options={['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].map((r) => ({
+                label: r,
+                value: r,
+              }))}
+              block
+              style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
+            />
+          </div>
+        )}
+
+        {/* 参考图片上传（视频/图片模式） */}
+        {(selectedMode === 'video' || selectedMode === 'image') && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>
+              参考图片（可选，支持多张）
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {attachments.map((filePath, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    position: 'relative',
+                    width: 64,
+                    height: 64,
+                    borderRadius: 6,
+                    border: '1px solid #2a2a3e',
+                    overflow: 'hidden',
+                    background: '#1a1a24',
+                  }}
+                >
+                  <img
+                    src={`file://${filePath}`}
+                    alt={`ref-${idx}`}
+                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                  />
+                  <button
+                    onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                    style={{
+                      position: 'absolute',
+                      top: 2,
+                      right: 2,
+                      width: 18,
+                      height: 18,
+                      borderRadius: '50%',
+                      border: 'none',
+                      background: 'rgba(0,0,0,0.6)',
+                      color: '#fff',
+                      fontSize: 10,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      lineHeight: 1,
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={handleSelectImages}
+                style={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: 6,
+                  border: '1px dashed #3a3a5e',
+                  background: 'transparent',
+                  color: '#6b6b88',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 4,
+                  fontSize: 10,
+                }}
+              >
+                <PictureOutlined style={{ fontSize: 20 }} />
+                添加
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 提示词输入 */}
         <p style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>

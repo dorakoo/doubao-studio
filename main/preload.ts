@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:batchPause'),
     getCompletedOutputs: (): Promise<{ taskId: string; prompt: string; outputs: string[] }[]> =>
       ipcRenderer.invoke('tasks:getCompletedOutputs'),
+    selectImages: (): Promise<{ success: boolean; filePaths?: string[]; error?: string }> =>
+      ipcRenderer.invoke('tasks:selectImages'),
   },
 
   // ---- 系统操作 ----
