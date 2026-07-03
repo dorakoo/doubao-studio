@@ -257,3 +257,117 @@ export function registerTaskIPC(): void {
       }
     }
   );
+
+  // ---- 批量下载产物 ----
+  ipcMain.handle(
+    'tasks:downloadOutputs',
+    async (
+      _event,
+      params: { outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>; saveDir?: string }
+    ): Promise<{ success: boolean; count: number; error?: string }> => {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const { app } = require('electron');
+
+        // 默认下载目录
+        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
+        const saveDir = params.saveDir || defaultDir;
+
+        // 确保目录存在
+        if (!fs.existsSync(saveDir)) {
+          fs.mkdirSync(saveDir, { recursive: true });
+        }
+
+        let downloadedCount = 0;
+
+        for (const task of params.outputs) {
+          for (const url of task.outputs) {
+            try {
+              // 从 URL 推断文件扩展名
+              const urlPath = new URL(url).pathname;
+              const ext = path.extname(urlPath) || '.png';
+              // 生成文件名：taskId_序号.ext
+              const fileName = `${task.taskId.substring(0, 8)}_${downloadedCount}${ext}`;
+              const filePath = path.join(saveDir, fileName);
+
+              // 下载文件
+              const response = await fetch(url);
+              if (!response.ok) {
+                console.warn(`[tasks:downloadOutputs] 下载失败 ${url}: ${response.status}`);
+                continue;
+              }
+
+              const buffer = Buffer.from(await response.arrayBuffer());
+              fs.writeFileSync(filePath, buffer);
+              downloadedCount++;
+            } catch (e: any) {
+              console.warn(`[tasks:downloadOutputs] 下载产物失败:`, e.message);
+            }
+          }
+        }
+
+        return { success: true, count: downloadedCount };
+      } catch (err: any) {
+        return { success: false, count: 0, error: err.message };
+      }
+    }
+  );
+
+  // ---- 保存/获取设置 ----
+  const settingsPath = require('path').join(
+    require('electron').app.getPath('userData'),
+    'settings.json'
+  );
+
+  ipcMain.handle(
+    'settings:get',
+    async (): Promise<Record<string, any>> => {
+      try {
+        const fs = require('fs');
+        if (fs.existsSync(settingsPath)) {
+          return JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+        }
+      } catch (e: any) {
+        console.warn('[settings:get] 读取设置失败:', e.message);
+      }
+      return {};
+    }
+  );
+
+  ipcMain.handle(
+    'settings:save',
+    async (_event, settings: Record<string, any>): Promise<{ success: boolean; error?: string }> => {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const dir = path.dirname(settingsPath);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+
+  // ---- 选择下载目录 ----
+  ipcMain.handle(
+    'tasks:selectSaveDir',
+    async (): Promise<{ success: boolean; dirPath?: string; error?: string }> => {
+      try {
+        const result = await dialog.showOpenDialog({
+          properties: ['openDirectory', 'createDirectory'],
+          title: '选择下载目录',
+        });
+        if (result.canceled) {
+          return { success: true, dirPath: undefined };
+        }
+        return { success: true, dirPath: result.filePaths[0] };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );

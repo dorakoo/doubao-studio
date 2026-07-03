@@ -19,9 +19,11 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
 } from '@ant-design/icons';
-import { Tooltip, Badge, Dropdown } from 'antd';
+import { Tooltip, Badge, Dropdown, message } from 'antd';
 import type { MenuProps } from 'antd';
 import { useTaskStore } from '../store/useTaskStore';
+import { SettingsModal } from './SettingsModal';
+import { OutputPreviewModal } from './OutputPreviewModal';
 
 interface ToolbarProps {
   sidebarCollapsed: boolean;
@@ -31,6 +33,25 @@ interface ToolbarProps {
 export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSidebar }) => {
   const { tasks, batchPause, getCompletedOutputs } = useTaskStore();
   const [isPaused, setIsPaused] = React.useState(false);
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [previewOpen, setPreviewOpen] = React.useState(false);
+  const [completedOutputs, setCompletedOutputs] = React.useState<
+    Array<{ taskId: string; prompt: string; outputs: string[] }>
+  >([]);
+
+  // 监听 TaskConsole 发来的批量下载事件
+  React.useEffect(() => {
+    const handleBatchDownloadOutputs = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      const outputs = customEvent.detail;
+      if (outputs && outputs.length > 0) {
+        setCompletedOutputs(outputs);
+        setPreviewOpen(true);
+      }
+    };
+    window.addEventListener('batch-download-outputs', handleBatchDownloadOutputs);
+    return () => window.removeEventListener('batch-download-outputs', handleBatchDownloadOutputs);
+  }, []);
 
   // 运行中的任务数（包含 executing + generating）
   const runningCount = tasks.filter(
@@ -53,18 +74,30 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     }
   };
 
-  // 批量下载产物
+  // 批量下载产物 — 打开预览 Modal
   const handleBatchDownload = async () => {
     const outputs = await getCompletedOutputs();
     if (outputs.length === 0) {
-      // 无产物可下载时静默忽略
+      message.info('暂无已完成产物');
       return;
     }
-    // 通知渲染进程有产物可下载
-    const event = new CustomEvent('batch-download', {
-      detail: outputs,
-    });
-    window.dispatchEvent(event);
+    setCompletedOutputs(outputs);
+    setPreviewOpen(true);
+  };
+
+  // 执行下载
+  const handleDoDownload = async (selectedOutputs: Array<{ taskId: string; prompt: string; outputs: string[] }>) => {
+    // 获取下载目录设置
+    const settings = await window.electronAPI.settings.get();
+    const saveDir = settings.downloadDir || undefined;
+
+    const result = await window.electronAPI.tasks.downloadOutputs(selectedOutputs, saveDir);
+    if (result.success) {
+      message.success(`已下载 ${result.count} 个产物`);
+      setPreviewOpen(false);
+    } else {
+      message.error('下载失败：' + result.error);
+    }
   };
 
   // 更多操作菜单
@@ -72,6 +105,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     {
       key: 'settings',
       label: '偏好设置',
+      onClick: () => setSettingsOpen(true),
     },
     {
       key: 'about',
@@ -167,5 +201,16 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         </Tooltip>
       </div>
     </div>
+
+    {/* 设置 Modal */}
+    <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+    {/* 产物预览 Modal */}
+    <OutputPreviewModal
+      open={previewOpen}
+      outputs={completedOutputs}
+      onClose={() => setPreviewOpen(false)}
+      onDownload={handleDoDownload}
+    />
   );
 };

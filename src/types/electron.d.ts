@@ -82,6 +82,15 @@ export interface ElectronAPI {
     getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
     selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
     readFileAsBase64: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
+    downloadOutputs: (
+      outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>,
+      saveDir?: string
+    ) => Promise<{ success: boolean; count: number; error?: string }>;
+    selectSaveDir: () => Promise<{ success: boolean; dirPath?: string; error?: string }>;
+  };
+  settings: {
+    get: () => Promise<Record<string, any>>;
+    save: (settings: Record<string, any>) => Promise<{ success: boolean; error?: string }>;
   };
   system: {
     getVersion: () => Promise<string>;

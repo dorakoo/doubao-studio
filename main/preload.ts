@@ -79,6 +79,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:selectImages'),
     readFileAsBase64: (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:readFileAsBase64', filePath),
+    downloadOutputs: (
+      outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>,
+      saveDir?: string
+    ): Promise<{ success: boolean; count: number; error?: string }> =>
+      ipcRenderer.invoke('tasks:downloadOutputs', { outputs, saveDir }),
+    selectSaveDir: (): Promise<{ success: boolean; dirPath?: string; error?: string }> =>
+      ipcRenderer.invoke('tasks:selectSaveDir'),
+  },
+
+  // ---- 设置 ----
+  settings: {
+    get: (): Promise<Record<string, any>> => ipcRenderer.invoke('settings:get'),
+    save: (settings: Record<string, any>): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke('settings:save', settings),
   },
 
   // ---- 系统操作 ----

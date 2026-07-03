@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useCallback } from 'react';
-import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip } from 'antd';
+import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message } from 'antd';
 import type { MenuProps, SegmentedProps } from 'antd';
 import {
   PlusOutlined,
@@ -333,6 +333,12 @@ const TaskConsole: React.FC = () => {
               onClick={async () => {
                 const outputs = await getCompletedOutputs();
                 console.log('[TaskConsole] 已完成产物:', outputs);
+                if (outputs.length === 0) {
+                  message.info('暂无已完成产物');
+                  return;
+                }
+                // 通过自定义事件通知 Toolbar 打开预览
+                window.dispatchEvent(new CustomEvent('batch-download-outputs', { detail: outputs }));
               }}
             >
               批量下载
