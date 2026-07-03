@@ -142,7 +142,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     (async () => {
       try {
         // 并发守卫：已有自动化在执行则跳过
-        if (useTaskStore.getState().automationState !== 'idle') return;
+        useTaskStore.getState().setAutomationState('idle'); // 强制重置状态，避免残留
 
         // 1. 等待 webview 加载完成
         console.log('[BrowserPanel] waitForWebviewReady 开始');
@@ -386,21 +386,17 @@ function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Pr
         reject(new Error('页面就绪检测超时（' + timeoutMs + 'ms）'));
         return;
       }
-      const isLoading = (webview as any).isLoading?.() ?? true;
-      if (!isLoading) {
-        try {
-          const ready = await waitForChatReady(webview, 5000);
-          if (ready) {
-            console.log('[BrowserPanel] 轮询：页面已就绪（textarea 可见）');
-            resolve();
-          } else {
-            setTimeout(poll, 1000);
-          }
-        } catch (err) {
+      // 直接检查 DOM 就绪，不依赖 isLoading()（可能有持续后台请求导致一直 loading）
+      try {
+        const ready = await waitForChatReady(webview, 3000);
+        if (ready) {
+          console.log('[BrowserPanel] 页面已就绪');
+          resolve();
+        } else {
           setTimeout(poll, 1000);
         }
-      } else {
-        setTimeout(poll, 500);
+      } catch (err) {
+        setTimeout(poll, 1000);
       }
     };
     poll();
