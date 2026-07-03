@@ -432,6 +432,7 @@ const TaskConsole: React.FC = () => {
               options={[
                 { label: '5 秒', value: '5s' },
                 { label: '10 秒', value: '10s' },
+                { label: '15 秒', value: '15s' },
               ]}
               block
               style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}

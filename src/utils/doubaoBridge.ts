@@ -900,8 +900,13 @@ export async function configureVideoOptions(
 
   // 2. 选择时长
   console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-  const durationText = config.duration === '5s' ? '5 秒' : '10 秒';
-  await clickByText([durationText, config.duration.replace('s', ' 秒'), config.duration], '视频时长');
+  const durationSec = config.duration.replace('s', '');
+  const durationTexts = [
+    durationSec + ' 秒',
+    durationSec + '秒',
+    config.duration,
+  ];
+  await clickByText(durationTexts, '视频时长');
   await sleep(500);
 
   // 3. 选择比例
@@ -973,4 +978,288 @@ export async function uploadReferenceImages(
   }
 
   return result?.ok || false;
+}
+
+// ==================== 15秒 Seedance 2.0 视频生成注入 ====================
+
+/**
+ * 注入 15 秒 Seedance 2.0 视频生成补丁到豆包页面
+ * 通过 monkey-patch fetch 和 XMLHttpRequest 拦截 /chat/completion 请求
+ * 强制视频生成使用 seedance_v2.0 模型 + 15秒时长
+ * 同时拦截 SSE 响应，提取 vid 和无水印视频地址存入 window.__doubaoVideoCache
+ */
+export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boolean> {
+  const injectCode = `
+    (function() {
+      if (window.__doubao15sPatched) return;
+      window.__doubao15sPatched = true;
+      window.__doubaoVideoCache = window.__doubaoVideoCache || {};
+
+      function findVid(obj, depth) {
+        if (depth === undefined) depth = 0;
+        if (depth > 10 || !obj) return null;
+        if (Array.isArray(obj)) {
+          for (var i = 0; i < obj.length; i++) {
+            var f = findVid(obj[i], depth + 1);
+            if (f) return f;
+          }
+        } else if (typeof obj === 'object') {
+          var vid = obj.vid || obj.video_id;
+          if (vid && typeof vid === 'string' && vid.indexOf('v0') === 0) return vid;
+          for (var key in obj) {
+            if (obj.hasOwnProperty(key)) {
+              var f = findVid(obj[key], depth + 1);
+              if (f) return f;
+            }
+          }
+        }
+        return null;
+      }
+
+      function findAllPlayInfos(obj, results, depth) {
+        if (depth === undefined) depth = 0;
+        if (!results) results = [];
+        if (depth > 10 || !obj) return results;
+        if (Array.isArray(obj)) {
+          for (var i = 0; i < obj.length; i++) {
+            findAllPlayInfos(obj[i], results, depth + 1);
+          }
+        } else if (typeof obj === 'object') {
+          if (obj.play_info) results.push(obj.play_info);
+          for (var key in obj) {
+            if (obj.hasOwnProperty(key) && key !== 'play_info') {
+              findAllPlayInfos(obj[key], results, depth + 1);
+            }
+          }
+        }
+        return results;
+      }
+
+      function removeWatermark(url) {
+        if (!url || typeof url !== 'string') return url;
+        return url.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+      }
+
+      function processVideoData(data) {
+        try {
+          var vid = findVid(data);
+          if (vid) {
+            window.__doubaoVideoCache.lastVid = vid;
+            var playInfos = findAllPlayInfos(data);
+            for (var i = 0; i < playInfos.length; i++) {
+              var pi = playInfos[i];
+              var mainUrl = pi.main || pi.main_url;
+              if (mainUrl && typeof mainUrl === 'string') {
+                var cleanUrl = removeWatermark(mainUrl);
+                window.__doubaoVideoCache[vid] = cleanUrl;
+                window.__doubaoVideoCache.lastVideoUrl = cleanUrl;
+                console.log('[15sPatch] 找到视频:', vid, cleanUrl.substring(0, 80) + '...');
+                break;
+              }
+            }
+          }
+        } catch(e) {}
+      }
+
+      function patchBody(rawBody) {
+        try {
+          var payload = JSON.parse(rawBody);
+          var ability = payload.chat_ability;
+          if (!ability || Number(ability.ability_type) !== 17) {
+            return { changed: false, body: rawBody };
+          }
+          var param;
+          try { param = JSON.parse(ability.ability_param); } catch(e) { param = {}; }
+          param.model = 'seedance_v2.0';
+          param.duration = 15;
+          ability.ability_param = JSON.stringify(param);
+          console.log('[15sPatch] 已注入 Seedance 2.0 + 15s 参数');
+          return { changed: true, body: JSON.stringify(payload) };
+        } catch(e) {
+          return { changed: false, body: rawBody };
+        }
+      }
+
+      function readSSEStream(reader) {
+        var decoder = new TextDecoder();
+        var buffer = '';
+        function pump() {
+          return reader.read().then(function(result) {
+            if (result.done) return;
+            buffer += decoder.decode(result.value, { stream: true });
+            var lines = buffer.split('\\n');
+            buffer = lines.pop() || '';
+            for (var i = 0; i < lines.length; i++) {
+              var line = lines[i];
+              if (line.indexOf('data:') === 0) {
+                var jsonStr = line.substring(5).trim();
+                if (jsonStr) {
+                  try {
+                    var data = JSON.parse(jsonStr);
+                    processVideoData(data);
+                  } catch(e) {}
+                }
+              }
+            }
+            return pump();
+          });
+        }
+        pump().catch(function() {});
+      }
+
+      var originalFetch = window.fetch;
+      window.fetch = function patchedFetch(input, init) {
+        var url = typeof input === 'string' ? input : (input && input.url) || '';
+        var isCompletion = url.indexOf('/chat/completion') >= 0;
+
+        if (isCompletion && init && init.body) {
+          var patched = patchBody(init.body);
+          if (patched.changed) {
+            init = Object.assign({}, init, { body: patched.body });
+          }
+        }
+
+        return originalFetch.apply(this, [input, init]).then(function(resp) {
+          if (isCompletion && resp.body) {
+            var ct = resp.headers.get('content-type') || '';
+            if (ct.indexOf('text/event-stream') >= 0) {
+              var teed = resp.body.tee();
+              readSSEStream(teed[1].getReader());
+              return new Response(teed[0], {
+                status: resp.status,
+                statusText: resp.statusText,
+                headers: resp.headers,
+              });
+            }
+          }
+          return resp;
+        });
+      };
+
+      var originalXHROpen = XMLHttpRequest.prototype.open;
+      var originalXHRSend = XMLHttpRequest.prototype.send;
+      var xhrUrlMap = new WeakMap();
+
+      XMLHttpRequest.prototype.open = function(method, url) {
+        xhrUrlMap.set(this, url);
+        return originalXHROpen.apply(this, arguments);
+      };
+
+      XMLHttpRequest.prototype.send = function(body) {
+        var url = xhrUrlMap.get(this) || '';
+        var isCompletion = url.indexOf('/chat/completion') >= 0;
+
+        if (isCompletion && body) {
+          var patched = patchBody(body);
+          if (patched.changed) { body = patched.body; }
+        }
+
+        this.addEventListener('load', function() {
+          var xhrUrl = xhrUrlMap.get(this) || '';
+          if (xhrUrl.indexOf('chain/single') >= 0 || xhrUrl.indexOf('/chat/completion') >= 0) {
+            try {
+              var resp = JSON.parse(this.responseText);
+              processVideoData(resp);
+            } catch(e) {}
+          }
+        });
+
+        return originalXHRSend.call(this, body);
+      };
+
+      console.log('[15sPatch] Seedance 2.0 + 15s 视频生成补丁已注入');
+    })();
+  `;
+
+  try {
+    await safeExecuteJS(webview, injectCode, 5000, 'inject15sPatch');
+    return true;
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 注入15s补丁失败:', err.message);
+    return false;
+  }
+}
+
+/**
+ * 从页面全局变量获取最新的视频 URL（无水印）
+ */
+export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: string; videoUrl: string } | null> {
+  const code = `
+    (function() {
+      var cache = window.__doubaoVideoCache;
+      if (!cache) return { found: false };
+      if (cache.lastVid && cache.lastVideoUrl) {
+        return { found: true, vid: cache.lastVid, videoUrl: cache.lastVideoUrl };
+      }
+      return { found: false };
+    })();
+  `;
+
+  try {
+    const result = await safeExecuteJS<{ found: boolean; vid?: string; videoUrl?: string }>(
+      webview, code, 5000, 'getCachedVideoUrl'
+    );
+    if (result.found && result.vid && result.videoUrl) {
+      return { vid: result.vid, videoUrl: result.videoUrl };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 通过 vid 获取视频播放地址（备用方案，在 webview 页面上下文调用豆包 API）
+ */
+export async function getVideoPlayUrl(webview: WebviewHandle, vid: string): Promise<string | null> {
+  const code = `
+    (function() {
+      var vid = '${vid}';
+      var uuid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
+      var params = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=7622868208475047462&pc_version=3.20.2&web_id=&tea_uuid=&region=CN&sys_region=CN&samantha_web=1&web_platform=browser&use-olympus-account=1&web_tab_id=' + uuid;
+      var url = '/samantha/media/get_play_info?' + params;
+      return fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'agw-js-conv': 'str',
+          'origin': location.origin,
+          'referer': location.href,
+        },
+        credentials: 'include',
+        body: JSON.stringify({ key: vid, type: 'video' }),
+      }).then(function(r) { return r.json(); })
+        .then(function(data) {
+          if (data && data.code === 0 && data.data) {
+            var mainUrl = '';
+            if (data.data.original_media_info && data.data.original_media_info.main_url) {
+              mainUrl = data.data.original_media_info.main_url;
+            } else if (data.data.play_info && data.data.play_info.main) {
+              mainUrl = data.data.play_info.main;
+            } else if (data.data.play_infos && data.data.play_infos.length > 0) {
+              mainUrl = data.data.play_infos[0].main;
+            }
+            if (mainUrl) {
+              mainUrl = mainUrl.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+              return { success: true, url: mainUrl };
+            }
+          }
+          return { success: false, error: '无播放地址' };
+        })
+        .catch(function(e) {
+          return { success: false, error: e.message };
+        });
+    })();
+  `;
+
+  try {
+    const result = await webview.executeJavaScript(code);
+    if (result && result.success && result.url) {
+      return result.url;
+    }
+    return null;
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 获取视频播放地址失败:', err.message);
+    return null;
+  }
 }

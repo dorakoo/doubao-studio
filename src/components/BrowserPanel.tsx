@@ -26,6 +26,9 @@ import {
   clickAITab,
   configureVideoOptions,
   uploadReferenceImages,
+  inject15sVideoPatch,
+  getCachedVideoUrl,
+  getVideoPlayUrl,
 } from '../utils/doubaoBridge';
 
 interface BrowserPanelProps {
@@ -236,11 +239,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await sleep(1500); // 等待 Tab 切换动画
         }
 
-        // 视频模式：配置模型、时长、比例
-        if (mode === 'video' && videoConfig) {
-          setAccountAutomationState(accountId, 'injecting', '配置视频参数...');
-          await configureVideoOptions(webview, videoConfig);
+        // 视频模式：注入 15s Seedance 2.0 补丁 + 配置参数
+        if (mode === 'video') {
+          setAccountAutomationState(accountId, 'injecting', '注入 Seedance 2.0 补丁...');
+          await inject15sVideoPatch(webview);
           await sleep(500);
+          if (videoConfig) {
+            setAccountAutomationState(accountId, 'injecting', '配置视频参数...');
+            await configureVideoOptions(webview, videoConfig);
+            await sleep(500);
+          }
         }
 
         // 有参考图片时上传
@@ -336,18 +344,44 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       if (generating) throw new Error('生成超时');
 
-      // 生成完成后等待一下产物加载，最多重试 5 次
+      // 生成完成后获取产物
       let imageUrls: string[] = [];
-      for (let retry = 0; retry < 5; retry++) {
-        const rawResult = await getResultUrl(webview);
-        try {
-          imageUrls = JSON.parse(rawResult);
-        } catch {
-          imageUrls = rawResult ? [rawResult] : [];
+
+      if (mode === 'video') {
+        // 视频模式：优先从 SSE 拦截缓存拿无水印地址
+        for (let retry = 0; retry < 8; retry++) {
+          const cached = await getCachedVideoUrl(webview);
+          if (cached && cached.videoUrl) {
+            imageUrls = [cached.videoUrl];
+            console.log(`[Automation:${accountId}] 从缓存获取视频: ${cached.vid}`);
+            break;
+          }
+          console.log(`[Automation:${accountId}] 视频地址尚未就绪，等待 3s 后重试 (${retry + 1}/8)`);
+          await sleep(3000);
         }
-        if (imageUrls.length > 0) break;
-        console.log(`[Automation:${accountId}] 产物尚未加载，等待 2s 后重试 (${retry + 1}/5)`);
-        await sleep(2000);
+        // 如果缓存没拿到，兜底用 DOM 提取
+        if (imageUrls.length === 0) {
+          console.log(`[Automation:${accountId}] 缓存未命中，尝试 DOM 提取视频地址`);
+          const rawResult = await getResultUrl(webview);
+          try {
+            imageUrls = JSON.parse(rawResult);
+          } catch {
+            imageUrls = rawResult ? [rawResult] : [];
+          }
+        }
+      } else {
+        // 图片模式：用 DOM 提取，最多重试 5 次
+        for (let retry = 0; retry < 5; retry++) {
+          const rawResult = await getResultUrl(webview);
+          try {
+            imageUrls = JSON.parse(rawResult);
+          } catch {
+            imageUrls = rawResult ? [rawResult] : [];
+          }
+          if (imageUrls.length > 0) break;
+          console.log(`[Automation:${accountId}] 产物尚未加载，等待 2s 后重试 (${retry + 1}/5)`);
+          await sleep(2000);
+        }
       }
       console.log(`[Automation:${accountId}] 完成, 产物:`, imageUrls);
       // 传入第一个 URL 作为 result（向后兼容），outputs 传完整数组

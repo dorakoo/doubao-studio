@@ -26,15 +26,15 @@ export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
 export type VideoModel = 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
 
 /** 视频时长 */
-export type VideoDuration = '5s' | '10s';
+export type VideoDuration = '5s' | '10s' | '15s';
 
 /** 视频比例 */
 export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
 
 /** 视频配置默认值 */
 export const DEFAULT_VIDEO_CONFIG = {
-  model: 'seedance-2.0-mini' as VideoModel,
-  duration: '10s' as VideoDuration,
+  model: 'seedance-2.0' as VideoModel,
+  duration: '15s' as VideoDuration,
   aspectRatio: '16:9' as VideoAspectRatio,
 };
 
