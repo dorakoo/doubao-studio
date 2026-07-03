@@ -232,3 +232,28 @@ export function registerTaskIPC(): void {
 
   console.log('[IPC] 任务调度模块已注册');
 }
+
+  // ---- 读取文件为 base64（用于缩略图显示） ----
+  ipcMain.handle(
+    'tasks:readFileAsBase64',
+    async (_event, filePath: string): Promise<{ success: boolean; data?: string; error?: string }> => {
+      try {
+        const fs = require('fs');
+        const fileBuffer = fs.readFileSync(filePath);
+        const base64 = fileBuffer.toString('base64');
+        // 根据文件扩展名推断 MIME 类型
+        const ext = filePath.split('.').pop()?.toLowerCase();
+        const mimeTypes: Record<string, string> = {
+          png: 'image/png',
+          jpg: 'image/jpeg',
+          jpeg: 'image/jpeg',
+          webp: 'image/webp',
+          bmp: 'image/bmp',
+        };
+        const mime = mimeTypes[ext || ''] || 'image/jpeg';
+        return { success: true, data: `data:${mime};base64,${base64}` };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );

@@ -559,7 +559,7 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
  * 注意：必须排除左侧边栏菜单中的同名元素
  */
 export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'): Promise<boolean> {
-  const tabLabel = mode === 'image' ? '图像' : '视频';
+  const tabLabel = mode === 'image' ? '图像生成' : '视频生成';
   const code = `
     (function() {
       try {
@@ -581,10 +581,11 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
           }
           directText = directText.trim();
 
-          // 匹配条件：直接文本等于目标 或 innerText 等于目标
-          // 排除 innerText 过长（包含目标文本但还有其他大量内容）的 div/span
-          var matches = directText === '${tabLabel}' || innerText === '${tabLabel}';
-          if (!matches) continue;
+          // 匹配条件：直接文本等于目标 或 innerText 等于目标 或短文本 includes 匹配
+          // includes 匹配限制 innerText 长度 < 20，避免匹配到包含目标文本的大容器
+          var exactMatch = directText === '${tabLabel}' || innerText === '${tabLabel}';
+          var includesMatch = !exactMatch && innerText.length < 20 && innerText.indexOf('${tabLabel}') >= 0;
+          if (!exactMatch && !includesMatch) continue;
           if (el.offsetParent === null) continue;
 
           var rect = el.getBoundingClientRect();
@@ -800,8 +801,8 @@ export async function configureVideoOptions(
 
   // 2. 选择时长
   console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-  const durationText = config.duration === '5s' ? '5s' : '10s';
-  await clickByText([durationText, config.duration.replace('s', '秒'), config.duration], '视频时长');
+  const durationText = config.duration === '5s' ? '5 秒' : '10 秒';
+  await clickByText([durationText, config.duration.replace('s', ' 秒'), config.duration], '视频时长');
   await sleep(500);
 
   // 3. 选择比例
@@ -817,132 +818,60 @@ export async function configureVideoOptions(
  */
 export async function uploadReferenceImages(
   webview: WebviewHandle,
-  filePaths: string[]
+  fileDataList: Array<{ name: string; base64: string; mime: string }>
 ): Promise<boolean> {
-  if (!filePaths || filePaths.length === 0) return true;
+  if (!fileDataList || fileDataList.length === 0) return true;
 
-  console.log(`[doubaoBridge] 上传参考图片: ${filePaths.length} 张`);
+  console.log(`[doubaoBridge] 上传参考图片: ${fileDataList.length} 张`);
 
-  // 策略 1：查找页面中已有的 file input 元素
-  const findFileInput = `
+  // 构造 JS 代码，通过 DataTransfer 注入文件
+  const filesJson = JSON.stringify(fileDataList);
+  const injectCode = `
     (function() {
-      var inputs = document.querySelectorAll('input[type="file"]');
-      var result = [];
-      for (var i = 0; i < inputs.length; i++) {
-        var inp = inputs[i];
-        result.push({
-          index: i,
-          accept: inp.accept || '',
-          multiple: inp.multiple,
-          visible: inp.offsetParent !== null,
-          id: inp.id || '',
-          className: inp.className || '',
-        });
-      }
-      // 也查找可能触发文件选择的按钮
-      var buttons = document.querySelectorAll('button, [role="button"], div');
-      var uploadButtons = [];
-      for (var i = 0; i < buttons.length; i++) {
-        var text = (buttons[i].innerText || '').trim();
-        if (text.indexOf('上传') >= 0 || text.indexOf('参考') >= 0 || text.indexOf('图片') >= 0 || text.indexOf('添加') >= 0) {
-          var rect = buttons[i].getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0 && rect.width < 200) {
-            uploadButtons.push({
-              tag: buttons[i].tagName,
-              text: text.substring(0, 30),
-              pos: Math.round(rect.left) + ',' + Math.round(rect.top),
-            });
-          }
+      try {
+        var fileDataList = ${filesJson};
+        var inputs = document.querySelectorAll('input[type="file"]');
+        if (inputs.length === 0) {
+          return { ok: false, error: '未找到 file input 元素' };
         }
+        
+        var inp = inputs[0];
+        var dataTransfer = new DataTransfer();
+        
+        for (var i = 0; i < fileDataList.length; i++) {
+          var fd = fileDataList[i];
+          // base64 解码为 ArrayBuffer
+          var binary = atob(fd.base64);
+          var bytes = new Uint8Array(binary.length);
+          for (var j = 0; j < binary.length; j++) {
+            bytes[j] = binary.charCodeAt(j);
+          }
+          var file = new File([bytes], fd.name, { type: fd.mime });
+          dataTransfer.items.add(file);
+        }
+        
+        inp.files = dataTransfer.files;
+        inp.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        return { ok: true, count: fileDataList.length };
+      } catch (e) {
+        return { ok: false, error: e.message };
       }
-      return { inputs: result, uploadButtons: uploadButtons };
     })()
   `;
 
-  const diag = await safeExecuteJS<{
-    inputs: Array<{ index: number; accept: string; multiple: boolean; visible: boolean; id: string; className: string }>;
-    uploadButtons: Array<{ tag: string; text: string; pos: string }>;
-  }>(webview, findFileInput, 5000, 'findFileInput');
+  const result = await safeExecuteJS<{ ok: boolean; count?: number; error?: string }>(
+    webview,
+    injectCode,
+    5000,
+    'injectFiles'
+  );
 
-  console.log('[doubaoBridge] 文件上传诊断:', JSON.stringify(diag));
-
-  // 如果有 file input 元素，通过 IPC 设置文件路径
-  if (diag && diag.inputs && diag.inputs.length > 0) {
-    try {
-      // 使用 webview 的 DOM 方法设置文件
-      const setInputCode = `
-        (function() {
-          var inputs = document.querySelectorAll('input[type="file"]');
-          if (inputs.length === 0) return { ok: false, error: 'no file input found' };
-          // 尝试让 input 可见并接受文件
-          var inp = inputs[0];
-          inp.style.display = 'block';
-          inp.style.opacity = '1';
-          inp.style.position = 'relative';
-          inp.style.width = '1px';
-          inp.style.height = '1px';
-          inp.style.overflow = 'hidden';
-          return { ok: true, accept: inp.accept, multiple: inp.multiple };
-        })()
-      `;
-      await safeExecuteJS(webview, setInputCode, 3000, 'setFileInput');
-
-      // 注意：由于安全限制，无法直接通过 JS 设置 file input 的 files
-      // 需要通过 Electron 的 file select handler 来处理
-      // 这里先点击 upload 按钮触发文件选择，后续通过 IPC 拦截
-      console.log('[doubaoBridge] 找到 file input，尝试触发上传按钮');
-    } catch (e: any) {
-      console.warn('[doubaoBridge] 设置 file input 失败:', e.message);
-    }
+  if (result?.ok) {
+    console.log(`[doubaoBridge] 文件注入成功: ${result.count} 张`);
+  } else {
+    console.warn('[doubaoBridge] 文件注入失败:', result?.error);
   }
 
-  // 策略 2：点击上传按钮
-  if (diag && diag.uploadButtons && diag.uploadButtons.length > 0) {
-    const btn = diag.uploadButtons[0];
-    console.log(`[doubaoBridge] 找到上传按钮: "${btn.text}" at ${btn.pos}`);
-    const clickCode = `
-      (function() {
-        var buttons = document.querySelectorAll('button, [role="button"], div');
-        for (var i = 0; i < buttons.length; i++) {
-          var text = (buttons[i].innerText || '').trim();
-          if (text.indexOf('上传') >= 0 || text.indexOf('参考') >= 0 || text.indexOf('图片') >= 0) {
-            var rect = buttons[i].getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0 && rect.width < 200) {
-              buttons[i].click();
-              return { ok: true, text: text.substring(0, 30) };
-            }
-          }
-        }
-        return { ok: false };
-      })()
-    `;
-    const result = await safeExecuteJS<{ ok: boolean; text?: string }>(webview, clickCode, 3000, 'clickUpload');
-    if (result?.ok) {
-      console.log(`[doubaoBridge] 已点击上传按钮: "${result.text}"`);
-      // 等待文件对话框出现
-      await sleep(1000);
-    }
-  }
-
-  // 诊断：如果都没找到，输出页面上所有可交互元素帮助调试
-  if ((!diag || !diag.inputs || diag.inputs.length === 0) && (!diag || !diag.uploadButtons || diag.uploadButtons.length === 0)) {
-    const fullDiag = `
-      (function() {
-        var result = [];
-        var allEls = document.querySelectorAll('button, [role="button"], input, [class*="upload"], [class*="attach"], [class*="file"], [class*="image"]');
-        for (var i = 0; i < allEls.length && i < 30; i++) {
-          var el = allEls[i];
-          var rect = el.getBoundingClientRect();
-          if (rect.width > 0 && rect.height > 0) {
-            result.push(el.tagName + '|' + (el.className || '').substring(0, 40) + '|' + (el.innerText || '').substring(0, 20).trim() + '|' + Math.round(rect.left) + ',' + Math.round(rect.top));
-          }
-        }
-        return result;
-      })()
-    `;
-    const diagResult = await safeExecuteJS<string[]>(webview, fullDiag, 3000, 'fullDiag');
-    console.log('[doubaoBridge] 页面可交互元素诊断:', diagResult);
-  }
-
-  return true;
+  return result?.ok || false;
 }

@@ -206,7 +206,25 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // 有参考图片时上传
         if (attachments && attachments.length > 0) {
           setAccountAutomationState(accountId, 'injecting', '上传参考图片...');
-          await uploadReferenceImages(webview, attachments);
+          // 读取文件为 base64
+          const fileDataList: Array<{ name: string; base64: string; mime: string }> = [];
+          for (const filePath of attachments) {
+            try {
+              const result = await window.electronAPI.tasks.readFileAsBase64(filePath);
+              if (result.success && result.data) {
+                const fileName = filePath.split(/[/\\]/).pop() || 'image.jpg';
+                const mimeMatch = result.data.match(/^data:(image\/\w+);base64,/);
+                const mime = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+                const base64 = result.data.replace(/^data:image\/\w+;base64,/, '');
+                fileDataList.push({ name: fileName, base64, mime });
+              }
+            } catch (e: any) {
+              console.warn(`[BrowserPanel] 读取文件失败 ${filePath}:`, e.message);
+            }
+          }
+          if (fileDataList.length > 0) {
+            await uploadReferenceImages(webview, fileDataList);
+          }
           await sleep(1000);
         }
       } else {

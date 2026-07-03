@@ -77,6 +77,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:getCompletedOutputs'),
     selectImages: (): Promise<{ success: boolean; filePaths?: string[]; error?: string }> =>
       ipcRenderer.invoke('tasks:selectImages'),
+    readFileAsBase64: (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> =>
+      ipcRenderer.invoke('tasks:readFileAsBase64', filePath),
   },
 
   // ---- 系统操作 ----

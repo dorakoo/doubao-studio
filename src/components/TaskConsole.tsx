@@ -97,6 +97,7 @@ const TaskConsole: React.FC = () => {
   const [selectedMode, setSelectedMode] = useState<GenerationMode>('chat');
   const [videoConfig, setVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
   const [attachments, setAttachments] = useState<string[]>([]);
+  const [attachmentBase64s, setAttachmentBase64s] = useState<Record<string, string>>({});
 
   // ---- 添加任务 ----
 
@@ -118,6 +119,13 @@ const TaskConsole: React.FC = () => {
     const result = await window.electronAPI.tasks.selectImages();
     if (result.success && result.filePaths && result.filePaths.length > 0) {
       setAttachments((prev) => [...prev, ...result.filePaths!]);
+      // 读取文件为 base64 用于缩略图显示
+      for (const filePath of result.filePaths!) {
+        const base64Result = await window.electronAPI.tasks.readFileAsBase64(filePath);
+        if (base64Result.success && base64Result.data) {
+          setAttachmentBase64s((prev) => ({ ...prev, [filePath]: base64Result.data! }));
+        }
+      }
     }
   }, []);
 
@@ -450,12 +458,19 @@ const TaskConsole: React.FC = () => {
                   }}
                 >
                   <img
-                    src={`file://${filePath}`}
+                    src={attachmentBase64s[filePath] || ''}
                     alt={`ref-${idx}`}
                     style={{ width: '100%', height: '100%', objectFit: 'cover' }}
                   />
                   <button
-                    onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                    onClick={() => {
+                      setAttachments((prev) => prev.filter((_, i) => i !== idx));
+                      setAttachmentBase64s((prev) => {
+                        const next = { ...prev };
+                        delete next[filePath];
+                        return next;
+                      });
+                    }}
                     style={{
                       position: 'absolute',
                       top: 2,

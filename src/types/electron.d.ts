@@ -81,6 +81,7 @@ export interface ElectronAPI {
     batchPause: () => Promise<{ success: boolean }>;
     getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
     selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
+    readFileAsBase64: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
   };
   system: {
     getVersion: () => Promise<string>;
