@@ -58,6 +58,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
   // ---- webview 池动态管理（账号增删同步） ----
+  const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
     const container = poolRef.current;
     if (!container) return;
@@ -79,8 +80,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       createWebview(account, container);
     });
 
-    console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个)`);
-  }, [accounts.map((a) => a.id).join(','), refreshKey]);
+    // 确保当前活跃账号的加载状态同步
+    if (activeAccount) {
+      const isLoading = loadingMapRef.current.get(activeAccount.id);
+      setActiveLoading(!!isLoading);
+      if (!isLoading) setLoadText('');
+      console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), activeAccount=${activeAccount.id}, isLoading=${isLoading}`);
+    } else {
+      console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), 无活跃账号`);
+    }
+  }, [accountsKey, refreshKey]);
 
   // ---- 创建单个 webview ----
   const createWebview = (account: Account, container: HTMLDivElement) => {
