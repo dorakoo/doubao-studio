@@ -60,9 +60,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   // ---- webview 池动态管理（账号增删同步） ----
   const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
-    alert(`[BrowserPanel] effect 触发: accounts.length=${accounts.length}, accountsKey="${accountsKey}", activeAccount=${activeAccount?.id}, container=${!!poolRef.current}`);
     const container = poolRef.current;
-    if (!container) return;
+    if (!container) {
+      console.log('[BrowserPanel] container 未就绪，跳过');
+      return;
+    }
+    if (!activeAccount) {
+      console.log('[BrowserPanel] activeAccount 为空，跳过');
+      return;
+    }
 
     const accountIds = new Set(accounts.map(a => a.id));
 
@@ -90,7 +96,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } else {
       console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), 无活跃账号`);
     }
-  }, [accountsKey, refreshKey]);
+  }, [accountsKey, refreshKey, activeAccount?.id]);
 
   // ---- 创建单个 webview ----
   const createWebview = (account: Account, container: HTMLDivElement) => {
@@ -144,9 +150,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     container.appendChild(webview);
     registryRef.current.set(accId, webview);
-    const msg = `[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`;
-    console.log(msg);
-    if (account === accounts[0]) alert(msg); // 第一个账号创建时弹窗确认
+    console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`);
 
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
     // 解决 Electron webview 事件不触发的问题
