@@ -61,16 +61,17 @@ export async function injectPrompt(
   prompt: string,
   maxRetries: number = 3
 ): Promise<boolean> {
+  console.log(`[doubaoBridge] injectPrompt 原始提示词长度=${prompt.length}, 前30字="${prompt.substring(0, 30)}..."`);
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     console.log(`[doubaoBridge] injectPrompt 第 ${attempt}/${maxRetries} 次尝试`);
 
     const result = await tryInjectOnce(webview, prompt);
     if (result.ok) {
-      console.log('[doubaoBridge] injectPrompt 成功');
+      console.log(`[doubaoBridge] injectPrompt 成功 method=${result.method} tag=${result.tag} actualLen=${result.actualLen} expectedLen=${prompt.length} preview="${result.preview || ''}"`);
       return true;
     }
 
-    console.warn(`[doubaoBridge] injectPrompt 第 ${attempt} 次失败:`, result.error);
+    console.warn(`[doubaoBridge] injectPrompt 第 ${attempt} 次失败:`, result.error, `actualLen=${result.actualLen}`);
 
     if (attempt < maxRetries) {
       console.log('[doubaoBridge] 等待 2s 后重试...');
@@ -86,7 +87,7 @@ export async function injectPrompt(
 async function tryInjectOnce(
   webview: WebviewHandle,
   prompt: string
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; method?: string; tag?: string; actualLen?: number }> {
   // 安全的 JSON 序列化（处理特殊字符）
   const safePrompt = JSON.stringify(prompt);
 
@@ -148,7 +149,7 @@ async function tryInjectOnce(
               placeholder: el2.getAttribute ? (el2.getAttribute('placeholder') || '').substring(0, 30) : ''
             });
           }
-          return { ok: false, error: '未找到输入框，候选诊断: ' + JSON.stringify(diag.slice(0, 8)) };
+          return { ok: false, error: '未找到输入框，候选诊断: ' + JSON.stringify(diag.slice(0, 8)), actualLen: 0 };
         }
 
         // 按分数排序，取最高的
@@ -171,7 +172,7 @@ async function tryInjectOnce(
           var actualLen = val.trim().length;
           var expectedLen = promptText.length;
           var ratio = actualLen > 0 && expectedLen > 0 ? Math.min(actualLen, expectedLen) / Math.max(actualLen, expectedLen) : 0;
-          return { pass: ratio >= 0.5, actual: val, ratio: ratio, actualLen: actualLen };
+          return { pass: ratio >= 0.5, actual: val, ratio: ratio, actualLen: actualLen, preview: val.substring(0, 50) };
         }
 
         // 策略1：聚焦 + execCommand insertText（最兼容富文本编辑器）
@@ -185,7 +186,7 @@ async function tryInjectOnce(
             if (v1.pass) {
               console.log('[doubaoBridge] execCommand 注入成功, len=' + v1.actualLen);
               setTimeout(function() { input.dispatchEvent(new Event('input', { bubbles: true })); }, 100);
-              return { ok: true, tag: input.tagName, method: 'execCommand' };
+              return { ok: true, tag: input.tagName, method: 'execCommand', actualLen: v1.actualLen, preview: v1.preview };
             }
             console.log('[doubaoBridge] execCommand 验证失败, ratio=' + v1.ratio.toFixed(2));
           }
@@ -211,7 +212,7 @@ async function tryInjectOnce(
             var v2 = verifyValue();
             if (v2.pass) {
               console.log('[doubaoBridge] paste 注入成功, len=' + v2.actualLen);
-              return { ok: true, tag: input.tagName, method: 'paste' };
+              return { ok: true, tag: input.tagName, method: 'paste', actualLen: v2.actualLen, preview: v2.preview };
             }
           }
         } catch(e) {
@@ -241,7 +242,7 @@ async function tryInjectOnce(
           input.focus();
           var v3 = verifyValue();
           if (v3.pass) {
-            return { ok: true, tag: input.tagName, method: 'native-setter' };
+            return { ok: true, tag: input.tagName, method: 'native-setter', actualLen: v3.actualLen, preview: v3.preview };
           }
         }
 
@@ -254,31 +255,26 @@ async function tryInjectOnce(
           input.focus();
           var v4 = verifyValue();
           if (v4.pass) {
-            return { ok: true, tag: input.tagName, method: 'textContent' };
+            return { ok: true, tag: input.tagName, method: 'textContent', actualLen: v4.actualLen, preview: v4.preview };
           }
         }
 
         // 全部失败
         var vFinal = verifyValue();
-        return { ok: false, error: '所有注入策略失败, 实际值长度=' + vFinal.actualLen + ', 期望=' + promptText.length + ', 元素类型=' + best.type };
+        return { ok: false, error: '所有注入策略失败, 实际值长度=' + vFinal.actualLen + ', 期望=' + promptText.length + ', 元素类型=' + best.type, actualLen: vFinal.actualLen, method: 'none' };
       } catch (e) {
-        return { ok: false, error: e.message || '未知错误' };
-      }
-    })();
-  `;
-      } catch (e) {
-        return { ok: false, error: e.message || '未知错误' };
+        return { ok: false, error: e.message || '未知错误', actualLen: 0 };
       }
     })();
   `;
 
   try {
-    const result = await safeExecuteJS<{ ok: boolean; error?: string; tag?: string }>(
+    const result = await safeExecuteJS<{ ok: boolean; error?: string; tag?: string; method?: string; actualLen?: number }>(
       webview, code, 10000, 'injectPrompt'
     );
     return result;
   } catch (err: any) {
-    return { ok: false, error: err.message };
+    return { ok: false, error: err.message, actualLen: 0 };
   }
 }
 
@@ -438,7 +434,7 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
         sendBtn.click();
         return { ok: true, method: 'click' };
       } catch (e) {
-        return { ok: false, error: e.message || '未知错误' };
+        return { ok: false, error: e.message || '未知错误', actualLen: 0 };
       }
     })();
   `;
@@ -740,40 +736,180 @@ export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<G
 
 /**
  * 从豆包生成结果页面提取图片 URL
+ * 只提取 AI 生成的产物图片，排除用户上传的参考图
  * 返回 JSON 数组字符串，包含所有产物图片的直链
  */
 export async function getResultUrl(webview: WebviewHandle): Promise<string> {
   try {
     const code = `
       (function() {
-        // 查找豆包回复区域中的图片
-        var imgs = document.querySelectorAll('img');
         var urls = [];
-        for (var i = 0; i < imgs.length; i++) {
-          var src = imgs[i].src || '';
-          // 跳过图标、头像、UI 元素，只保留内容图片
-          if (src && !src.includes('data:') &&
-              !src.includes('icon') && !src.includes('avatar') &&
-              !src.includes('emoji') && !src.includes('logo') &&
-              !src.includes('badge') && !src.includes('status') &&
-              src.includes('http') &&
-              (src.includes('image') || src.includes('img') || src.includes('cdn') ||
-               src.includes('.png') || src.includes('.jpg') || src.includes('.webp') ||
-               src.includes('tos-') || src.includes('bytecdn') || src.includes('byteimg'))) {
-            // 去重
-            if (urls.indexOf(src) === -1) {
-              urls.push(src);
+
+        // ========== 消息选择器（与 checkGenerating 保持一致） ==========
+        var msgSelectors = [
+          '[class*="message-item"]',
+          '[class*="messageItem"]',
+          '[class*="chat-message"]',
+          '[class*="chatMessage"]',
+          '[data-testid*="message"]',
+          'article',
+        ];
+
+        // 找到最多消息的选择器
+        var bestMsgs = [];
+        var bestSelector = '';
+        for (var m = 0; m < msgSelectors.length; m++) {
+          try {
+            var msgs = document.querySelectorAll(msgSelectors[m]);
+            if (msgs.length > bestMsgs.length) {
+              bestMsgs = msgs;
+              bestSelector = msgSelectors[m];
+            }
+          } catch(e) {}
+        }
+
+        // ========== 辅助函数：判断元素是否在视口左侧（AI消息） ==========
+        function isLeftSide(el) {
+          var rect = el.getBoundingClientRect();
+          return rect.left < window.innerWidth * 0.4;
+        }
+
+        // ========== 辅助函数：从元素中提取有效图片 ==========
+        function extractImages(container) {
+          var result = [];
+          if (!container) return result;
+          var imgs = container.querySelectorAll('img');
+          for (var i = 0; i < imgs.length; i++) {
+            var src = imgs[i].src || '';
+            if (!src || src.indexOf('data:') === 0) continue;
+            if (src.indexOf('icon') >= 0 || src.indexOf('avatar') >= 0 ||
+                src.indexOf('emoji') >= 0 || src.indexOf('logo') >= 0 ||
+                src.indexOf('badge') >= 0 || src.indexOf('status') >= 0) continue;
+            if (src.indexOf('http') < 0) continue;
+            // 必须是内容图（CDN域名或图片扩展名）
+            var isContentImg = src.indexOf('image') >= 0 || src.indexOf('img') >= 0 ||
+                               src.indexOf('cdn') >= 0 || src.indexOf('.png') >= 0 ||
+                               src.indexOf('.jpg') >= 0 || src.indexOf('.webp') >= 0 ||
+                               src.indexOf('tos-') >= 0 || src.indexOf('bytecdn') >= 0 ||
+                               src.indexOf('byteimg') >= 0 || src.indexOf('doubao') >= 0;
+            if (!isContentImg) continue;
+            // 跳过太小的图（可能是图标缩略图）
+            var w = imgs[i].naturalWidth || imgs[i].width || 0;
+            var h = imgs[i].naturalHeight || imgs[i].height || 0;
+            if (w > 0 && h > 0 && w < 50 && h < 50) continue;
+            if (result.indexOf(src) === -1) {
+              result.push(src);
+            }
+          }
+          // 提取视频 poster
+          var videos = container.querySelectorAll('video');
+          for (var j = 0; j < videos.length; j++) {
+            var poster = videos[j].poster || '';
+            if (poster && result.indexOf(poster) === -1) {
+              result.push(poster);
+            }
+          }
+          return result;
+        }
+
+        // ========== 方法1：找到包含下载/保存按钮的消息（AI产物才有下载按钮） ==========
+        var downloadBtnSelectors = [
+          'button[aria-label*="下载"]',
+          'button[aria-label*="保存"]',
+          'button[aria-label*="download"]',
+          'button[aria-label*="save"]',
+          '[class*="download"]',
+          '[class*="Download"]',
+          '[class*="save-btn"]',
+          '[title*="下载"]',
+          '[title*="保存"]',
+          '[data-testid*="download"]',
+          '[data-testid*="save"]',
+        ];
+
+        var aiContainers = [];
+        if (bestMsgs.length > 0) {
+          for (var i = 0; i < bestMsgs.length; i++) {
+            var msg = bestMsgs[i];
+            // 检查消息里有没有下载/保存按钮
+            var hasDownloadBtn = false;
+            for (var d = 0; d < downloadBtnSelectors.length; d++) {
+              try {
+                var btns = msg.querySelectorAll(downloadBtnSelectors[d]);
+                if (btns.length > 0) {
+                  hasDownloadBtn = true;
+                  break;
+                }
+              } catch(e) {}
+            }
+            if (hasDownloadBtn) {
+              aiContainers.push(msg);
             }
           }
         }
-        // 也检查 video 标签的 poster
-        var videos = document.querySelectorAll('video');
-        for (var j = 0; j < videos.length; j++) {
-          var poster = videos[j].poster || '';
-          if (poster && urls.indexOf(poster) === -1) {
-            urls.push(poster);
+
+        // ========== 方法2：如果方法1没找到，用"左侧消息+有图片"判断 AI 消息 ==========
+        if (aiContainers.length === 0 && bestMsgs.length > 0) {
+          for (var k = 0; k < bestMsgs.length; k++) {
+            var msg2 = bestMsgs[k];
+            var imgs2 = msg2.querySelectorAll('img');
+            if (imgs2.length > 0 && isLeftSide(msg2)) {
+              // 左侧消息且有图片 → 认为是AI产物消息
+              var hasContentImg = false;
+              for (var p = 0; p < imgs2.length; p++) {
+                var s = imgs2[p].src || '';
+                if (s.indexOf('http') >= 0 && s.indexOf('icon') < 0 && s.indexOf('avatar') < 0 && s.indexOf('emoji') < 0) {
+                  hasContentImg = true;
+                  break;
+                }
+              }
+              if (hasContentImg) {
+                aiContainers.push(msg2);
+              }
+            }
           }
         }
+
+        // ========== 从 AI 容器中提取图片 ==========
+        for (var c = 0; c < aiContainers.length; c++) {
+          var imgs = extractImages(aiContainers[c]);
+          for (var u = 0; u < imgs.length; u++) {
+            if (urls.indexOf(imgs[u]) === -1) {
+              urls.push(imgs[u]);
+            }
+          }
+        }
+
+        // ========== 兜底：如果以上方法都没找到，用旧方法全页面扫描（兼容特殊页面） ==========
+        if (urls.length === 0) {
+          var allImgs = document.querySelectorAll('img');
+          for (var q = 0; q < allImgs.length; q++) {
+            var src3 = allImgs[q].src || '';
+            if (!src3 || src3.indexOf('data:') === 0) continue;
+            if (src3.indexOf('icon') >= 0 || src3.indexOf('avatar') >= 0 ||
+                src3.indexOf('emoji') >= 0 || src3.indexOf('logo') >= 0 ||
+                src3.indexOf('badge') >= 0 || src3.indexOf('status') >= 0) continue;
+            if (src3.indexOf('http') < 0) continue;
+            var isContent = src3.indexOf('image') >= 0 || src3.indexOf('img') >= 0 ||
+                            src3.indexOf('cdn') >= 0 || src3.indexOf('.png') >= 0 ||
+                            src3.indexOf('.jpg') >= 0 || src3.indexOf('.webp') >= 0 ||
+                            src3.indexOf('tos-') >= 0 || src3.indexOf('bytecdn') >= 0 ||
+                            src3.indexOf('byteimg') >= 0 || src3.indexOf('doubao') >= 0;
+            if (!isContent) continue;
+            if (urls.indexOf(src3) === -1) {
+              urls.push(src3);
+            }
+          }
+          // 视频兜底
+          var allVideos = document.querySelectorAll('video');
+          for (var v = 0; v < allVideos.length; v++) {
+            var p3 = allVideos[v].poster || '';
+            if (p3 && urls.indexOf(p3) === -1) {
+              urls.push(p3);
+            }
+          }
+        }
+
         return JSON.stringify(urls);
       })();
     `;
