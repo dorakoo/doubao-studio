@@ -179,7 +179,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await waitForWebviewReady(webview, 15000);
       // 根据任务模式切换到对应页面
       if (mode && mode !== 'chat') {
-        setAccountAutomationState(accountId, 'injecting', \`切换到\${mode === 'image' ? '图片' : mode === 'video' ? '视频' : mode === 'music' ? '音乐' : mode}模式...\`);
+        const modeLabel = mode === 'image' ? '图片' : mode === 'video' ? '视频' : mode === 'music' ? '音乐' : mode;
+        setAccountAutomationState(accountId, 'injecting', '切换到' + modeLabel + '模式...');
         switchMode(webview, mode);
         await waitForWebviewReady(webview, 20000);
       } else {
