@@ -1,6 +1,6 @@
 /**
  * src/components/BrowserPanel.tsx
- * V3.2 最小化诊断版 — 确认 webview 基础加载能力
+ * V3.3 修复 poolRef 为空 — 依赖数组加入 activeAccount
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
@@ -51,23 +51,23 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   useEffect(() => {
     const container = poolRef.current;
     if (!container) {
-      console.log('[BrowserPanel] ❌ poolRef.current 为空，容器未挂载');
+      console.log('[BrowserPanel] poolRef 为空，等待容器挂载');
       return;
     }
     if (accounts.length === 0) {
-      console.log('[BrowserPanel] ❌ accounts 为空');
+      console.log('[BrowserPanel] accounts 为空');
       return;
     }
 
-    console.log('[BrowserPanel] ✅ useEffect 触发, accounts:', accounts.length, 'activeAccount:', activeAccount?.id);
+    console.log('[BrowserPanel] ✅ 开始创建 webview 池, accounts:', accounts.length);
 
-    accounts.forEach((account, index) => {
+    accounts.forEach((account) => {
       if (registryRef.current.has(account.id)) {
         console.log(`[BrowserPanel] webview ${account.id} 已存在，跳过`);
         return;
       }
 
-      console.log(`[BrowserPanel] 创建 webview #${index}: ${account.id}, partition=${account.partition}`);
+      console.log(`[BrowserPanel] 创建 webview: ${account.id}`);
       loadingMapRef.current.set(account.id, true);
 
       const webview = document.createElement('webview') as HTMLWebViewElement;
@@ -80,55 +80,60 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       const accId = account.id;
 
-      // 所有可能的加载事件全部监听
-      const events = [
-        'did-start-loading',
-        'did-stop-loading',
-        'did-finish-load',
-        'did-navigate',
-        'did-navigate-in-page',
-        'did-fail-load',
-        'dom-ready',
-      ];
-      events.forEach((evt) => {
-        webview.addEventListener(evt, (...args: any[]) => {
-          console.log(`[BrowserPanel] [${accId}] 事件: ${evt}`, evt === 'did-fail-load' ? args[0] : '');
-          if (evt === 'did-fail-load' || evt === 'did-finish-load' || evt === 'did-navigate' || evt === 'did-navigate-in-page' || evt === 'did-stop-loading' || evt === 'dom-ready') {
-            loadingMapRef.current.set(accId, false);
-            const cur = useAccountStore.getState().selectedAccountId;
-            if (accId === cur) {
-              setActiveLoading(false);
-              setLoadText('');
-              console.log(`[BrowserPanel] ✅ ${accId} 加载完成，关闭 loading`);
-            }
-          }
-        });
+      const markLoaded = (evt: string) => {
+        loadingMapRef.current.set(accId, false);
+        console.log(`[BrowserPanel] [${accId}] 加载完成 (${evt})`);
+        const cur = useAccountStore.getState().selectedAccountId;
+        if (accId === cur) {
+          setActiveLoading(false);
+          setLoadText('');
+        }
+      };
+
+      webview.addEventListener('did-start-loading', () => {
+        loadingMapRef.current.set(accId, true);
+        const cur = useAccountStore.getState().selectedAccountId;
+        if (accId === cur) {
+          setActiveLoading(true);
+          setLoadText('页面加载中...');
+        }
+      });
+
+      webview.addEventListener('did-finish-load', () => markLoaded('did-finish-load'));
+      webview.addEventListener('did-stop-loading', () => markLoaded('did-stop-loading'));
+      webview.addEventListener('did-navigate', () => markLoaded('did-navigate'));
+      webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
+      webview.addEventListener('dom-ready', () => markLoaded('dom-ready'));
+
+      webview.addEventListener('did-fail-load', () => {
+        loadingMapRef.current.set(accId, false);
+        const cur = useAccountStore.getState().selectedAccountId;
+        if (accId === cur) {
+          setActiveLoading(false);
+          setLoadText('加载失败');
+        }
       });
 
       container.appendChild(webview);
       registryRef.current.set(accId, webview);
       console.log(`[BrowserPanel] ✅ webview ${accId} 已添加到 DOM`);
 
-      // 超时兜底
+      // 20s 超时兜底
       setTimeout(() => {
         if (loadingMapRef.current.get(accId)) {
-          console.warn(`[BrowserPanel] ⚠️ ${accId} 20s 超时，强制关闭 loading`);
-          loadingMapRef.current.set(accId, false);
-          const cur = useAccountStore.getState().selectedAccountId;
-          if (accId === cur) {
-            setActiveLoading(false);
-            setLoadText('');
-          }
+          console.warn(`[BrowserPanel] ⚠️ ${accId} 20s 超时`);
+          markLoaded('timeout');
         }
       }, 20000);
     });
-  }, [accounts.map((a) => a.id).join(','), refreshKey]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts.map((a) => a.id).join(','), activeAccount?.id, refreshKey]);
 
   // ---- 切换可见性 ----
   useEffect(() => {
-    console.log('[BrowserPanel] 切换可见性 →', activeAccount?.id);
+    if (!activeAccount) return;
     registryRef.current.forEach((webview, accountId) => {
-      if (accountId === activeAccount?.id) {
+      if (accountId === activeAccount.id) {
         webview.style.visibility = 'visible';
         webview.style.pointerEvents = 'auto';
         const isLoading = loadingMapRef.current.get(accountId);
@@ -170,21 +175,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[Automation:${accountId}] 开始执行任务 ${taskId}`);
       setAccountAutomationState(accountId, 'injecting', '等待页面就绪...');
       await waitForWebviewReady(webview, 15000);
-      console.log(`[Automation:${accountId}] 页面就绪`);
       await navigateToChat(webview);
       await waitForWebviewReady(webview, 15000);
-      console.log(`[Automation:${accountId}] 导航完成`);
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       const injected = await Promise.race([
         injectPrompt(webview, prompt),
-        new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error('注入超时')), 10000)),
+        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 10000)),
       ]);
       if (!injected) throw new Error('注入失败');
       await sleep(800);
       setAccountAutomationState(accountId, 'submitting', '正在发送...');
       const submitted = await Promise.race([
         submitPrompt(webview),
-        new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error('提交超时')), 10000)),
+        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
       ]);
       if (!submitted) throw new Error('提交失败');
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...');
@@ -195,7 +198,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         try {
           generating = await Promise.race([
             checkGenerating(webview),
-            new Promise<boolean>((_, reject) => setTimeout(() => reject(new Error('检测超时')), 10000)),
+            new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('检测超时')), 10000)),
           ]);
         } catch { generating = true; }
         if (!generating) break;
@@ -203,7 +206,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       if (generating) throw new Error('生成超时');
       const resultUrl = await getResultUrl(webview);
-      console.log(`[Automation:${accountId}] 完成:`, resultUrl);
       await completeAutomation(taskId, accountId, resultUrl);
     } catch (err: any) {
       console.error(`[Automation:${accountId}] 失败:`, err.message);
