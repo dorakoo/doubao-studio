@@ -1,12 +1,11 @@
 /**
  * src/components/BrowserPanel.tsx
- * 内嵌浏览器面板 — V3 多账号并行 + 后台执行
+ * 内嵌浏览器面板 — V3.1 修复加载卡死 + 多账号并行
  *
- * 核心架构：
- * - 为每个账号维护独立 webview，切换账号不销毁
- * - CSS 控制显隐，后台 webview 保持运行
- * - 监听 per-account 执行状态，自动路由任务到对应 webview
- * - 支持多账号并行执行
+ * 修复点：
+ * - 活跃账号优先加载，其余错开创建（避免并发限速）
+ * - 增加 did-navigate / did-navigate-in-page 信号（SPA 兼容）
+ * - 30s 超时兜底自动关闭 loading 遮罩
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
@@ -62,70 +61,109 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     : undefined;
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
-  // ---- webview 池 ----
+  // ---- webview 创建（单个） ----
+
+  const createWebview = useCallback(async (account: Account, container: HTMLDivElement) => {
+    if (registryRef.current.has(account.id)) return;
+
+    console.log('[BrowserPanel] 创建 webview for account:', account.id);
+    loadingMapRef.current.set(account.id, true);
+
+    try {
+      await window.electronAPI.accounts.getPartition(account.id);
+    } catch (err) {
+      console.warn('[BrowserPanel] getPartition 失败, 继续创建:', account.id, err);
+    }
+
+    const webview = document.createElement('webview') as HTMLWebViewElement;
+    webview.setAttribute('src', 'https://www.doubao.com/chat/');
+    webview.setAttribute('partition', `persist:doubao_${account.partition}`);
+    webview.setAttribute('allowpopups', 'true');
+    webview.setAttribute('useragent',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    );
+    webview.style.cssText = 'width:100%;height:100%;border:none;outline:none;position:absolute;top:0;left:0;';
+    webview.style.visibility = 'hidden';
+    webview.style.pointerEvents = 'none';
+
+    const accId = account.id;
+
+    // 统一的"加载完成"处理 — 用 store.getState() 读最新 activeId，避免闭包过期
+    const markLoaded = (event: string) => {
+      loadingMapRef.current.set(accId, false);
+      console.log(`[BrowserPanel] webview ${accId} 加载完成 (via ${event})`);
+      const currentActiveId = useAccountStore.getState().selectedAccountId;
+      if (accId === currentActiveId) {
+        setActiveLoading(false);
+        setLoadText('');
+      }
+    };
+
+    webview.addEventListener('did-start-loading', () => {
+      loadingMapRef.current.set(accId, true);
+      console.log(`[BrowserPanel] webview ${accId} 开始加载`);
+      const currentActiveId = useAccountStore.getState().selectedAccountId;
+      if (accId === currentActiveId) {
+        setActiveLoading(true);
+        setLoadText('页面加载中...');
+      }
+    });
+
+    // 多种加载完成信号 — SPA 兼容
+    webview.addEventListener('did-finish-load', () => markLoaded('did-finish-load'));
+    webview.addEventListener('did-stop-loading', () => markLoaded('did-stop-loading'));
+    webview.addEventListener('did-navigate', () => markLoaded('did-navigate'));
+    webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
+
+    webview.addEventListener('did-fail-load', (e: any) => {
+      console.warn(`[BrowserPanel] webview ${accId} 加载失败:`, e);
+      loadingMapRef.current.set(accId, false);
+      const currentActiveId = useAccountStore.getState().selectedAccountId;
+      if (accId === currentActiveId) {
+        setActiveLoading(false);
+        setLoadText('加载失败，请检查网络');
+      }
+    });
+
+    container.appendChild(webview);
+    registryRef.current.set(accId, webview);
+    console.log('[BrowserPanel] webview 已注册:', accId);
+
+    // 30s 超时兜底
+    setTimeout(() => {
+      if (loadingMapRef.current.get(accId)) {
+        console.warn(`[BrowserPanel] webview ${accId} 30s 超时，强制关闭 loading`);
+        markLoaded('timeout-30s');
+      }
+    }, 30000);
+  }, []);
+
+  // ---- webview 池初始化（活跃账号优先 + 其余错开） ----
 
   useEffect(() => {
     if (!poolRef.current || accounts.length === 0) return;
     const container = poolRef.current;
 
-    accounts.forEach(async (account) => {
+    // 排序：活跃账号排第一，立即创建；其余错开 2s
+    const activeId = activeAccount?.id;
+    const sorted = [...accounts].sort((a, b) => {
+      if (a.id === activeId) return -1;
+      if (b.id === activeId) return 1;
+      return 0;
+    });
+
+    sorted.forEach((account, index) => {
       if (registryRef.current.has(account.id)) return;
 
-      console.log('[BrowserPanel] 创建 webview for account:', account.id);
-      loadingMapRef.current.set(account.id, true);
-      if (account.id === activeAccount?.id) {
-        setActiveLoading(true);
-        setLoadText('加载豆包中...');
+      if (index === 0) {
+        // 活跃账号立即创建
+        createWebview(account, container);
+      } else {
+        // 其余错开 2s 避免并发限速
+        setTimeout(() => {
+          createWebview(account, container);
+        }, index * 2000);
       }
-
-      await window.electronAPI.accounts.getPartition(account.id);
-
-      const webview = document.createElement('webview') as HTMLWebViewElement;
-      webview.setAttribute('src', 'https://www.doubao.com/chat/');
-      webview.setAttribute('partition', `persist:doubao_${account.partition}`);
-      webview.setAttribute('allowpopups', 'true');
-      webview.setAttribute('useragent',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-      );
-      webview.style.cssText = 'width:100%;height:100%;border:none;outline:none;position:absolute;top:0;left:0;';
-      webview.style.visibility = 'hidden';
-      webview.style.pointerEvents = 'none';
-
-      const accId = account.id;
-
-      webview.addEventListener('did-start-loading', () => {
-        loadingMapRef.current.set(accId, true);
-        if (accId === activeAccount?.id) {
-          setActiveLoading(true);
-          setLoadText('页面加载中...');
-        }
-      });
-
-      webview.addEventListener('did-stop-loading', () => {
-        loadingMapRef.current.set(accId, false);
-        if (accId === activeAccount?.id) setActiveLoading(false);
-      });
-
-      webview.addEventListener('did-finish-load', () => {
-        loadingMapRef.current.set(accId, false);
-        if (accId === activeAccount?.id) {
-          setActiveLoading(false);
-          setLoadText('豆包已就绪');
-          setTimeout(() => setLoadText(''), 1500);
-        }
-      });
-
-      webview.addEventListener('did-fail-load', () => {
-        loadingMapRef.current.set(accId, false);
-        if (accId === activeAccount?.id) {
-          setActiveLoading(false);
-          setLoadText('加载失败，请检查网络');
-        }
-      });
-
-      container.appendChild(webview);
-      registryRef.current.set(accId, webview);
-      console.log('[BrowserPanel] webview 已创建并注册:', accId);
     });
   }, [accounts.map((a) => a.id).join(','), refreshKey]);
 
@@ -149,7 +187,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   // ---- V3 自动化：监听 per-account 执行状态 ----
 
   useEffect(() => {
-    // 检查每个账号的执行状态
     accounts.forEach((account) => {
       const accountId = account.id;
       const isBusy = accountBusy[accountId];
@@ -157,7 +194,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const webview = registryRef.current.get(accountId);
 
       if (!isBusy || !taskId || !webview) return;
-      if (runningRef.current.has(accountId)) return; // 已在执行中
+      if (runningRef.current.has(accountId)) return;
 
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
@@ -165,7 +202,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log('[BrowserPanel] 检测到账号', accountId, '需要执行任务', taskId);
       runningRef.current.add(accountId);
 
-      // 异步执行
       executeAutomation(accountId, taskId, task.prompt, webview);
     });
   }, [accountBusy, executingTasks]);
@@ -185,16 +221,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[Automation:${accountId}] 开始执行任务 ${taskId}`);
       setAccountAutomationState(accountId, 'injecting', '等待页面就绪...');
 
-      // 1. 等待页面就绪
       await waitForWebviewReady(webview, 15000);
       console.log(`[Automation:${accountId}] 页面就绪`);
 
-      // 2. 导航到聊天页
       await navigateToChat(webview);
       await waitForWebviewReady(webview, 15000);
       console.log(`[Automation:${accountId}] 导航完成`);
 
-      // 3. 注入提示词
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       console.log(`[Automation:${accountId}] injectPrompt 开始`);
       const injected = await Promise.race([
@@ -207,7 +240,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!injected) throw new Error('注入失败：未找到输入框');
       await sleep(800);
 
-      // 4. 提交
       setAccountAutomationState(accountId, 'submitting', '正在发送...');
       console.log(`[Automation:${accountId}] submitPrompt 开始`);
       const submitted = await Promise.race([
@@ -219,7 +251,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[Automation:${accountId}] submitPrompt 结果:`, submitted);
       if (!submitted) throw new Error('提交失败：未找到发送按钮');
 
-      // 5. 等待生成
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...');
       await sleep(3000);
 
@@ -237,7 +268,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             ),
           ]);
         } catch {
-          generating = true; // 超时则假设仍在生成
+          generating = true;
         }
         if (!generating) break;
         setAccountAutomationState(
@@ -249,11 +280,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       if (generating) throw new Error('生成超时（超过 5 分钟）');
 
-      // 6. 获取结果
       const resultUrl = await getResultUrl(webview);
       console.log(`[Automation:${accountId}] 任务完成:`, resultUrl);
 
-      // 7. 完成
       await completeAutomation(taskId, accountId, resultUrl);
     } catch (err: any) {
       console.error(`[Automation:${accountId}] 执行失败:`, err.message);
