@@ -148,6 +148,37 @@ async function tryInjectOnce(
         // ========== 设置值 ==========
         var promptText = ${safePrompt};
 
+        // 优先策略：聚焦 + 全选 + execCommand 插入（兼容富文本编辑器）
+        var useExecCommand = false;
+        if (input.tagName !== 'TEXTAREA' && input.tagName !== 'INPUT') {
+          // contenteditable 元素：用 execCommand 最接近真实输入
+          useExecCommand = true;
+        }
+
+        if (useExecCommand && document.execCommand) {
+          try {
+            input.focus();
+            // 全选现有内容
+            document.execCommand('selectAll', false, null);
+            // 插入新内容（会替换选中内容）
+            var success = document.execCommand('insertText', false, promptText);
+            if (success && (input.innerText || input.textContent || '').trim().length > 0) {
+              console.log('[doubaoBridge] execCommand 注入成功, len=' + (input.innerText || input.textContent || '').length);
+              // 触发必要事件
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+              setTimeout(function() {
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+              }, 100);
+              input.focus();
+              return { ok: true, tag: input.tagName, method: 'execCommand' };
+            }
+          } catch(e) {
+            console.log('[doubaoBridge] execCommand 失败，回退到直接赋值:', e.message);
+          }
+        }
+
+        // 回退策略：直接赋值
         if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
           // textarea/input：使用原生 setter 绕过 React 控制
           var nativeSetter = Object.getOwnPropertyDescriptor(
@@ -182,6 +213,22 @@ async function tryInjectOnce(
 
         // 让输入框获得焦点
         input.focus();
+
+        // 验证：读取实际值，确认注入成功
+        var actualValue = '';
+        if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
+          actualValue = input.value;
+        } else {
+          actualValue = input.innerText || input.textContent || '';
+        }
+        var expectedLen = promptText.length;
+        var actualLen = actualValue.trim().length;
+        var matchRatio = actualLen > 0 && expectedLen > 0 ? Math.min(actualLen, expectedLen) / Math.max(actualLen, expectedLen) : 0;
+
+        if (actualLen === 0 || matchRatio < 0.5) {
+          console.log('[doubaoBridge] 注入验证失败, expectedLen=' + expectedLen + ', actualLen=' + actualLen + ', matchRatio=' + matchRatio.toFixed(2));
+          return { ok: false, error: '注入验证失败: 值长度不匹配' };
+        }
 
         return { ok: true, tag: input.tagName };
       } catch (e) {
