@@ -93,94 +93,133 @@ async function tryInjectOnce(
   const code = `
     (function() {
       try {
-        // ========== 策略A：遍历所有 textarea，找可见的 ==========
+        var viewportH = window.innerHeight;
+        var viewportW = window.innerWidth;
+
+        // ========== 找到最佳输入元素（按面积+位置打分） ==========
+        var candidates = [];
+
+        // 收集所有 textarea
         var textareas = document.querySelectorAll('textarea');
-        var input = null;
         for (var i = 0; i < textareas.length; i++) {
           var ta = textareas[i];
-          if (ta.offsetParent !== null && !ta.disabled) {
-            input = ta;
-            break;
-          }
-        }
-        // 如果所有 textarea 都不可见，取最后一个
-        if (!input && textareas.length > 0) {
-          input = textareas[textareas.length - 1];
-        }
-
-        // ========== 策略B：contenteditable div ==========
-        if (!input) {
-          var editables = document.querySelectorAll('[contenteditable="true"]');
-          for (var j = 0; j < editables.length; j++) {
-            var ed = editables[j];
-            if (ed.offsetParent !== null) {
-              input = ed;
-              break;
-            }
-          }
-          if (!input && editables.length > 0) {
-            input = editables[editables.length - 1];
-          }
+          if (ta.disabled) continue;
+          var rect = ta.getBoundingClientRect();
+          if (rect.width < 30 || rect.height < 20) continue;
+          if (rect.top < 0 || rect.left < 0) continue;
+          var area = rect.width * rect.height;
+          var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0; // 偏下半部分加分
+          var widthScore = rect.width > viewportW * 0.5 ? 1 : 0; // 宽度加分
+          var score = area + bottomScore * 100000 + widthScore * 50000;
+          candidates.push({ el: ta, type: 'textarea', rect: rect, score: score, area: area });
         }
 
-        // ========== 策略C：诊断 ==========
-        if (!input) {
-          var diagnostics = [];
+        // 收集所有 contenteditable 元素
+        var editables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+        for (var j = 0; j < editables.length; j++) {
+          var ed = editables[j];
+          var rect2 = ed.getBoundingClientRect();
+          if (rect2.width < 30 || rect2.height < 20) continue;
+          if (rect2.top < 0 || rect2.left < 0) continue;
+          if (rect2.top > viewportH) continue;
+          var area2 = rect2.width * rect2.height;
+          var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
+          var widthScore2 = rect2.width > viewportW * 0.5 ? 1 : 0;
+          // 排除非常小的可编辑元素（如标签输入框）
+          if (area2 < 2000 && rect2.height < 40) continue;
+          var score2 = area2 + bottomScore2 * 100000 + widthScore2 * 50000;
+          candidates.push({ el: ed, type: 'contenteditable', rect: rect2, score: score2, area: area2 });
+        }
+
+        if (candidates.length === 0) {
+          // 诊断
           var allInputs = document.querySelectorAll('input[type="text"], input:not([type]), textarea, [contenteditable="true"]');
+          var diag = [];
           for (var k = 0; k < allInputs.length; k++) {
-            var el = allInputs[k];
-            diagnostics.push({
-              tag: el.tagName,
-              role: el.getAttribute('role') || '',
-              placeholder: el.getAttribute('placeholder') || '',
-              className: (el.className || '').toString().substring(0, 80),
-              visible: el.offsetParent !== null,
-              disabled: !!el.disabled,
-              contenteditable: el.getAttribute('contenteditable') || ''
+            var el2 = allInputs[k];
+            var r2 = el2.getBoundingClientRect();
+            diag.push({
+              tag: el2.tagName,
+              w: Math.round(r2.width),
+              h: Math.round(r2.height),
+              top: Math.round(r2.top),
+              left: Math.round(r2.left),
+              visible: el2.offsetParent !== null,
+              placeholder: el2.getAttribute ? (el2.getAttribute('placeholder') || '').substring(0, 30) : ''
             });
           }
-          console.log('[doubaoBridge] 诊断 - 页面上找到的输入元素:', JSON.stringify(diagnostics));
-          return { ok: false, error: '未找到输入框，诊断: ' + JSON.stringify(diagnostics.slice(0, 5)) };
+          return { ok: false, error: '未找到输入框，候选诊断: ' + JSON.stringify(diag.slice(0, 8)) };
         }
 
-        console.log('[doubaoBridge] 找到输入框 tag=' + input.tagName + ' visible=' + (input.offsetParent !== null));
+        // 按分数排序，取最高的
+        candidates.sort(function(a, b) { return b.score - a.score; });
+        var best = candidates[0];
+        var input = best.el;
 
-        // ========== 设置值 ==========
+        console.log('[doubaoBridge] 找到最佳输入框 type=' + best.type + ' size=' + Math.round(best.rect.width) + 'x' + Math.round(best.rect.height) + ' pos=' + Math.round(best.rect.left) + ',' + Math.round(best.rect.top) + ' 候选数=' + candidates.length);
+
+        // ========== 注入提示词 ==========
         var promptText = ${safePrompt};
 
-        // 优先策略：聚焦 + 全选 + execCommand 插入（兼容富文本编辑器）
-        var useExecCommand = false;
-        if (input.tagName !== 'TEXTAREA' && input.tagName !== 'INPUT') {
-          // contenteditable 元素：用 execCommand 最接近真实输入
-          useExecCommand = true;
+        function verifyValue() {
+          var val = '';
+          if (best.type === 'textarea') {
+            val = input.value;
+          } else {
+            val = input.innerText || input.textContent || '';
+          }
+          var actualLen = val.trim().length;
+          var expectedLen = promptText.length;
+          var ratio = actualLen > 0 && expectedLen > 0 ? Math.min(actualLen, expectedLen) / Math.max(actualLen, expectedLen) : 0;
+          return { pass: ratio >= 0.5, actual: val, ratio: ratio, actualLen: actualLen };
         }
 
-        if (useExecCommand && document.execCommand) {
-          try {
-            input.focus();
-            // 全选现有内容
-            document.execCommand('selectAll', false, null);
-            // 插入新内容（会替换选中内容）
-            var success = document.execCommand('insertText', false, promptText);
-            if (success && (input.innerText || input.textContent || '').trim().length > 0) {
-              console.log('[doubaoBridge] execCommand 注入成功, len=' + (input.innerText || input.textContent || '').length);
-              // 触发必要事件
-              input.dispatchEvent(new Event('input', { bubbles: true }));
-              input.dispatchEvent(new Event('change', { bubbles: true }));
-              setTimeout(function() {
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-              }, 100);
-              input.focus();
+        // 策略1：聚焦 + execCommand insertText（最兼容富文本编辑器）
+        try {
+          input.focus();
+          document.execCommand('selectAll', false, null);
+          var ok1 = document.execCommand('insertText', false, promptText);
+          if (ok1) {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            var v1 = verifyValue();
+            if (v1.pass) {
+              console.log('[doubaoBridge] execCommand 注入成功, len=' + v1.actualLen);
+              setTimeout(function() { input.dispatchEvent(new Event('input', { bubbles: true })); }, 100);
               return { ok: true, tag: input.tagName, method: 'execCommand' };
             }
-          } catch(e) {
-            console.log('[doubaoBridge] execCommand 失败，回退到直接赋值:', e.message);
+            console.log('[doubaoBridge] execCommand 验证失败, ratio=' + v1.ratio.toFixed(2));
           }
+        } catch(e) {
+          console.log('[doubaoBridge] execCommand 异常:', e.message);
         }
 
-        // 回退策略：直接赋值
-        if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-          // textarea/input：使用原生 setter 绕过 React 控制
+        // 策略2：Clipboard paste 模拟粘贴
+        try {
+          input.focus();
+          document.execCommand('selectAll', false, null);
+          // 创建 paste 事件
+          var clipboardData = new DataTransfer();
+          clipboardData.setData('text/plain', promptText);
+          var pasteEvt = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: clipboardData
+          });
+          var pasteOk = input.dispatchEvent(pasteEvt);
+          if (pasteOk) {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            var v2 = verifyValue();
+            if (v2.pass) {
+              console.log('[doubaoBridge] paste 注入成功, len=' + v2.actualLen);
+              return { ok: true, tag: input.tagName, method: 'paste' };
+            }
+          }
+        } catch(e) {
+          console.log('[doubaoBridge] paste 异常:', e.message);
+        }
+
+        // 策略3：原生 setter 赋值（textarea/input）
+        if (best.type === 'textarea') {
           var nativeSetter = Object.getOwnPropertyDescriptor(
             HTMLTextAreaElement.prototype, 'value'
           ) || Object.getOwnPropertyDescriptor(
@@ -191,46 +230,42 @@ async function tryInjectOnce(
           } else {
             input.value = promptText;
           }
-        } else {
-          // contenteditable div：先清空再设置
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+          input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: promptText }));
+          input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
+          setTimeout(function() {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }, 100);
+          input.focus();
+          var v3 = verifyValue();
+          if (v3.pass) {
+            return { ok: true, tag: input.tagName, method: 'native-setter' };
+          }
+        }
+
+        // 策略4：直接设置 textContent（contenteditable 兜底）
+        if (best.type === 'contenteditable') {
           input.innerHTML = '';
           input.textContent = promptText;
-        }
-
-        // ========== 触发事件 ==========
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-
-        // 额外触发 composition 事件（部分框架依赖此序列）
-        input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
-        input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: promptText }));
-        input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
-
-        // 再触发一次 input 确保框架感知
-        setTimeout(function() {
           input.dispatchEvent(new Event('input', { bubbles: true }));
-        }, 100);
-
-        // 让输入框获得焦点
-        input.focus();
-
-        // 验证：读取实际值，确认注入成功
-        var actualValue = '';
-        if (input.tagName === 'TEXTAREA' || input.tagName === 'INPUT') {
-          actualValue = input.value;
-        } else {
-          actualValue = input.innerText || input.textContent || '';
-        }
-        var expectedLen = promptText.length;
-        var actualLen = actualValue.trim().length;
-        var matchRatio = actualLen > 0 && expectedLen > 0 ? Math.min(actualLen, expectedLen) / Math.max(actualLen, expectedLen) : 0;
-
-        if (actualLen === 0 || matchRatio < 0.5) {
-          console.log('[doubaoBridge] 注入验证失败, expectedLen=' + expectedLen + ', actualLen=' + actualLen + ', matchRatio=' + matchRatio.toFixed(2));
-          return { ok: false, error: '注入验证失败: 值长度不匹配' };
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.focus();
+          var v4 = verifyValue();
+          if (v4.pass) {
+            return { ok: true, tag: input.tagName, method: 'textContent' };
+          }
         }
 
-        return { ok: true, tag: input.tagName };
+        // 全部失败
+        var vFinal = verifyValue();
+        return { ok: false, error: '所有注入策略失败, 实际值长度=' + vFinal.actualLen + ', 期望=' + promptText.length + ', 元素类型=' + best.type };
+      } catch (e) {
+        return { ok: false, error: e.message || '未知错误' };
+      }
+    })();
+  `;
       } catch (e) {
         return { ok: false, error: e.message || '未知错误' };
       }
