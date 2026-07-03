@@ -1,6 +1,11 @@
 /**
  * src/components/BrowserPanel.tsx
- * V3.3 修复 poolRef 为空 — 依赖数组加入 activeAccount
+ * 内嵌浏览器面板 — V4 正式版
+ *
+ * 架构：
+ * - 每个账号独立 webview，CSS 显隐控制，切换不销毁
+ * - 支持多账号并行自动化 + 同账号任务队列
+ * - per-account 执行状态监听，自动路由任务到对应 webview
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
@@ -32,6 +37,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const registryRef = useRef<Map<string, HTMLWebViewElement>>(new Map());
   const loadingMapRef = useRef<Map<string, boolean>>(new Map());
   const runningRef = useRef<Set<string>>(new Set());
+  const initDoneRef = useRef(false);
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
@@ -47,87 +53,79 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     : undefined;
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
-  // ---- webview 池初始化 ----
+  // ---- webview 池初始化（只执行一次） ----
   useEffect(() => {
+    if (initDoneRef.current) return;
     const container = poolRef.current;
-    if (!container) {
-      console.log('[BrowserPanel] poolRef 为空，等待容器挂载');
-      return;
-    }
-    if (accounts.length === 0) {
-      console.log('[BrowserPanel] accounts 为空');
-      return;
-    }
+    if (!container || accounts.length === 0) return;
 
-    console.log('[BrowserPanel] ✅ 开始创建 webview 池, accounts:', accounts.length);
+    initDoneRef.current = true;
+    console.log(`[BrowserPanel] 初始化 webview 池 (${accounts.length} 个账号)`);
 
     accounts.forEach((account) => {
-      if (registryRef.current.has(account.id)) {
-        console.log(`[BrowserPanel] webview ${account.id} 已存在，跳过`);
-        return;
-      }
-
-      console.log(`[BrowserPanel] 创建 webview: ${account.id}`);
-      loadingMapRef.current.set(account.id, true);
-
-      const webview = document.createElement('webview') as HTMLWebViewElement;
-      webview.setAttribute('src', 'https://www.doubao.com/chat/');
-      webview.setAttribute('partition', `persist:doubao_${account.partition}`);
-      webview.setAttribute('allowpopups', 'true');
-      webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;';
-      webview.style.visibility = 'hidden';
-      webview.style.pointerEvents = 'none';
-
-      const accId = account.id;
-
-      const markLoaded = (evt: string) => {
-        loadingMapRef.current.set(accId, false);
-        console.log(`[BrowserPanel] [${accId}] 加载完成 (${evt})`);
-        const cur = useAccountStore.getState().selectedAccountId;
-        if (accId === cur) {
-          setActiveLoading(false);
-          setLoadText('');
-        }
-      };
-
-      webview.addEventListener('did-start-loading', () => {
-        loadingMapRef.current.set(accId, true);
-        const cur = useAccountStore.getState().selectedAccountId;
-        if (accId === cur) {
-          setActiveLoading(true);
-          setLoadText('页面加载中...');
-        }
-      });
-
-      webview.addEventListener('did-finish-load', () => markLoaded('did-finish-load'));
-      webview.addEventListener('did-stop-loading', () => markLoaded('did-stop-loading'));
-      webview.addEventListener('did-navigate', () => markLoaded('did-navigate'));
-      webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
-      webview.addEventListener('dom-ready', () => markLoaded('dom-ready'));
-
-      webview.addEventListener('did-fail-load', () => {
-        loadingMapRef.current.set(accId, false);
-        const cur = useAccountStore.getState().selectedAccountId;
-        if (accId === cur) {
-          setActiveLoading(false);
-          setLoadText('加载失败');
-        }
-      });
-
-      container.appendChild(webview);
-      registryRef.current.set(accId, webview);
-      console.log(`[BrowserPanel] ✅ webview ${accId} 已添加到 DOM`);
-
-      // 20s 超时兜底
-      setTimeout(() => {
-        if (loadingMapRef.current.get(accId)) {
-          console.warn(`[BrowserPanel] ⚠️ ${accId} 20s 超时`);
-          markLoaded('timeout');
-        }
-      }, 20000);
+      createWebview(account, container);
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accounts.map((a) => a.id).join(','), activeAccount?.id, refreshKey]);
+
+  // ---- 创建单个 webview ----
+  const createWebview = (account: Account, container: HTMLDivElement) => {
+    if (registryRef.current.has(account.id)) return;
+
+    const accId = account.id;
+    loadingMapRef.current.set(accId, true);
+
+    const webview = document.createElement('webview') as HTMLWebViewElement;
+    webview.setAttribute('src', 'https://www.doubao.com/chat/');
+    webview.setAttribute('partition', `persist:doubao_${account.partition}`);
+    webview.setAttribute('allowpopups', 'true');
+    webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;';
+    webview.style.visibility = 'hidden';
+    webview.style.pointerEvents = 'none';
+
+    // 统一加载完成处理
+    const markLoaded = (evt: string) => {
+      loadingMapRef.current.set(accId, false);
+      const cur = useAccountStore.getState().selectedAccountId;
+      if (accId === cur) {
+        setActiveLoading(false);
+        setLoadText('');
+      }
+    };
+
+    webview.addEventListener('did-start-loading', () => {
+      loadingMapRef.current.set(accId, true);
+      const cur = useAccountStore.getState().selectedAccountId;
+      if (accId === cur) {
+        setActiveLoading(true);
+        setLoadText('页面加载中...');
+      }
+    });
+
+    webview.addEventListener('did-finish-load', () => markLoaded('did-finish-load'));
+    webview.addEventListener('did-stop-loading', () => markLoaded('did-stop-loading'));
+    webview.addEventListener('did-navigate', () => markLoaded('did-navigate'));
+    webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
+    webview.addEventListener('dom-ready', () => markLoaded('dom-ready'));
+    webview.addEventListener('did-fail-load', () => {
+      loadingMapRef.current.set(accId, false);
+      const cur = useAccountStore.getState().selectedAccountId;
+      if (accId === cur) {
+        setActiveLoading(false);
+        setLoadText('加载失败');
+      }
+    });
+
+    container.appendChild(webview);
+    registryRef.current.set(accId, webview);
+    console.log(`[BrowserPanel] webview 已创建: ${accId}`);
+
+    // 20s 超时兜底
+    setTimeout(() => {
+      if (loadingMapRef.current.get(accId)) {
+        markLoaded('timeout');
+      }
+    }, 20000);
+  };
 
   // ---- 切换可见性 ----
   useEffect(() => {
@@ -146,7 +144,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     });
   }, [activeAccount?.id]);
 
-  // ---- V3 自动化 ----
+  // ---- V3 自动化：监听 per-account 执行状态 ----
   useEffect(() => {
     accounts.forEach((account) => {
       const accountId = account.id;
@@ -157,12 +155,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (runningRef.current.has(accountId)) return;
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
-      console.log('[BrowserPanel] 检测到账号', accountId, '需要执行任务', taskId);
+      console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
       runningRef.current.add(accountId);
       executeAutomation(accountId, taskId, task.prompt, webview);
     });
   }, [accountBusy, executingTasks]);
 
+  // ---- 自动化执行 ----
   const executeAutomation = async (
     accountId: string,
     taskId: string,
@@ -172,11 +171,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const { setAccountAutomationState, completeAutomation, failAutomation } =
       useTaskStore.getState();
     try {
-      console.log(`[Automation:${accountId}] 开始执行任务 ${taskId}`);
+      console.log(`[Automation:${accountId}] 开始`);
       setAccountAutomationState(accountId, 'injecting', '等待页面就绪...');
       await waitForWebviewReady(webview, 15000);
       await navigateToChat(webview);
       await waitForWebviewReady(webview, 15000);
+
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       const injected = await Promise.race([
         injectPrompt(webview, prompt),
@@ -184,12 +184,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       ]);
       if (!injected) throw new Error('注入失败');
       await sleep(800);
+
       setAccountAutomationState(accountId, 'submitting', '正在发送...');
       const submitted = await Promise.race([
         submitPrompt(webview),
         new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
       ]);
       if (!submitted) throw new Error('提交失败');
+
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...');
       await sleep(3000);
       let generating = true;
@@ -205,7 +207,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         setAccountAutomationState(accountId, 'generating', `等待回复... (${(i + 1) * 3}s)`);
       }
       if (generating) throw new Error('生成超时');
+
       const resultUrl = await getResultUrl(webview);
+      console.log(`[Automation:${accountId}] 完成`);
       await completeAutomation(taskId, accountId, resultUrl);
     } catch (err: any) {
       console.error(`[Automation:${accountId}] 失败:`, err.message);
