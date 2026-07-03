@@ -120,7 +120,7 @@ const App: React.FC = () => {
             accounts={accounts}
             activeAccount={activeAccount}
             refreshKey={0}
-            activeTask={activeTask}
+            
           />
         </div>
       </div>

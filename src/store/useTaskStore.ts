@@ -1,13 +1,15 @@
 /**
  * src/store/useTaskStore.ts
- * 任务调度状态（Zustand） — V2 自动化执行
+ * 任务调度状态（Zustand） — V3 多账号并行 + 队列调度
  *
- * 管理任务队列、添加/指派/状态流转、批量操作、自动化执行
+ * 改进：
+ * - per-account 执行状态，不再全局单任务
+ * - 账号忙时自动排队，空闲自动接下一个
+ * - 不同账号的任务可以并行执行
  */
 
 import { create } from 'zustand';
 import type { Task, TaskStatus } from '../types';
-import { useAccountStore } from './useAccountStore';
 
 // ==================== 类型 ====================
 
@@ -17,49 +19,43 @@ export type AutomationState = 'idle' | 'injecting' | 'submitting' | 'generating'
 interface TaskState {
   /** 所有任务列表 */
   tasks: Task[];
-  /** 数据是否正在加载 */
   loading: boolean;
-  /** 错误信息 */
   error: string | null;
 
-  /** 当前正在自动化执行的任务 ID */
-  activeTaskId: string | null;
-  /** 自动化执行状态 */
-  automationState: AutomationState;
-  /** 自动化轮询定时器引用（用于清理） */
-  pollingTimerId: ReturnType<typeof setInterval> | null;
+  // ---- V3: 多账号并行执行 ----
+  /** 每个账号正在执行的任务 ID */
+  executingTasks: Record<string, string>;
+  /** 每个账号是否正在忙碌 */
+  accountBusy: Record<string, boolean>;
+  /** 每个账号的自动化阶段（用于 UI 显示） */
+  accountAutomationState: Record<string, AutomationState>;
+  /** 每个账号的自动化消息 */
+  accountAutoMessage: Record<string, string>;
 
-  // Actions
-  /** 从主进程加载任务列表 */
+  // 向后兼容（活跃账号的 automation 状态）
+  activeTaskId: string | null;
+  automationState: AutomationState;
+
+  // ---- Actions ----
   loadTasks: () => Promise<void>;
-  /** 批量添加任务（自动按行拆分） */
   addTasks: (text: string) => Promise<boolean>;
-  /** 将任务指派给账号 */
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
-  /** 更新任务状态 */
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
-  /** 删除任务 */
   deleteTask: (taskId: string) => Promise<boolean>;
-  /** 批量暂停所有运行中任务 */
   batchPause: () => Promise<boolean>;
-  /** 获取已完成任务产物 */
   getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
-  /** 清除错误 */
   clearError: () => void;
 
-  // V2 自动化方法
-  /** 启动自动化执行：将任务设为 executing 状态 */
+  // V3 自动化方法
   startAutomation: (taskId: string) => void;
-  /** 更新自动化状态 */
-  setAutomationState: (state: AutomationState) => void;
-  /** 完成任务：记录结果 URL 并更新状态 */
-  completeAutomation: (taskId: string, resultUrl: string) => Promise<void>;
-  /** 任务失败 */
-  failAutomation: (taskId: string, errorMsg: string) => Promise<void>;
-  /** 清除自动化状态 */
-  clearAutomation: () => void;
-  /** 获取下一个排队任务 */
-  getNextQueuedTask: () => Task | null;
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string) => void;
+  completeAutomation: (taskId: string, accountId: string, resultUrl: string) => Promise<void>;
+  failAutomation: (taskId: string, accountId: string, errorMsg: string) => Promise<void>;
+
+  /** 处理队列：检查待执行任务，分配到空闲账号 */
+  processQueue: () => void;
+  /** 获取指定账号的下一个排队任务 */
+  getNextTaskForAccount: (accountId: string) => Task | null;
 }
 
 // ==================== Store ====================
@@ -68,9 +64,12 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   loading: false,
   error: null,
+  executingTasks: {},
+  accountBusy: {},
+  accountAutomationState: {},
+  accountAutoMessage: {},
   activeTaskId: null,
   automationState: 'idle',
-  pollingTimerId: null,
 
   // ---- 基础操作 ----
 
@@ -99,13 +98,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     try {
       const result = await window.electronAPI.tasks.add(prompts);
       if (result.success && result.tasks) {
-        const tasks = [...get().tasks, ...result.tasks];
-        set({
-          tasks,
-          activeTaskId: null,
-          automationState: 'idle',
-          pollingTimerId: null,
-        });
+        set({ tasks: [...get().tasks, ...result.tasks] });
         return true;
       } else {
         set({ error: result.error || '添加失败' });
@@ -127,17 +120,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             ? { ...t, assignedAccountId: accountId, updatedAt: new Date().toISOString() }
             : t
         );
-        set({
-          tasks,
-          activeTaskId: null,
-          automationState: 'idle',
-          pollingTimerId: null,
-        });
-        // 自动切换到被指派的账号
-        useAccountStore.getState().selectAccount(accountId);
-        // 如果当前没有正在执行的任务，自动启动
-        if (get().automationState === 'idle' && !get().activeTaskId) {
+        set({ tasks });
+
+        // 不再强制切换账号页面
+        // 如果目标账号空闲，自动启动；否则排入队列等待
+        if (!get().accountBusy[accountId]) {
           get().startAutomation(taskId);
+        } else {
+          console.log('[TaskStore] 账号', accountId, '忙碌中，任务', taskId, '排队等待');
         }
         return true;
       } else {
@@ -154,13 +144,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     await window.electronAPI.tasks.updateStatus(taskId, status, result, outputs);
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? {
-            ...t,
-            status,
-            result: result ?? t.result,
-            outputs: outputs ?? t.outputs,
-            updatedAt: new Date().toISOString(),
-          }
+        ? { ...t, status, result: result ?? t.result, outputs: outputs ?? t.outputs, updatedAt: new Date().toISOString() }
         : t
     );
     set({ tasks });
@@ -172,14 +156,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const result = await window.electronAPI.tasks.delete(taskId);
       if (result.success) {
         const tasks = get().tasks.filter((t) => t.id !== taskId);
-        const newState: any = { tasks };
-        if (get().activeTaskId === taskId) {
-          newState.activeTaskId = null;
-          newState.automationState = 'idle';
-          newState.automationPrompt = '';
-          newState.automationTaskId = '';
-        }
-        set(newState);
+        set({ tasks });
         return true;
       } else {
         set({ error: result.error || '删除失败' });
@@ -200,11 +177,15 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             ? { ...t, status: 'queued' as TaskStatus }
             : t
         );
+        // 清空所有执行状态
         set({
           tasks,
+          executingTasks: {},
+          accountBusy: {},
+          accountAutomationState: {},
+          accountAutoMessage: {},
           activeTaskId: null,
           automationState: 'idle',
-          pollingTimerId: null,
         });
         return true;
       }
@@ -220,107 +201,182 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   clearError: () => set({ error: null }),
 
-  // ---- V2 自动化方法 ----
+  // ---- V3 自动化方法 ----
 
   startAutomation: (taskId: string) => {
+    const task = get().tasks.find((t) => t.id === taskId);
+    if (!task || !task.assignedAccountId) {
+      console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
+      return;
+    }
+
+    const accountId = task.assignedAccountId;
+
+    // 检查账号是否忙碌
+    if (get().accountBusy[accountId]) {
+      console.log('[TaskStore] 账号', accountId, '忙碌，任务排队');
+      return;
+    }
+
+    console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
+
+    // 更新任务状态
     const tasks = get().tasks.map((t) =>
       t.id === taskId
         ? { ...t, status: 'executing' as TaskStatus, updatedAt: new Date().toISOString() }
         : t
     );
-    // 清除之前的定时器
-    const prevTimer = get().pollingTimerId;
-    if (prevTimer) clearInterval(prevTimer);
 
     set({
       tasks,
+      executingTasks: { ...get().executingTasks, [accountId]: taskId },
+      accountBusy: { ...get().accountBusy, [accountId]: true },
+      accountAutomationState: { ...get().accountAutomationState, [accountId]: 'injecting' },
+      accountAutoMessage: { ...get().accountAutoMessage, [accountId]: '准备执行...' },
+      // 向后兼容
       activeTaskId: taskId,
       automationState: 'injecting',
     });
   },
 
-  setAutomationState: (state: AutomationState) => {
-    set({ automationState: state });
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string) => {
+    set({
+      accountAutomationState: { ...get().accountAutomationState, [accountId]: state },
+      accountAutoMessage: message !== undefined
+        ? { ...get().accountAutoMessage, [accountId]: message }
+        : get().accountAutoMessage,
+    });
   },
 
-  completeAutomation: async (taskId: string, resultUrl: string) => {
-    // 清除轮询定时器
-    const timer = get().pollingTimerId;
-    if (timer) {
-      clearInterval(timer);
-    }
-
+  completeAutomation: async (taskId: string, accountId: string, resultUrl: string) => {
     await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, [resultUrl]);
+
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? {
-            ...t,
-            status: 'done' as TaskStatus,
-            result: resultUrl,
-            outputs: [resultUrl],
-            updatedAt: new Date().toISOString(),
-          }
+        ? { ...t, status: 'done' as TaskStatus, result: resultUrl, outputs: [resultUrl], updatedAt: new Date().toISOString() }
         : t
     );
+
+    // 清除该账号的执行状态
+    const newExecuting = { ...get().executingTasks };
+    const newBusy = { ...get().accountBusy };
+    const newAutoState = { ...get().accountAutomationState };
+    const newAutoMsg = { ...get().accountAutoMessage };
+    delete newExecuting[accountId];
+    delete newBusy[accountId];
+    newAutoState[accountId] = 'completed';
+    newAutoMsg[accountId] = '生成完成！';
+
+    // 向后兼容：如果完成的是活跃任务
+    const isActive = get().activeTaskId === taskId;
+
     set({
       tasks,
-      activeTaskId: null,
-      automationState: 'completed',
-      pollingTimerId: null,
+      executingTasks: newExecuting,
+      accountBusy: newBusy,
+      accountAutomationState: newAutoState,
+      accountAutoMessage: newAutoMsg,
+      activeTaskId: isActive ? null : get().activeTaskId,
+      automationState: isActive ? 'completed' : get().automationState,
     });
 
-    // 完成后将对应账号状态设回 idle
-    const task = tasks.find((t) => t.id === taskId);
-    if (task?.assignedAccountId) {
-      window.electronAPI.accounts.setStatus(task.assignedAccountId, 'idle');
-    }
+    // 更新账号状态
+    window.electronAPI.accounts.setStatus(accountId, 'idle');
+
+    // 延迟后清理完成状态 + 处理队列
+    setTimeout(() => {
+      const s = get();
+      const cleanState = { ...s.accountAutomationState };
+      const cleanMsg = { ...s.accountAutoMessage };
+      if (cleanState[accountId] === 'completed') {
+        cleanState[accountId] = 'idle';
+        cleanMsg[accountId] = '';
+      }
+      set({
+        accountAutomationState: cleanState,
+        accountAutoMessage: cleanMsg,
+      });
+      // 处理队列：检查是否有排队任务可以启动
+      get().processQueue();
+    }, 2000);
   },
 
-  failAutomation: async (taskId: string, errorMsg: string) => {
-    const timer = get().pollingTimerId;
-    if (timer) {
-      clearInterval(timer);
-    }
-
+  failAutomation: async (taskId: string, accountId: string, errorMsg: string) => {
     await window.electronAPI.tasks.updateStatus(taskId, 'fail', errorMsg);
+
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? {
-            ...t,
-            status: 'fail' as TaskStatus,
-            result: errorMsg,
-            updatedAt: new Date().toISOString(),
-          }
+        ? { ...t, status: 'fail' as TaskStatus, result: errorMsg, updatedAt: new Date().toISOString() }
         : t
     );
+
+    const newExecuting = { ...get().executingTasks };
+    const newBusy = { ...get().accountBusy };
+    const newAutoState = { ...get().accountAutomationState };
+    const newAutoMsg = { ...get().accountAutoMessage };
+    delete newExecuting[accountId];
+    delete newBusy[accountId];
+    newAutoState[accountId] = 'failed';
+    newAutoMsg[accountId] = errorMsg;
+
+    const isActive = get().activeTaskId === taskId;
+
     set({
       tasks,
-      activeTaskId: null,
-      automationState: 'failed',
-      pollingTimerId: null,
+      executingTasks: newExecuting,
+      accountBusy: newBusy,
+      accountAutomationState: newAutoState,
+      accountAutoMessage: newAutoMsg,
+      activeTaskId: isActive ? null : get().activeTaskId,
+      automationState: isActive ? 'failed' : get().automationState,
     });
 
-    // 失败后将对应账号状态设回 idle
-    const task = tasks.find((t) => t.id === taskId);
-    if (task?.assignedAccountId) {
-      window.electronAPI.accounts.setStatus(task.assignedAccountId, 'idle');
+    window.electronAPI.accounts.setStatus(accountId, 'idle');
+
+    // 延迟后清理 + 处理队列
+    setTimeout(() => {
+      const s = get();
+      const cleanState = { ...s.accountAutomationState };
+      const cleanMsg = { ...s.accountAutoMessage };
+      if (cleanState[accountId] === 'failed') {
+        cleanState[accountId] = 'idle';
+        cleanMsg[accountId] = '';
+      }
+      set({
+        accountAutomationState: cleanState,
+        accountAutoMessage: cleanMsg,
+      });
+      get().processQueue();
+    }, 3000);
+  },
+
+  // ---- 队列调度 ----
+
+  processQueue: () => {
+    const state = get();
+    // 找出所有已指派但还在 queued 状态的任务
+    const queuedTasks = state.tasks.filter(
+      (t) => t.status === 'queued' && t.assignedAccountId
+    );
+
+    // 按创建时间排序
+    queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    for (const task of queuedTasks) {
+      const accountId = task.assignedAccountId!;
+      if (!state.accountBusy[accountId]) {
+        console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
+        state.startAutomation(task.id);
+        // 重新获取 state（startAutomation 已经 set 了）
+        break; // 每次只启动一个，启动后状态已变，等下次 processQueue
+      }
     }
   },
 
-  clearAutomation: () => {
-    const timer = get().pollingTimerId;
-    if (timer) {
-      clearInterval(timer);
-    }
-    set({
-      activeTaskId: null,
-      automationState: 'idle',
-      pollingTimerId: null,
-    });
-  },
-
-  getNextQueuedTask: () => {
+  getNextTaskForAccount: (accountId: string) => {
     const tasks = get().tasks;
-    return tasks.find((t) => t.status === 'queued' && t.assignedAccountId !== null) || null;
+    return tasks.find(
+      (t) => t.status === 'queued' && t.assignedAccountId === accountId
+    ) || null;
   },
 }));

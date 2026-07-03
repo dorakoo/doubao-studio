@@ -39,6 +39,7 @@ const TaskConsole: React.FC = () => {
     getCompletedOutputs,
     startAutomation,
     automationState,
+    accountBusy,
     clearError,
     error,
   } = useTaskStore();
@@ -110,7 +111,7 @@ const TaskConsole: React.FC = () => {
   const renderTaskItem = (task: (typeof tasks)[0]) => {
     const isActive = task.status === 'executing' || task.status === 'generating';
     const isQueued = task.status === 'queued';
-    const canStart = isQueued && task.assignedAccountId && automationState === 'idle';
+    const canStart = isQueued && task.assignedAccountId && !accountBusy[task.assignedAccountId];
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
