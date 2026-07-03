@@ -17,6 +17,7 @@ import {
   injectPrompt,
   submitPrompt,
   checkGenerating,
+  checkGeneratingDetailed,
   getResultUrl,
   navigateToChat,
   switchMode,
@@ -288,27 +289,65 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...');
       await sleep(3000);
+
+      // 记录初始消息数（用于兜底判断）
+      let initialMsgCount = 0;
+      try {
+        const initial = await checkGeneratingDetailed(webview);
+        initialMsgCount = initial.messageCount || 0;
+      } catch {}
+
       let generating = true;
-      for (let i = 0; i < 100; i++) {
+      let unknownCount = 0;
+      const maxUnknown = 10; // 连续 10 次无法确定（约 30 秒）触发兜底
+
+      for (let i = 0; i < 200; i++) {
         await sleep(3000);
         try {
-          generating = await Promise.race([
-            checkGenerating(webview),
-            new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('检测超时')), 10000)),
+          const detail = await Promise.race([
+            checkGeneratingDetailed(webview),
+            new Promise<never>((_, rej) => setTimeout(() => rej(new Error('检测超时')), 8000)),
           ]);
-        } catch { generating = true; }
+
+          if (detail.status === 'detected') {
+            // 明确检测到结果
+            generating = detail.generating;
+            unknownCount = 0;
+          } else {
+            // 无法确定，使用消息数量兜底
+            unknownCount++;
+            const currentMsgCount = detail.messageCount || 0;
+            // 如果消息数增加了（说明有新回复），且最新消息有产物或输入框可用，认为完成
+            if (unknownCount >= maxUnknown && currentMsgCount > initialMsgCount) {
+              console.log(`[Automation:${accountId}] 兜底检测：消息数从 ${initialMsgCount} → ${currentMsgCount}，认为生成完成`);
+              generating = false;
+            }
+          }
+        } catch {
+          unknownCount++;
+          // JS 注入失败也计入 unknown
+          if (unknownCount >= maxUnknown * 2) {
+            console.warn(`[Automation:${accountId}] 连续 ${unknownCount} 次检测失败，继续等待`);
+            unknownCount = maxUnknown; // 防止溢出
+          }
+        }
         if (!generating) break;
         setAccountAutomationState(accountId, 'generating', `等待回复... (${(i + 1) * 3}s)`);
       }
       if (generating) throw new Error('生成超时');
 
-      const rawResult = await getResultUrl(webview);
-      // 解析 JSON 数组字符串为图片 URL 列表
+      // 生成完成后等待一下产物加载，最多重试 5 次
       let imageUrls: string[] = [];
-      try {
-        imageUrls = JSON.parse(rawResult);
-      } catch {
-        imageUrls = rawResult ? [rawResult] : [];
+      for (let retry = 0; retry < 5; retry++) {
+        const rawResult = await getResultUrl(webview);
+        try {
+          imageUrls = JSON.parse(rawResult);
+        } catch {
+          imageUrls = rawResult ? [rawResult] : [];
+        }
+        if (imageUrls.length > 0) break;
+        console.log(`[Automation:${accountId}] 产物尚未加载，等待 2s 后重试 (${retry + 1}/5)`);
+        await sleep(2000);
       }
       console.log(`[Automation:${accountId}] 完成, 产物:`, imageUrls);
       // 传入第一个 URL 作为 result（向后兼容），outputs 传完整数组

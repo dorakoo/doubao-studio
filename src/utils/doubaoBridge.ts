@@ -381,12 +381,36 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
 
 /**
  * 检查豆包页面当前是否正在生成回复
+ * 返回 generating=true 表示确定在生成，false 表示确定已完成，unknown 表示无法确定
  */
 export async function checkGenerating(webview: WebviewHandle): Promise<boolean> {
+  const result = await checkGeneratingDetailed(webview);
+  if (result.status === 'unknown') {
+    // 无法确定时保守返回 true（继续等待），避免提前结束
+    return true;
+  }
+  return result.generating;
+}
+
+interface GeneratingResult {
+  generating: boolean;
+  status: 'detected' | 'unknown';
+  reason?: string;
+  messageCount?: number;
+  lastMessageHasImage?: boolean;
+}
+
+/**
+ * 详细版生成检测：多维度综合判断
+ * 1. 停止按钮/loading 指示器（最可靠）
+ * 2. 对话消息数量变化
+ * 3. 最新消息是否包含产物图片
+ */
+export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<GeneratingResult> {
   const code = `
     (function() {
       try {
-        // 1. 检查 Stop/停止 按钮是否可见
+        // ========== 维度1：停止按钮 / 生成中指示器 ==========
         var stopSelectors = [
           'button[aria-label*="停止"]',
           'button[aria-label*="stop"]',
@@ -399,12 +423,11 @@ export async function checkGenerating(webview: WebviewHandle): Promise<boolean> 
           try {
             var el = document.querySelector(stopSelectors[i]);
             if (el && el.offsetParent !== null) {
-              return { generating: true, reason: 'stop-button' };
+              return { generating: true, status: 'detected', reason: 'stop-button' };
             }
           } catch (e) {}
         }
 
-        // 2. 检查 loading/typing 指示器
         var loadingSelectors = [
           '[class*="loading"]',
           '[class*="typing"]',
@@ -418,26 +441,67 @@ export async function checkGenerating(webview: WebviewHandle): Promise<boolean> 
             var els = document.querySelectorAll(loadingSelectors[j]);
             for (var k = 0; k < els.length; k++) {
               if (els[k].offsetParent !== null) {
-                return { generating: true, reason: 'loading-indicator' };
+                return { generating: true, status: 'detected', reason: 'loading-indicator' };
               }
             }
           } catch (e) {}
         }
 
-        return { generating: false };
+        // ========== 维度2：对话消息检测 ==========
+        // 豆包聊天消息通常在特定容器中，统计消息数量
+        var msgSelectors = [
+          '[class*="message-item"]',
+          '[class*="messageItem"]',
+          '[class*="chat-message"]',
+          '[class*="chatMessage"]',
+          '[data-testid*="message"]',
+          'article',
+        ];
+        var msgCount = 0;
+        var lastMsgHasImage = false;
+        for (var m = 0; m < msgSelectors.length; m++) {
+          try {
+            var msgs = document.querySelectorAll(msgSelectors[m]);
+            if (msgs.length > msgCount) {
+              msgCount = msgs.length;
+              // 检查最后一条消息是否有图片
+              if (msgs.length > 0) {
+                var lastMsg = msgs[msgs.length - 1];
+                var imgs = lastMsg.querySelectorAll('img');
+                var videos = lastMsg.querySelectorAll('video');
+                lastMsgHasImage = imgs.length > 0 || videos.length > 0;
+                // 如果最后一条消息有下载按钮，也认为有产物
+                var downloadBtns = lastMsg.querySelectorAll('button[aria-label*="下载"], [class*="download"]');
+                if (downloadBtns.length > 0) lastMsgHasImage = true;
+              }
+            }
+          } catch (e) {}
+        }
+
+        // 维度3：检查输入框是否可用（生成完成后输入框会恢复）
+        var textarea = document.querySelector('textarea');
+        var inputDisabled = textarea ? textarea.disabled : true;
+
+        // 综合判断：没有停止按钮 + 没有loading指示器 + (有产物图片 或 输入框可用)
+        if (lastMsgHasImage || !inputDisabled) {
+          return { generating: false, status: 'detected', reason: lastMsgHasImage ? 'has-output' : 'input-ready', messageCount: msgCount, lastMessageHasImage: lastMsgHasImage };
+        }
+
+        // 无法确定（可能刚开始生成还没出现停止按钮，也可能页面结构变了）
+        return { generating: false, status: 'unknown', reason: 'indeterminate', messageCount: msgCount, lastMessageHasImage: lastMsgHasImage };
       } catch (e) {
-        return { generating: false };
+        return { generating: false, status: 'unknown', reason: 'error:' + e.message };
       }
     })();
   `;
 
   try {
-    const result = await safeExecuteJS<{ generating: boolean; reason?: string }>(
-      webview, code, 10000, 'checkGenerating'
+    const result = await safeExecuteJS<GeneratingResult>(
+      webview, code, 8000, 'checkGenerating'
     );
-    return result.generating === true;
+    return result;
   } catch {
-    return false;
+    return { generating: false, status: 'unknown', reason: 'execute-error' };
   }
 }
 
