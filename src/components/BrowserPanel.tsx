@@ -141,11 +141,27 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     container.appendChild(webview);
     registryRef.current.set(accId, webview);
-    console.log(`[BrowserPanel] webview 已创建: ${accId}`);
+    console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}, childCount=${container.children.length}`);
+
+    // 5s 后检查 webview 是否真的在加载
+    setTimeout(() => {
+      const wv = registryRef.current.get(accId);
+      if (wv) {
+        const url = wv.getURL?.() || '(getURL failed)';
+        const stillLoading = loadingMapRef.current.get(accId);
+        console.log(`[BrowserPanel] 5s检查: ${accId}, url=${url}, inDOM=${container.contains(wv)}, visibility=${wv.style.visibility}, stillLoading=${stillLoading}`);
+        // 如果 5s 后还没开始加载，强制 reload
+        if (stillLoading && !url.startsWith('http')) {
+          console.warn(`[BrowserPanel] webview 5s 未开始加载，尝试 reload: ${accId}`);
+          wv.reload();
+        }
+      }
+    }, 5000);
 
     // 20s 超时兜底
     setTimeout(() => {
       if (loadingMapRef.current.get(accId)) {
+        console.warn(`[BrowserPanel] 20s 超时: ${accId}`);
         markLoaded('timeout');
       }
     }, 20000);
