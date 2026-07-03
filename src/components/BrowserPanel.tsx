@@ -60,6 +60,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   // ---- webview 池动态管理（账号增删同步） ----
   const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
+    alert(`[BrowserPanel] effect 触发: accounts.length=${accounts.length}, accountsKey="${accountsKey}", activeAccount=${activeAccount?.id}, container=${!!poolRef.current}`);
     const container = poolRef.current;
     if (!container) return;
 
