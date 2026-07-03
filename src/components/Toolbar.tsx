@@ -114,6 +114,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   ];
 
   return (
+    <>
     <div
       className="flex items-center justify-between h-11 px-3 bg-db-bg-secondary border-b border-db-border"
       style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
@@ -212,5 +213,6 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       onClose={() => setPreviewOpen(false)}
       onDownload={handleDoDownload}
     />
+    </>
   );
 };
