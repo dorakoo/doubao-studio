@@ -22,6 +22,7 @@ import {
   switchMode,
   waitForModeReady,
   waitForChatReady,
+  clickAITab,
 } from '../utils/doubaoBridge';
 
 interface BrowserPanelProps {
@@ -183,6 +184,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         setAccountAutomationState(accountId, 'injecting', '切换到' + modeLabel + '模式...');
         switchMode(webview, mode);
         await waitForWebviewReady(webview, 20000);
+
+        // image/video 模式：在 AI 创作页面点击 Tab 切换
+        if (mode === 'image' || mode === 'video') {
+          setAccountAutomationState(accountId, 'injecting', '点击' + modeLabel + 'Tab...');
+          await clickAITab(webview, mode);
+          await sleep(1500); // 等待 Tab 切换动画
+        }
       } else {
         await navigateToChat(webview);
         await waitForWebviewReady(webview, 15000);

@@ -22,6 +22,36 @@ export interface Account {
 /** 豆包生成模式 */
 export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
 
+/** 视频生成模型 */
+export type VideoModel = 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
+
+/** 视频时长 */
+export type VideoDuration = '5s' | '10s';
+
+/** 视频比例 */
+export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
+
+/** 视频配置默认值 */
+export const DEFAULT_VIDEO_CONFIG = {
+  model: 'seedance-2.0-mini' as VideoModel,
+  duration: '10s' as VideoDuration,
+  aspectRatio: '16:9' as VideoAspectRatio,
+};
+
+/** 视频模型显示名映射 */
+export const VIDEO_MODEL_LABELS: Record<VideoModel, string> = {
+  'seedance-2.0': 'Seedance 2.0',
+  'seedance-2.0-fast': 'Seedance 2.0 Fast',
+  'seedance-2.0-mini': 'Seedance 2.0 Mini',
+};
+
+/** 视频模型消耗说明 */
+export const VIDEO_MODEL_COST: Record<VideoModel, string> = {
+  'seedance-2.0': '2 倍消耗',
+  'seedance-2.0-fast': '快速出片',
+  'seedance-2.0-mini': '日常使用',
+};
+
 /** 生成模式配置 */
 export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
   label: string;
@@ -71,6 +101,14 @@ export interface Task {
   status: TaskStatus;
   /** 生成模式（默认 chat） */
   mode: GenerationMode;
+  /** 视频生成配置 */
+  videoConfig?: {
+    model: VideoModel;
+    duration: VideoDuration;
+    aspectRatio: VideoAspectRatio;
+  };
+  /** 参考图片路径列表（图生视频/图生图用） */
+  attachments?: string[];
   result: string | null;
   outputs: string[];
   createdAt: string;

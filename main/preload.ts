@@ -58,8 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---- 任务调度 ----
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
-    add: (prompts: string[], mode?: GenerationMode): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
-      ipcRenderer.invoke('tasks:add', { prompts, mode }),
+    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[]): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
+      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments }),
     assign: (taskId: string, accountId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:assign', { taskId, accountId }),
     updateStatus: (

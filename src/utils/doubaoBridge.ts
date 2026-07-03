@@ -204,17 +204,21 @@ async function tryInjectOnce(
  * 策略A：找 aria-label 含"发送"/"send"的 button
  * 策略B：找 textarea 父容器中最后一个非 disabled button
  * 策略C：在 textarea 上触发 Enter 键
+ * 策略D：找蓝色圆形发送按钮（AI创作页面）
+ * 策略E：找包含发送图标的可点击元素
  */
 export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
   const code = `
     (function() {
       try {
-        // ========== 策略A：aria-label 匹配 ==========
         var sendBtn = null;
+
+        // ========== 策略A：aria-label 匹配 ==========
         var ariaSelectors = [
           'button[aria-label*="发送"]',
           'button[aria-label*="Send"]',
           'button[aria-label*="send"]',
+          'button[aria-label*="提交"]',
         ];
         for (var s = 0; s < ariaSelectors.length; s++) {
           try {
@@ -235,8 +239,7 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           }
           if (foundTa) {
             var container = foundTa.parentElement;
-            // 向上找几层，找到包含多个 button 的容器
-            for (var level = 0; level < 5 && container; level++) {
+            for (var level = 0; level < 8 && container; level++) {
               var buttons = container.querySelectorAll('button');
               if (buttons.length > 0) {
                 for (var b = buttons.length - 1; b >= 0; b--) {
@@ -252,26 +255,68 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           }
         }
 
+        // ========== 策略D：AI创作页面的发送按钮 ==========
+        // 可能是带 SVG 图标的蓝色圆形按钮，或者 div/span 带 click handler
+        if (!sendBtn) {
+          // 找发送图标附近的可点击元素
+          var sendIcons = document.querySelectorAll('[class*="send"], [class*="Send"], [class*="submit"], [class*="arrow-up"]');
+          for (var i = 0; i < sendIcons.length; i++) {
+            var el = sendIcons[i];
+            if (el.offsetParent !== null && !el.disabled) {
+              sendBtn = el;
+              break;
+            }
+          }
+        }
+
+        // ========== 策略E：通过 SVG 路径或图标找发送按钮 ==========
+        if (!sendBtn) {
+          var allSvg = document.querySelectorAll('svg');
+          for (var i = 0; i < allSvg.length; i++) {
+            var svg = allSvg[i];
+            var parent = svg.parentElement;
+            while (parent && parent !== document.body) {
+              if (parent.click && parent.offsetParent !== null) {
+                // 检查是否是按钮状元素
+                var style = window.getComputedStyle(parent);
+                if (style.cursor === 'pointer' || parent.tagName === 'BUTTON' || parent.getAttribute('role') === 'button') {
+                  sendBtn = parent;
+                  break;
+                }
+              }
+              parent = parent.parentElement;
+            }
+            if (sendBtn) break;
+          }
+        }
+
         // ========== 策略C：按 Enter 键提交 ==========
         if (!sendBtn) {
           var ta = document.querySelector('textarea');
           if (ta) {
             console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交');
             ta.focus();
+            // React 需要 nativeInputValueSetter
+            var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(ta, ta.value);
+            }
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
             ta.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'Enter',
-              code: 'Enter',
-              keyCode: 13,
-              which: 13,
-              bubbles: true,
-              cancelable: true
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+            ta.dispatchEvent(new KeyboardEvent('keypress', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+            ta.dispatchEvent(new KeyboardEvent('keyup', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
             }));
             return { ok: true, method: 'enter' };
           }
           return { ok: false, error: '未找到发送按钮且无 textarea 可按 Enter' };
         }
 
-        console.log('[doubaoBridge] 找到发送按钮 tag=' + sendBtn.tagName);
+        console.log('[doubaoBridge] 找到发送按钮 tag=' + sendBtn.tagName + ' class=' + (sendBtn.className || '').substring(0, 60));
         sendBtn.click();
         return { ok: true, method: 'click' };
       } catch (e) {
@@ -435,21 +480,34 @@ export async function waitForChatReady(
 /** 生成模式对应的 URL 映射 */
 const MODE_URLS: Record<string, string> = {
   chat: 'https://www.doubao.com/chat/',
-  image: 'https://www.doubao.com/chat/create-image/',
-  video: 'https://www.doubao.com/chat/create-video/',
+  image: 'https://www.doubao.com/chat/',
+  video: 'https://www.doubao.com/chat/',
   music: 'https://www.doubao.com/chat/create-music/',
 };
 
 /**
  * 切换豆包生成模式
- * 通过导航到对应模式的 URL 实现
- * 如果当前已在目标模式页面，跳过导航
+ *
+ * 对于 image/video 模式：导航到统一的 chat 页面，然后通过 DOM 点击底部 Tab 切换
+ * 对于 chat/music 模式：直接导航到对应 URL
  */
 export function switchMode(webview: WebviewHandle, mode: string): void {
   const targetUrl = MODE_URLS[mode] || MODE_URLS.chat;
   const currentUrl = webview.getURL();
 
-  // 检查是否已在目标模式页面
+  // 对于 image/video，统一导航到 /chat/ 页面（Tab 切换在 DOM 中完成）
+  if (mode === 'image' || mode === 'video') {
+    if (currentUrl.includes('/chat/')) {
+      console.log(`[doubaoBridge] 已在 chat 页面，通过 Tab 切换到 ${mode} 模式`);
+      // 不导航，由 clickAITab 处理
+      return;
+    }
+    console.log(`[doubaoBridge] 导航到 chat 页面 → ${targetUrl}`);
+    webview.loadURL(targetUrl);
+    return;
+  }
+
+  // chat/music 模式：直接 URL 导航
   if (currentUrl.includes(mode === 'chat' ? '/chat/' : `/create-${mode}/`)) {
     console.log(`[doubaoBridge] 已在 ${mode} 模式，跳过切换`);
     return;
@@ -460,6 +518,59 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
 }
 
 /**
+ * 在 AI 创作页面点击 Tab 切换模式（图像/视频）
+ * 豆包统一页面底部有「图像」「视频」Tab
+ */
+export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'): Promise<boolean> {
+  const tabLabel = mode === 'image' ? '图像' : '视频';
+  const code = `
+    (function() {
+      try {
+        // 策略1：找包含目标文字的 tab 元素
+        var allEls = document.querySelectorAll('div, span, button, a, [role="tab"]');
+        for (var i = 0; i < allEls.length; i++) {
+          var el = allEls[i];
+          var text = (el.textContent || '').trim();
+          if (text === '${tabLabel}' && el.offsetParent !== null) {
+            el.click();
+            return { ok: true, method: 'text-match', tag: el.tagName };
+          }
+        }
+
+        // 策略2：模糊匹配（包含目标文字）
+        for (var i = 0; i < allEls.length; i++) {
+          var el = allEls[i];
+          var text = (el.textContent || '').trim();
+          if (text.includes('${tabLabel}') && el.offsetParent !== null && text.length < 10) {
+            el.click();
+            return { ok: true, method: 'text-contains', tag: el.tagName };
+          }
+        }
+
+        return { ok: false, error: '未找到${tabLabel}Tab' };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    })();
+  `;
+
+  try {
+    const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string; tag?: string }>(
+      webview, code, 5000, 'clickAITab'
+    );
+    if (result.ok) {
+      console.log(`[doubaoBridge] 已点击${tabLabel}Tab, 方法: ${result.method}, tag: ${result.tag}`);
+    } else {
+      console.warn(`[doubaoBridge] 点击${tabLabel}Tab 失败:`, result.error);
+    }
+    return result.ok;
+  } catch (err: any) {
+    console.error('[doubaoBridge] clickAITab 异常:', err.message);
+    return false;
+  }
+}
+
+/**
  * 等待模式切换完成（页面重新加载 + DOM 就绪）
  */
 export async function waitForModeReady(
@@ -467,15 +578,15 @@ export async function waitForModeReady(
   mode: string,
   timeoutMs: number = 20000
 ): Promise<boolean> {
-  const targetUrl = MODE_URLS[mode] || MODE_URLS.chat;
   const startTime = Date.now();
 
-  // 先等待 URL 变化
+  // 对于 image/video，等待 chat 页面就绪
+  const urlMatch = mode === 'chat' ? '/chat/' : mode === 'music' ? '/create-music' : '/chat/';
+
   while (Date.now() - startTime < timeoutMs) {
     try {
       const currentUrl = webview.getURL();
-      if (currentUrl.includes(mode === 'chat' ? '/chat' : `/create-${mode}`)) {
-        // URL 已匹配，等待 DOM 就绪
+      if (currentUrl.includes(urlMatch)) {
         const ready = await waitForChatReady(webview, timeoutMs - (Date.now() - startTime));
         if (ready) {
           console.log(`[doubaoBridge] ${mode} 模式已就绪`);
@@ -501,6 +612,7 @@ export async function detectCurrentMode(webview: WebviewHandle): Promise<string>
     if (currentUrl.includes('/create-image')) return 'image';
     if (currentUrl.includes('/create-video')) return 'video';
     if (currentUrl.includes('/create-music')) return 'music';
+    if (currentUrl.includes('/chat/')) return 'chat';
     return 'chat';
   } catch {
     return 'chat';
