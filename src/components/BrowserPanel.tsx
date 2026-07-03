@@ -42,7 +42,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const registryRef = useRef<Map<string, HTMLWebViewElement>>(new Map());
   const loadingMapRef = useRef<Map<string, boolean>>(new Map());
   const runningRef = useRef<Set<string>>(new Set());
-  const initDoneRef = useRef(false);
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
@@ -58,19 +57,30 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     : undefined;
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
-  // ---- webview 池初始化（只执行一次） ----
+  // ---- webview 池动态管理（账号增删同步） ----
   useEffect(() => {
-    if (initDoneRef.current) return;
     const container = poolRef.current;
-    if (!container || accounts.length === 0) return;
+    if (!container) return;
 
-    initDoneRef.current = true;
-    console.log(`[BrowserPanel] 初始化 webview 池 (${accounts.length} 个账号)`);
+    const accountIds = new Set(accounts.map(a => a.id));
 
+    // 清理已删除账号的 webview
+    registryRef.current.forEach((webview, accountId) => {
+      if (!accountIds.has(accountId)) {
+        container.removeChild(webview);
+        registryRef.current.delete(accountId);
+        loadingMapRef.current.delete(accountId);
+        console.log(`[BrowserPanel] 已移除账号 ${accountId} 的 webview`);
+      }
+    });
+
+    // 为新增账号创建 webview
     accounts.forEach((account) => {
       createWebview(account, container);
     });
-  }, [accounts.map((a) => a.id).join(','), activeAccount?.id, refreshKey]);
+
+    console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个)`);
+  }, [accounts.map((a) => a.id).join(','), refreshKey]);
 
   // ---- 创建单个 webview ----
   const createWebview = (account: Account, container: HTMLDivElement) => {

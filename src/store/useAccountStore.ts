@@ -109,9 +109,13 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       const result = await window.electronAPI.accounts.delete(id);
       if (result.success) {
         const accounts = get().accounts.filter((a) => a.id !== id);
-        const selectedAccountId =
-          get().selectedAccountId === id ? null : get().selectedAccountId;
-        set({ accounts, selectedAccountId });
+        let newSelectedId = get().selectedAccountId;
+        // 如果删除的是当前选中的账号，自动切换到第一个可用账号
+        if (newSelectedId === id) {
+          const pinned = accounts.find(a => a.pinned);
+          newSelectedId = pinned ? pinned.id : (accounts.length > 0 ? accounts[0].id : null);
+        }
+        set({ accounts, selectedAccountId: newSelectedId });
         return true;
       } else {
         set({ error: result.error || '删除失败' });

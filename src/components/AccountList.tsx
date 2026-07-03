@@ -48,6 +48,9 @@ export const AccountList: React.FC = () => {
   const accountAutomationState = useTaskStore(s => s.accountAutomationState);
   const accountAutoMessage = useTaskStore(s => s.accountAutoMessage);
 
+  // 搜索
+  const [searchText, setSearchText] = useState('');
+
   // 添加账号弹窗
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [newAccountName, setNewAccountName] = useState('');
@@ -81,9 +84,14 @@ export const AccountList: React.FC = () => {
   );
 
   // ---- 排序逻辑 ----
-  /** 置顶优先 → 空闲靠前 → 忙碌靠后 */
+  /** 搜索过滤 + 置顶优先 → 空闲靠前 → 忙碌靠后 */
   const sortedAccounts = useMemo(() => {
-    return [...accounts].sort((a, b) => {
+    let filtered = accounts;
+    if (searchText.trim()) {
+      const kw = searchText.trim().toLowerCase();
+      filtered = accounts.filter(a => a.name.toLowerCase().includes(kw));
+    }
+    return [...filtered].sort((a, b) => {
       // 1. 置顶优先
       if (a.pinned !== b.pinned) {
         return a.pinned ? -1 : 1;
@@ -97,7 +105,7 @@ export const AccountList: React.FC = () => {
       // 3. 同为空闲或同为忙碌，按原始顺序
       return 0;
     });
-  }, [accounts, accountBusy]);
+  }, [accounts, accountBusy, searchText]);
 
   // ---- 添加账号 ----
   const handleAddAccount = useCallback(async () => {
@@ -210,7 +218,12 @@ export const AccountList: React.FC = () => {
     <div className="flex flex-col h-full">
       {/* 面板标题栏 */}
       <div className="panel-header">
-        <span className="panel-title">账号列表</span>
+        <div className="flex items-center gap-2">
+          <span className="panel-title">账号列表</span>
+          <span className="text-xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded-full">
+            {accounts.length}
+          </span>
+        </div>
         <Tooltip title="添加账号">
           <button
             className="btn-ghost text-db-accent hover:!text-db-accent-light"
@@ -220,6 +233,19 @@ export const AccountList: React.FC = () => {
           </button>
         </Tooltip>
       </div>
+
+      {/* 搜索框 */}
+      {accounts.length > 3 && (
+        <div className="px-2 pb-1">
+          <input
+            type="text"
+            placeholder="搜索账号..."
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            className="w-full px-2.5 py-1.5 text-xs rounded-md border border-db-border bg-db-surface text-db-text-primary placeholder-db-text-muted focus:outline-none focus:border-db-accent/50"
+          />
+        </div>
+      )}
 
       {/* 账号列表 */}
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
