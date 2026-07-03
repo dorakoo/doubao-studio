@@ -117,6 +117,7 @@ const App: React.FC = () => {
         {/* 右侧浏览器 */}
         <div className="app-browser">
           <BrowserPanel
+            accounts={accounts}
             activeAccount={activeAccount}
             refreshKey={0}
             activeTask={activeTask}

@@ -1,11 +1,11 @@
 /**
  * src/components/BrowserPanel.tsx
- * 内嵌浏览器面板 — V2 自动化执行
+ * 内嵌浏览器面板 — V2 自动化执行（多 webview 常驻版）
  *
- * 核心职责：
- * 1. 展示对应账号的 webview，隔离 session
- * 2. 接收自动化任务 → 注入提示词 → 提交 → 轮询结果
- * 3. 管理 webview 导航（前进/后退/刷新/首页）
+ * 核心改进：
+ * - 为每个账号维护独立的 webview，切换账号不销毁
+ * - 用 CSS 控制显隐，后台 webview 继续运行
+ * - 任务可以在非当前显示的账号上执行
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
@@ -24,6 +24,8 @@ import {
 // ==================== 类型 ====================
 
 interface BrowserPanelProps {
+  /** 所有账号列表 */
+  accounts: Account[];
   /** 当前活跃账号 */
   activeAccount: Account | null;
   /** 浏览器刷新触发器 */
@@ -35,129 +37,155 @@ interface BrowserPanelProps {
 // ==================== 组件 ====================
 
 const BrowserPanel: React.FC<BrowserPanelProps> = ({
+  accounts,
   activeAccount,
   refreshKey,
   activeTask,
 }) => {
-  /** webview 容器 DOM ref */
-  const webviewRef = useRef<HTMLDivElement>(null);
-  /** webview 元素直接引用 */
-  const webviewTagRef = useRef<HTMLWebViewElement | null>(null);
+  /** webview 总容器 DOM ref */
+  const poolRef = useRef<HTMLDivElement>(null);
+  /** webview 注册表：accountId -> webview 元素 */
+  const registryRef = useRef<Map<string, HTMLWebViewElement>>(new Map());
+  /** 每个账号的加载状态 */
+  const loadingMapRef = useRef<Map<string, boolean>>(new Map());
 
-  /** 加载状态 */
-  const [loading, setLoading] = useState(true);
-  /** 加载进度文字 */
+  /** 当前活跃账号的加载状态（用于 UI 显示） */
+  const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
-  /** 自动化阶段 UI 状态（从 store 读取） */
+  /** 自动化阶段 UI 状态 */
   const autoStage = useTaskStore((s) => s.automationState);
-  /** 自动化消息 */
   const [autoMessage, setAutoMessage] = useState('');
 
   const updateAccountStatus = useAccountStore((s) => s.updateAccountStatus);
 
-  // ---- webview 生命周期 ----
+  // ---- webview 池：为所有账号创建并常驻 webview ----
 
-  /**
-   * 当 activeAccount 或 refreshKey 变化时，销毁旧 webview 并创建新的
-   */
   useEffect(() => {
-    if (!webviewRef.current || !activeAccount) return;
+    if (!poolRef.current || accounts.length === 0) return;
 
-    const container = webviewRef.current; // 提前捕获，避免 TS 窄化失效
-    (async () => {
-    // 清理旧 webview
-    container.innerHTML = '';
+    const container = poolRef.current;
 
-    setLoading(true);
-    setLoadText('加载豆包中...');
-    useTaskStore.getState().setAutomationState('idle');
-    setAutoMessage('');
+    accounts.forEach(async (account) => {
+      // 已有 webview 则跳过（不销毁重建）
+      if (registryRef.current.has(account.id)) return;
 
-    // 确保主进程 session 已初始化（重启后 partition 可能未被预创建）
-    await window.electronAPI.accounts.getPartition(activeAccount.id);
-
-    // 创建 webview
-    const webview = document.createElement('webview') as HTMLWebViewElement;
-    webviewTagRef.current = webview;
-
-    // 基础属性
-    webview.setAttribute('src', 'https://www.doubao.com/chat/');
-    webview.setAttribute('partition', `persist:doubao_${activeAccount.partition}`);
-    webview.setAttribute('allowpopups', 'true');
-    webview.setAttribute('useragent',
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-    webview.setAttribute('width', '100%');
-    webview.setAttribute('height', '100%');
-    webview.style.width = '100%';
-    webview.style.height = '100%';
-    webview.style.border = 'none';
-    webview.style.outline = 'none';
-
-    // 事件监听
-    webview.addEventListener('did-start-loading', () => {
-      setLoading(true);
-      setLoadText('页面加载中...');
-    });
-
-    webview.addEventListener('did-stop-loading', () => {
-      setLoading(false);
-    });
-
-    webview.addEventListener('did-finish-load', () => {
-      setLoading(false);
-      setLoadText('豆包已就绪');
-      setTimeout(() => setLoadText(''), 1500);
-    });
-
-    webview.addEventListener('did-fail-load', () => {
-      setLoading(false);
-      setLoadText('加载失败，请检查网络');
-    });
-
-    container.appendChild(webview);
-    })();
-
-    return () => {
-      if (webviewTagRef.current) {
-        webviewTagRef.current.remove();
-        webviewTagRef.current = null;
+      loadingMapRef.current.set(account.id, true);
+      if (account.id === activeAccount?.id) {
+        setActiveLoading(true);
+        setLoadText('加载豆包中...');
       }
-    };
-  }, [activeAccount?.id, refreshKey]);
 
-  // ---- V2 自动化执行 ----
+      // 确保主进程 session 已初始化
+      await window.electronAPI.accounts.getPartition(account.id);
 
-  /**
-   * 监听 activeTask 变化，当有新任务到来时自动执行
-   */
+      // 创建 webview
+      const webview = document.createElement('webview') as HTMLWebViewElement;
+      webview.setAttribute('src', 'https://www.doubao.com/chat/');
+      webview.setAttribute('partition', `persist:doubao_${account.partition}`);
+      webview.setAttribute('allowpopups', 'true');
+      webview.setAttribute('useragent',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      );
+      webview.style.width = '100%';
+      webview.style.height = '100%';
+      webview.style.border = 'none';
+      webview.style.outline = 'none';
+      webview.style.position = 'absolute';
+      webview.style.top = '0';
+      webview.style.left = '0';
+      // 默认隐藏，下面会设置活跃的为可见
+      webview.style.visibility = 'hidden';
+      webview.style.pointerEvents = 'none';
+
+      // 事件监听
+      webview.addEventListener('did-start-loading', () => {
+        loadingMapRef.current.set(account.id, true);
+        if (account.id === activeAccount?.id) {
+          setActiveLoading(true);
+          setLoadText('页面加载中...');
+        }
+      });
+
+      webview.addEventListener('did-stop-loading', () => {
+        loadingMapRef.current.set(account.id, false);
+        if (account.id === activeAccount?.id) {
+          setActiveLoading(false);
+        }
+      });
+
+      webview.addEventListener('did-finish-load', () => {
+        loadingMapRef.current.set(account.id, false);
+        if (account.id === activeAccount?.id) {
+          setActiveLoading(false);
+          setLoadText('豆包已就绪');
+          setTimeout(() => setLoadText(''), 1500);
+        }
+      });
+
+      webview.addEventListener('did-fail-load', () => {
+        loadingMapRef.current.set(account.id, false);
+        if (account.id === activeAccount?.id) {
+          setActiveLoading(false);
+          setLoadText('加载失败，请检查网络');
+        }
+      });
+
+      container.appendChild(webview);
+      registryRef.current.set(account.id, webview);
+    });
+  }, [accounts.map(a => a.id).join(','), refreshKey]);
+
+  // ---- 切换活跃账号时，切换 webview 可见性 ----
+
   useEffect(() => {
-    if (!activeTask || !webviewTagRef.current) return;
-    // 守卫：确保任务指派的账号匹配当前活跃账号
-    if (activeTask.assignedAccountId !== activeAccount?.id) return;
+    registryRef.current.forEach((webview, accountId) => {
+      if (accountId === activeAccount?.id) {
+        webview.style.visibility = 'visible';
+        webview.style.pointerEvents = 'auto';
+        // 同步加载状态
+        const isLoading = loadingMapRef.current.get(accountId);
+        setActiveLoading(!!isLoading);
+        if (!isLoading) {
+          setLoadText('');
+        }
+      } else {
+        webview.style.visibility = 'hidden';
+        webview.style.pointerEvents = 'none';
+      }
+    });
+  }, [activeAccount?.id]);
 
-    const webview = webviewTagRef.current;
+  // ---- V2 自动化执行（后台运行，不依赖当前显示的账号） ----
 
-    // 执行自动化流程
+  useEffect(() => {
+    if (!activeTask || !activeTask.assignedAccountId) return;
+
+    const targetWebview = registryRef.current.get(activeTask.assignedAccountId);
+    if (!targetWebview) {
+      console.warn('[BrowserPanel] 目标账号的 webview 尚未创建:', activeTask.assignedAccountId);
+      return;
+    }
+
+    const webview = targetWebview;
+
     (async () => {
       try {
-        // 并发守卫：已有自动化在执行则跳过
-        useTaskStore.getState().setAutomationState('idle'); // 强制重置状态，避免残留
+        useTaskStore.getState().setAutomationState('idle'); // 强制重置状态
 
         // 1. 等待 webview 加载完成
-        console.log('[BrowserPanel] waitForWebviewReady 开始');
+        console.log('[BrowserPanel] waitForWebviewReady 开始 (账号:', activeTask.assignedAccountId, ')');
         useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('等待页面就绪...');
         await waitForWebviewReady(webview, 15000);
         console.log('[BrowserPanel] waitForWebviewReady 完成');
 
-        // 2. 导航到豆包聊天页，用 waitForChatReady 等 DOM 就绪
+        // 2. 导航到豆包聊天页
         console.log('[BrowserPanel] navigateToChat 开始');
         await navigateToChat(webview);
         await waitForWebviewReady(webview, 15000);
         console.log('[BrowserPanel] navigateToChat + waitForWebviewReady 完成');
 
-        // 3. 注入提示词（10s 超时保护）
+        // 3. 注入提示词
         console.log('[BrowserPanel] injectPrompt 开始, prompt:', activeTask.prompt.substring(0, 50));
         useTaskStore.getState().setAutomationState('injecting');
         setAutoMessage('正在注入提示词...');
@@ -173,7 +201,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
         await sleep(800);
 
-        // 4. 提交（10s 超时保护）
+        // 4. 提交
         console.log('[BrowserPanel] submitPrompt 开始');
         useTaskStore.getState().setAutomationState('submitting');
         setAutoMessage('正在发送...');
@@ -191,11 +219,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // 5. 轮询等待生成
         useTaskStore.getState().setAutomationState('generating');
         setAutoMessage('等待豆包生成回复...');
-
-        // 先等一小段时间让生成开始
         await sleep(3000);
 
-        // 开始轮询（最多 5 分钟）
         const maxAttempts = 100;
         const intervalMs = 3000;
         let generating = true;
@@ -208,9 +233,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               setTimeout(() => reject(new Error('生成检测超时（10s）')), 10000)
             ),
           ]);
-          if (!generating) {
-            break;
-          }
+          if (!generating) break;
           setAutoMessage(`等待豆包生成回复... (${Math.round((i * intervalMs) / 1000)}s)`);
         }
 
@@ -237,37 +260,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         }
       }
     })();
-  }, [activeTask?.id, activeAccount?.id]);
+  }, [activeTask?.id]);
 
-  // ---- 导航方法 ----
+  // ---- 导航方法（仅操作当前活跃账号的 webview） ----
 
-  /** 刷新 */
+  const getActiveWebview = useCallback(() => {
+    if (!activeAccount) return null;
+    return registryRef.current.get(activeAccount.id) || null;
+  }, [activeAccount]);
+
   const handleRefresh = useCallback(() => {
-    if (webviewTagRef.current) {
-      webviewTagRef.current.reload();
-    }
-  }, []);
+    getActiveWebview()?.reload();
+  }, [getActiveWebview]);
 
-  /** 后退 */
   const handleGoBack = useCallback(() => {
-    if (webviewTagRef.current?.canGoBack()) {
-      webviewTagRef.current.goBack();
-    }
-  }, []);
+    const wv = getActiveWebview();
+    if (wv?.canGoBack()) wv.goBack();
+  }, [getActiveWebview]);
 
-  /** 前进 */
   const handleGoForward = useCallback(() => {
-    if (webviewTagRef.current?.canGoForward()) {
-      webviewTagRef.current.goForward();
-    }
-  }, []);
+    const wv = getActiveWebview();
+    if (wv?.canGoForward()) wv.goForward();
+  }, [getActiveWebview]);
 
-  /** 回到首页 */
   const handleGoHome = useCallback(() => {
-    if (webviewTagRef.current) {
-      webviewTagRef.current.loadURL('https://www.doubao.com/chat/');
-    }
-  }, []);
+    getActiveWebview()?.loadURL('https://www.doubao.com/chat/');
+  }, [getActiveWebview]);
 
   // ---- 渲染 ----
 
@@ -320,16 +338,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         </div>
       </div>
 
-      {/* webview 容器 */}
+      {/* webview 池 + 覆盖层 */}
       <div className="browser-viewport">
-        {loading && (
+        {activeLoading && (
           <div className="browser-loading-overlay">
             <div className="browser-loading-spinner" />
             <span>{loadText}</span>
           </div>
         )}
 
-        {/* V2 自动化状态覆盖层 */}
         {autoStage !== 'idle' && autoStage !== 'completed' && (
           <div className="automation-overlay">
             <div className="automation-indicator">
@@ -359,9 +376,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           </div>
         )}
 
+        {/* webview 池容器：所有账号的 webview 都在这里，用 CSS 控制显隐 */}
         <div
-          ref={webviewRef}
-          style={{ position: 'relative', width: '100%', height: '100%' }}
+          ref={poolRef}
+          style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }}
         />
       </div>
     </div>
@@ -370,14 +388,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
 // ==================== 工具函数 ====================
 
-/**
- * 等待 webview 页面完全就绪（DOM 已渲染 textarea）
- *
- * 策略：
- * 1. 先等 did-finish-load 事件（主框架加载完成）
- * 2. 然后用 waitForChatReady 轮询 DOM，确认 textarea 真实可见后再 resolve
- *    避免 did-finish-load 触发时 DOM 尚未完全渲染的问题
- */
 function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const startTime = Date.now();
@@ -386,7 +396,6 @@ function waitForWebviewReady(webview: HTMLWebViewElement, timeoutMs: number): Pr
         reject(new Error('页面就绪检测超时（' + timeoutMs + 'ms）'));
         return;
       }
-      // 直接检查 DOM 就绪，不依赖 isLoading()（可能有持续后台请求导致一直 loading）
       try {
         const ready = await waitForChatReady(webview, 3000);
         if (ready) {
