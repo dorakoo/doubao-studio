@@ -61,14 +61,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
     const container = poolRef.current;
-    if (!container) {
-      console.log('[BrowserPanel] container 未就绪，跳过');
-      return;
-    }
-    if (!activeAccount) {
-      console.log('[BrowserPanel] activeAccount 为空，跳过');
-      return;
-    }
+    if (!container || !activeAccount) return;
 
     const accountIds = new Set(accounts.map(a => a.id));
 
