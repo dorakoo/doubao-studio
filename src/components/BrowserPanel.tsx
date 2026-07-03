@@ -143,7 +143,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     container.appendChild(webview);
     registryRef.current.set(accId, webview);
-    console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`);
+    const msg = `[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`;
+    console.log(msg);
+    if (account === accounts[0]) alert(msg); // 第一个账号创建时弹窗确认
 
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
     // 解决 Electron webview 事件不触发的问题
