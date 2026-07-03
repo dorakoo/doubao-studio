@@ -429,3 +429,80 @@ export async function waitForChatReady(
 
   return false;
 }
+
+// ==================== 模式切换 ====================
+
+/** 生成模式对应的 URL 映射 */
+const MODE_URLS: Record<string, string> = {
+  chat: 'https://www.doubao.com/chat/',
+  image: 'https://www.doubao.com/chat/create-image/',
+  video: 'https://www.doubao.com/chat/create-video/',
+  music: 'https://www.doubao.com/chat/create-music/',
+};
+
+/**
+ * 切换豆包生成模式
+ * 通过导航到对应模式的 URL 实现
+ * 如果当前已在目标模式页面，跳过导航
+ */
+export function switchMode(webview: WebviewHandle, mode: string): void {
+  const targetUrl = MODE_URLS[mode] || MODE_URLS.chat;
+  const currentUrl = webview.getURL();
+
+  // 检查是否已在目标模式页面
+  if (currentUrl.includes(mode === 'chat' ? '/chat/' : `/create-${mode}/`)) {
+    console.log(`[doubaoBridge] 已在 ${mode} 模式，跳过切换`);
+    return;
+  }
+
+  console.log(`[doubaoBridge] 切换到 ${mode} 模式 → ${targetUrl}`);
+  webview.loadURL(targetUrl);
+}
+
+/**
+ * 等待模式切换完成（页面重新加载 + DOM 就绪）
+ */
+export async function waitForModeReady(
+  webview: WebviewHandle,
+  mode: string,
+  timeoutMs: number = 20000
+): Promise<boolean> {
+  const targetUrl = MODE_URLS[mode] || MODE_URLS.chat;
+  const startTime = Date.now();
+
+  // 先等待 URL 变化
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const currentUrl = webview.getURL();
+      if (currentUrl.includes(mode === 'chat' ? '/chat' : `/create-${mode}`)) {
+        // URL 已匹配，等待 DOM 就绪
+        const ready = await waitForChatReady(webview, timeoutMs - (Date.now() - startTime));
+        if (ready) {
+          console.log(`[doubaoBridge] ${mode} 模式已就绪`);
+          return true;
+        }
+      }
+    } catch {
+      // 页面可能还在加载
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  console.warn(`[doubaoBridge] ${mode} 模式切换超时`);
+  return false;
+}
+
+/**
+ * 检测当前豆包页面处于哪种模式
+ */
+export async function detectCurrentMode(webview: WebviewHandle): Promise<string> {
+  try {
+    const currentUrl = webview.getURL();
+    if (currentUrl.includes('/create-image')) return 'image';
+    if (currentUrl.includes('/create-video')) return 'video';
+    if (currentUrl.includes('/create-music')) return 'music';
+    return 'chat';
+  } catch {
+    return 'chat';
+  }
+}

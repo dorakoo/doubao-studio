@@ -69,7 +69,7 @@ export interface ElectronAPI {
   };
   tasks: {
     list: () => Promise<Task[]>;
-    add: (prompts: string[]) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
+    add: (prompts: string[], mode?: string) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
     assign: (taskId: string, accountId: string) => Promise<{ success: boolean; error?: string }>;
     updateStatus: (
       taskId: string,

@@ -9,7 +9,7 @@
  */
 
 import { create } from 'zustand';
-import type { Task, TaskStatus } from '../types';
+import type { Task, TaskStatus, GenerationMode } from '../types';
 
 // ==================== 类型 ====================
 
@@ -38,7 +38,7 @@ interface TaskState {
 
   // ---- Actions ----
   loadTasks: () => Promise<void>;
-  addTasks: (text: string) => Promise<boolean>;
+  addTasks: (text: string, mode?: GenerationMode) => Promise<boolean>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   deleteTask: (taskId: string) => Promise<boolean>;
@@ -83,7 +83,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
   },
 
-  addTasks: async (text: string) => {
+  addTasks: async (text: string, mode?: GenerationMode) => {
     set({ error: null });
     const prompts = text
       .split('\n')
@@ -96,7 +96,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     try {
-      const result = await window.electronAPI.tasks.add(prompts);
+      const result = await window.electronAPI.tasks.add(prompts, mode);
       if (result.success && result.tasks) {
         set({ tasks: [...get().tasks, ...result.tasks] });
         return true;

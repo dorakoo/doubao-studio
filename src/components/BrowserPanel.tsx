@@ -19,6 +19,8 @@ import {
   checkGenerating,
   getResultUrl,
   navigateToChat,
+  switchMode,
+  waitForModeReady,
   waitForChatReady,
 } from '../utils/doubaoBridge';
 
@@ -157,7 +159,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!task) return;
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
       runningRef.current.add(accountId);
-      executeAutomation(accountId, taskId, task.prompt, webview);
+      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview);
     });
   }, [accountBusy, executingTasks]);
 
@@ -166,6 +168,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     accountId: string,
     taskId: string,
     prompt: string,
+    mode: string,
     webview: HTMLWebViewElement
   ) => {
     const { setAccountAutomationState, completeAutomation, failAutomation } =
@@ -174,8 +177,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[Automation:${accountId}] 开始`);
       setAccountAutomationState(accountId, 'injecting', '等待页面就绪...');
       await waitForWebviewReady(webview, 15000);
-      await navigateToChat(webview);
-      await waitForWebviewReady(webview, 15000);
+      // 根据任务模式切换到对应页面
+      if (mode && mode !== 'chat') {
+        setAccountAutomationState(accountId, 'injecting', \`切换到\${mode === 'image' ? '图片' : mode === 'video' ? '视频' : mode === 'music' ? '音乐' : mode}模式...\`);
+        switchMode(webview, mode);
+        await waitForWebviewReady(webview, 20000);
+      } else {
+        await navigateToChat(webview);
+        await waitForWebviewReady(webview, 15000);
+      }
 
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       const injected = await Promise.race([

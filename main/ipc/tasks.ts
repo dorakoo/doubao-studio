@@ -1,7 +1,7 @@
 /**
  * main/ipc/tasks.ts
  * 任务调度 IPC 处理器
- * 负责：任务队列管理、状态流转、批量操作
+ * 负责：任务队列管理、状态流转、批量操作、生成模式
  */
 
 import { ipcMain } from 'electron';
@@ -9,6 +9,9 @@ import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
 
 // ==================== 类型定义 ====================
+
+/** 生成模式 */
+export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
 
 /** 任务状态（V2 扩展） */
 export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
@@ -22,6 +25,8 @@ export interface Task {
   assignedAccountId: string | null;
   /** 任务状态 */
   status: TaskStatus;
+  /** 生成模式 */
+  mode: GenerationMode;
   /** 执行结果/产出描述 */
   result: string | null;
   /** 产物的下载链接列表 */
@@ -47,19 +52,22 @@ function saveTasks(tasks: Task[]): boolean {
 export function registerTaskIPC(): void {
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
-    return loadTasks();
+    const tasks = loadTasks();
+    // 兼容旧数据：无 mode 字段默认 chat
+    return tasks.map(t => ({ ...t, mode: t.mode || 'chat' as GenerationMode }));
   });
 
-  // ---- 添加任务（支持批量：多行文本，每行一个任务） ----
+  // ---- 添加任务（支持批量 + 指定模式） ----
   ipcMain.handle(
     'tasks:add',
-    async (_event, params: { prompts: string[] }): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
+    async (_event, params: { prompts: string[]; mode?: GenerationMode }): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
       try {
         if (!params.prompts || params.prompts.length === 0) {
           return { success: false, error: '请输入至少一条提示词' };
         }
 
         const tasks = loadTasks();
+        const mode: GenerationMode = params.mode || 'chat';
         const newTasks: Task[] = params.prompts
           .filter((p) => p.trim().length > 0)
           .map((prompt) => ({
@@ -67,6 +75,7 @@ export function registerTaskIPC(): void {
             prompt: prompt.trim(),
             assignedAccountId: null,
             status: 'queued' as TaskStatus,
+            mode,
             result: null,
             outputs: [],
             createdAt: new Date().toISOString(),

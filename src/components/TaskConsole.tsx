@@ -1,13 +1,16 @@
 /**
  * src/components/TaskConsole.tsx
- * 任务调度控制台 — V2 自动化 UI
+ * 任务调度控制台 — V3 多模式支持
  *
- * 支持批量添加任务、指派账号、启动自动化执行、查看状态
+ * 支持：
+ * - 批量添加任务 + 选择生成模式（对话/图片/视频/音乐）
+ * - 指派账号、启动自动化、查看状态
+ * - 任务列表中显示模式标签
  */
 
 import React, { useState, useCallback } from 'react';
-import { Button, Select, Input, Modal, Dropdown, Space } from 'antd';
-import type { MenuProps } from 'antd';
+import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip } from 'antd';
+import type { MenuProps, SegmentedProps } from 'antd';
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -23,9 +26,40 @@ import {
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
-import { TASK_STATUS_CONFIG, type TaskStatus } from '../types';
+import { TASK_STATUS_CONFIG, GENERATION_MODE_CONFIG, type TaskStatus, type GenerationMode } from '../types';
 
 const { TextArea } = Input;
+
+// ==================== 模式选择组件 ====================
+
+const ModeSelector: React.FC<{
+  value: GenerationMode;
+  onChange: (mode: GenerationMode) => void;
+}> = ({ value, onChange }) => {
+  const options = Object.entries(GENERATION_MODE_CONFIG).map(([key, cfg]) => ({
+    label: (
+      <div className="flex flex-col items-center py-1 px-2">
+        <span className="text-lg">{cfg.icon}</span>
+        <span className="text-xs mt-0.5">{cfg.label}</span>
+      </div>
+    ),
+    value: key,
+  }));
+
+  return (
+    <Segmented
+      value={value}
+      onChange={(val) => onChange(val as GenerationMode)}
+      options={options}
+      block
+      style={{
+        background: '#1a1a24',
+        padding: '4px',
+        borderRadius: 10,
+      }}
+    />
+  );
+};
 
 // ==================== 组件 ====================
 
@@ -48,16 +82,18 @@ const TaskConsole: React.FC = () => {
 
   const [inputText, setInputText] = useState('');
   const [addModalOpen, setAddModalOpen] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<GenerationMode>('chat');
 
   // ---- 添加任务 ----
 
   const handleAddTasks = useCallback(async () => {
-    const ok = await addTasks(inputText);
+    const ok = await addTasks(inputText, selectedMode);
     if (ok) {
       setInputText('');
       setAddModalOpen(false);
+      setSelectedMode('chat');
     }
-  }, [inputText, addTasks]);
+  }, [inputText, selectedMode, addTasks]);
 
   // ---- 指派账号 ----
 
@@ -90,6 +126,27 @@ const TaskConsole: React.FC = () => {
     },
   ];
 
+  // ---- 渲染模式标签 ----
+
+  const renderModeTag = (mode: GenerationMode) => {
+    const cfg = GENERATION_MODE_CONFIG[mode] || GENERATION_MODE_CONFIG.chat;
+    return (
+      <Tooltip title={cfg.description}>
+        <span
+          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium"
+          style={{
+            backgroundColor: cfg.color + '18',
+            color: cfg.color,
+            border: `1px solid ${cfg.color}30`,
+          }}
+        >
+          <span>{cfg.icon}</span>
+          {cfg.label}
+        </span>
+      </Tooltip>
+    );
+  };
+
   // ---- 渲染状态标签 ----
 
   const renderStatusTag = (status: TaskStatus) => {
@@ -112,12 +169,14 @@ const TaskConsole: React.FC = () => {
     const isActive = task.status === 'executing' || task.status === 'generating';
     const isQueued = task.status === 'queued';
     const canStart = isQueued && task.assignedAccountId && !accountBusy[task.assignedAccountId];
+    const taskMode = task.mode || 'chat';
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
         <div className={`task-item ${isActive ? 'task-item-active' : ''}`}>
           <div className="task-item-top">
             {renderStatusTag(task.status)}
+            {renderModeTag(taskMode)}
             <span className="task-item-time">
               {new Date(task.createdAt).toLocaleTimeString('zh-CN', {
                 hour: '2-digit',
@@ -276,18 +335,39 @@ const TaskConsole: React.FC = () => {
         onCancel={() => {
           setAddModalOpen(false);
           setInputText('');
+          setSelectedMode('chat');
         }}
         okText="添加"
         cancelText="取消"
         width={520}
       >
+        {/* 模式选择 */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>
+            选择生成模式
+          </div>
+          <ModeSelector value={selectedMode} onChange={setSelectedMode} />
+          <div style={{ color: '#6b6b88', marginTop: 6, fontSize: 12 }}>
+            {GENERATION_MODE_CONFIG[selectedMode].description}
+          </div>
+        </div>
+
+        {/* 提示词输入 */}
         <p style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>
           每行一个提示词，支持批量粘贴
         </p>
         <TextArea
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
-          placeholder={'写一篇关于AI的科普文章\n总结2024年科技趋势\n翻译这段文本为英文'}
+          placeholder={
+            selectedMode === 'image'
+              ? '一只橘色短毛猫，趴在阳光窗台上，写实摄影风格，8K高清\n赛博朋克城市夜景，霓虹灯，雨夜，16:9'
+              : selectedMode === 'video'
+              ? '海边日落，海浪慢动作，暖色调，电影氛围感，10秒\n女生漫步樱花树下，微笑，近景，自然光，5秒'
+              : selectedMode === 'music'
+              ? '轻快的钢琴曲，治愈系，30秒\n电子音乐，节奏感强，适合短视频BGM'
+              : '写一篇关于AI的科普文章\n总结2024年科技趋势\n翻译这段文本为英文'
+          }
           rows={8}
           autoFocus
           style={{

@@ -19,6 +19,47 @@ export interface Account {
   updatedAt: string;
 }
 
+/** 豆包生成模式 */
+export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
+
+/** 生成模式配置 */
+export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
+  label: string;
+  icon: string;
+  color: string;
+  url: string;
+  description: string;
+}> = {
+  chat: {
+    label: '对话',
+    icon: '💬',
+    color: '#60a5fa',
+    url: 'https://www.doubao.com/chat/',
+    description: '智能对话、问答、写作',
+  },
+  image: {
+    label: '图片',
+    icon: '🎨',
+    color: '#a78bfa',
+    url: 'https://www.doubao.com/chat/create-image/',
+    description: 'AI 绘画、文生图、图生图',
+  },
+  video: {
+    label: '视频',
+    icon: '🎬',
+    color: '#f472b6',
+    url: 'https://www.doubao.com/chat/create-video/',
+    description: 'AI 视频、文生视频、图生视频',
+  },
+  music: {
+    label: '音乐',
+    icon: '🎵',
+    color: '#34d399',
+    url: 'https://www.doubao.com/chat/create-music/',
+    description: 'AI 作曲、音乐生成',
+  },
+};
+
 /** 任务状态（V2 扩展） */
 export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
 
@@ -28,6 +69,8 @@ export interface Task {
   prompt: string;
   assignedAccountId: string | null;
   status: TaskStatus;
+  /** 生成模式（默认 chat） */
+  mode: GenerationMode;
   result: string | null;
   outputs: string[];
   createdAt: string;
