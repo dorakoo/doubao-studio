@@ -263,9 +263,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       if (generating) throw new Error('生成超时');
 
-      const resultUrl = await getResultUrl(webview);
-      console.log(`[Automation:${accountId}] 完成`);
-      await completeAutomation(taskId, accountId, resultUrl);
+      const rawResult = await getResultUrl(webview);
+      // 解析 JSON 数组字符串为图片 URL 列表
+      let imageUrls: string[] = [];
+      try {
+        imageUrls = JSON.parse(rawResult);
+      } catch {
+        imageUrls = rawResult ? [rawResult] : [];
+      }
+      console.log(`[Automation:${accountId}] 完成, 产物:`, imageUrls);
+      // 传入第一个 URL 作为 result（向后兼容），outputs 传完整数组
+      await completeAutomation(taskId, accountId, imageUrls[0] || '', imageUrls);
     } catch (err: any) {
       console.error(`[Automation:${accountId}] 失败:`, err.message);
       setAccountAutomationState(accountId, 'failed', err.message);

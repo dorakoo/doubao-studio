@@ -441,16 +441,51 @@ export async function checkGenerating(webview: WebviewHandle): Promise<boolean> 
   }
 }
 
-// ==================== 获取结果 URL ====================
+// ==================== 获取结果图片 URL ====================
 
 /**
- * 获取当前页面 URL 作为结果链接
+ * 从豆包生成结果页面提取图片 URL
+ * 返回 JSON 数组字符串，包含所有产物图片的直链
  */
 export async function getResultUrl(webview: WebviewHandle): Promise<string> {
   try {
-    return webview.getURL();
+    const code = `
+      (function() {
+        // 查找豆包回复区域中的图片
+        var imgs = document.querySelectorAll('img');
+        var urls = [];
+        for (var i = 0; i < imgs.length; i++) {
+          var src = imgs[i].src || '';
+          // 跳过图标、头像、UI 元素，只保留内容图片
+          if (src && !src.includes('data:') &&
+              !src.includes('icon') && !src.includes('avatar') &&
+              !src.includes('emoji') && !src.includes('logo') &&
+              !src.includes('badge') && !src.includes('status') &&
+              src.includes('http') &&
+              (src.includes('image') || src.includes('img') || src.includes('cdn') ||
+               src.includes('.png') || src.includes('.jpg') || src.includes('.webp') ||
+               src.includes('tos-') || src.includes('bytecdn') || src.includes('byteimg'))) {
+            // 去重
+            if (urls.indexOf(src) === -1) {
+              urls.push(src);
+            }
+          }
+        }
+        // 也检查 video 标签的 poster
+        var videos = document.querySelectorAll('video');
+        for (var j = 0; j < videos.length; j++) {
+          var poster = videos[j].poster || '';
+          if (poster && urls.indexOf(poster) === -1) {
+            urls.push(poster);
+          }
+        }
+        return JSON.stringify(urls);
+      })();
+    `;
+    const result = await webview.executeJavaScript(code);
+    return result || '[]';
   } catch {
-    return '';
+    return '[]';
   }
 }
 

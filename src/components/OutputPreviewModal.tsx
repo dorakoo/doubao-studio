@@ -110,7 +110,6 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {outputs.map((item) => {
             const isSelected = selectedIds.has(item.taskId);
-            const firstOutput = item.outputs[0] || '';
             return (
               <div
                 key={item.taskId}
@@ -126,22 +125,39 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
                 onClick={() => toggleSelect(item.taskId)}
               >
                 <Checkbox checked={isSelected} onChange={() => toggleSelect(item.taskId)} />
-                {firstOutput && (
-                  <img
-                    src={firstOutput}
-                    alt="产物"
-                    style={{
-                      width: 80,
-                      height: 80,
-                      objectFit: 'cover',
-                      borderRadius: 4,
-                      flexShrink: 0,
-                    }}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPreviewUrl(firstOutput);
-                    }}
-                  />
+                {item.outputs.length > 0 && (
+                  <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
+                    {item.outputs.slice(0, 3).map((url, idx) => (
+                      <img
+                        key={idx}
+                        src={url}
+                        alt={`产物-${idx}`}
+                        style={{
+                          width: 80,
+                          height: 80,
+                          objectFit: 'cover',
+                          borderRadius: 4,
+                          background: '#eee',
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPreviewUrl(url);
+                        }}
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).style.display = 'none';
+                        }}
+                      />
+                    ))}
+                    {item.outputs.length > 3 && (
+                      <div style={{
+                        width: 80, height: 80, display: 'flex', alignItems: 'center',
+                        justifyContent: 'center', borderRadius: 4, background: '#eee',
+                        fontSize: 12, color: '#999', flexShrink: 0,
+                      }}>
+                        +{item.outputs.length - 3}
+                      </div>
+                    )}
+                  </div>
                 )}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, color: '#666', marginBottom: 4 }}>

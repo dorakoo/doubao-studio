@@ -49,7 +49,7 @@ interface TaskState {
   // V3 自动化方法
   startAutomation: (taskId: string) => void;
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string) => void;
-  completeAutomation: (taskId: string, accountId: string, resultUrl: string) => Promise<void>;
+  completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
   failAutomation: (taskId: string, accountId: string, errorMsg: string) => Promise<void>;
 
   /** 处理队列：检查待执行任务，分配到空闲账号 */
@@ -248,12 +248,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     });
   },
 
-  completeAutomation: async (taskId: string, accountId: string, resultUrl: string) => {
-    await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, [resultUrl]);
+  completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
+    const finalOutputs = outputs && outputs.length > 0 ? outputs : [resultUrl];
+    await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
 
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? { ...t, status: 'done' as TaskStatus, result: resultUrl, outputs: [resultUrl], updatedAt: new Date().toISOString() }
+        ? { ...t, status: 'done' as TaskStatus, result: resultUrl, outputs: finalOutputs, updatedAt: new Date().toISOString() }
         : t
     );
 
