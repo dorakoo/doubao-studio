@@ -108,7 +108,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 统一加载完成处理
     const markLoaded = (evt: string) => {
+      if (!loadingMapRef.current.get(accId)) return; // 已标记完成，不重复处理
       loadingMapRef.current.set(accId, false);
+      console.log(`[BrowserPanel] markLoaded: ${accId} via ${evt}`);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
         setActiveLoading(false);
@@ -141,30 +143,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     container.appendChild(webview);
     registryRef.current.set(accId, webview);
-    console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}, childCount=${container.children.length}`);
+    console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`);
 
-    // 5s 后检查 webview 是否真的在加载
-    setTimeout(() => {
+    // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
+    // 解决 Electron webview 事件不触发的问题
+    const pollInterval = setInterval(() => {
       const wv = registryRef.current.get(accId);
-      if (wv) {
-        const url = wv.getURL?.() || '(getURL failed)';
-        const stillLoading = loadingMapRef.current.get(accId);
-        console.log(`[BrowserPanel] 5s检查: ${accId}, url=${url}, inDOM=${container.contains(wv)}, visibility=${wv.style.visibility}, stillLoading=${stillLoading}`);
-        // 如果 5s 后还没开始加载，强制 reload
-        if (stillLoading && !url.startsWith('http')) {
-          console.warn(`[BrowserPanel] webview 5s 未开始加载，尝试 reload: ${accId}`);
-          wv.reload();
-        }
+      if (!wv) { clearInterval(pollInterval); return; }
+      
+      const url = wv.getURL?.() || '';
+      const isLoaded = loadingMapRef.current.get(accId);
+      
+      if (isLoaded && url.startsWith('http') && url.includes('doubao.com')) {
+        console.log(`[BrowserPanel] 轮询检测到 webview 已加载: ${accId}, url=${url}`);
+        markLoaded('poll');
+        clearInterval(pollInterval);
       }
-    }, 5000);
+    }, 2000);
 
-    // 20s 超时兜底
+    // 60s 后停止轮询
     setTimeout(() => {
+      clearInterval(pollInterval);
       if (loadingMapRef.current.get(accId)) {
-        console.warn(`[BrowserPanel] 20s 超时: ${accId}`);
+        console.warn(`[BrowserPanel] 60s 超时，强制清除加载状态: ${accId}`);
         markLoaded('timeout');
       }
-    }, 20000);
+    }, 60000);
   };
 
   // ---- 切换可见性 ----
