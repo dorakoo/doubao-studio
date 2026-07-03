@@ -91,6 +91,7 @@ const TaskConsole: React.FC = () => {
   } = useTaskStore();
 
   const accounts = useAccountStore((s) => s.accounts);
+  const selectAccount = useAccountStore((s) => s.selectAccount);
 
   const [inputText, setInputText] = useState('');
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -207,7 +208,15 @@ const TaskConsole: React.FC = () => {
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
-        <div className={`task-item ${isActive ? 'task-item-active' : ''}`}>
+        <div
+          className={`task-item ${isActive ? 'task-item-active' : ''}`}
+          style={{ cursor: task.assignedAccountId ? 'pointer' : 'default' }}
+          onClick={() => {
+            if (task.assignedAccountId) {
+              selectAccount(task.assignedAccountId);
+            }
+          }}
+        >
           <div className="task-item-top">
             {renderStatusTag(task.status)}
             {renderModeTag(taskMode)}
