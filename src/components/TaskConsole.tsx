@@ -659,19 +659,19 @@ const TaskConsole: React.FC = () => {
 
         {/* 提示词输入 */}
         <p style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>
-          每行一个提示词，支持批量粘贴
+          使用 <code style={{ color: '#f0c040', background: '#2a2a3e', padding: '2px 6px', borderRadius: 4 }}>%%%%%%%%%%</code> 分割多个任务
         </p>
         <TextArea
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
           placeholder={
             selectedMode === 'image'
-              ? '一只橘色短毛猫，趴在阳光窗台上，写实摄影风格，8K高清\n赛博朋克城市夜景，霓虹灯，雨夜，16:9'
+              ? '一只橘色短毛猫，趴在阳光窗台上，写实摄影风格，8K高清\n%%%%%%%%%%\n赛博朋克城市夜景，霓虹灯，雨夜，16:9'
               : selectedMode === 'video'
-              ? '海边日落，海浪慢动作，暖色调，电影氛围感，10秒\n女生漫步樱花树下，微笑，近景，自然光，5秒'
+              ? '海边日落，海浪慢动作，暖色调，电影氛围感，10秒\n%%%%%%%%%%\n女生漫步樱花树下，微笑，近景，自然光，5秒'
               : selectedMode === 'music'
-              ? '轻快的钢琴曲，治愈系，30秒\n电子音乐，节奏感强，适合短视频BGM'
-              : '写一篇关于AI的科普文章\n总结2024年科技趋势\n翻译这段文本为英文'
+              ? '轻快的钢琴曲，治愈系，30秒\n%%%%%%%%%%\n电子音乐，节奏感强，适合短视频BGM'
+              : '写一篇关于AI的科普文章\n%%%%%%%%%%\n总结2024年科技趋势\n%%%%%%%%%%\n翻译这段文本为英文'
           }
           rows={8}
           autoFocus

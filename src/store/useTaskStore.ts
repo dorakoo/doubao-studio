@@ -87,9 +87,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   addTasks: async (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => {
     set({ error: null });
     const prompts = text
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
+      .split('%%%%%%%%%%')
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
 
     if (prompts.length === 0) {
       set({ error: '请输入至少一条提示词' });
