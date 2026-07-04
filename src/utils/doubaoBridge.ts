@@ -660,66 +660,130 @@ export async function submitVideoGeneration(webview: WebviewHandle): Promise<boo
     (function() {
       try {
         var viewportH = window.innerHeight;
-        var targetBtn = null;
+        var viewportW = window.innerWidth;
         var candidates = [];
 
-        // 找所有可点击元素中包含"生成视频"文字的
-        var clickables = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"], span[class*="btn"]');
-        for (var i = 0; i < clickables.length; i++) {
-          var el = clickables[i];
-          var text = (el.textContent || '').trim();
-          if (text.indexOf('生成视频') < 0) continue;
-          if (el.disabled) continue;
+        // 策略1：遍历所有元素，找文本精确为"生成视频"的可点击元素
+        var allElements = document.querySelectorAll('div, span, button, a, p, li');
+        for (var i = 0; i < allElements.length; i++) {
+          var el = allElements[i];
+          // 只检查直接文本（避免父元素被子元素文本污染）
+          var directText = '';
+          for (var n = 0; n < el.childNodes.length; n++) {
+            if (el.childNodes[n].nodeType === 3) {
+              directText += el.childNodes[n].textContent;
+            }
+          }
+          directText = directText.trim();
+          if (directText !== '生成视频') continue;
+          
           var rect = el.getBoundingClientRect();
           if (rect.width < 20 || rect.height < 20) continue;
           if (rect.top < 0 || rect.top > viewportH) continue;
+          if (rect.left < 0 || rect.left > viewportW) continue;
           
-          // 排除顶部 Tab 区域（top < 150 的大概率是Tab）
-          if (rect.top < 150) continue;
+          // 排除顶部 Tab 区域（top < 200）
+          if (rect.top < 200) continue;
           
-          // 排除非常小的文字标签（不是按钮）
-          if (rect.width < 50 && rect.height < 30) continue;
+          // 排除底部输入框区域的"视频生成"Tab（底部工具栏的）
+          if (rect.top > viewportH * 0.85) continue;
+          
+          // 判断是否可点击
+          var style = window.getComputedStyle(el);
+          var isClickable = (el.tagName === 'BUTTON' || el.tagName === 'A' || 
+                            style.cursor === 'pointer' || el.onclick ||
+                            el.getAttribute('role') === 'button');
+          
+          // 如果本身不可点击，往上找3层看有没有可点击的父元素
+          var clickTarget = el;
+          if (!isClickable) {
+            var parent = el.parentElement;
+            for (var d = 0; d < 5 && parent; d++) {
+              var pStyle = window.getComputedStyle(parent);
+              if (parent.tagName === 'BUTTON' || parent.tagName === 'A' ||
+                  pStyle.cursor === 'pointer' || parent.onclick ||
+                  parent.getAttribute('role') === 'button') {
+                clickTarget = parent;
+                isClickable = true;
+                // 更新 rect 为父元素的
+                var pRect = parent.getBoundingClientRect();
+                rect = pRect;
+                break;
+              }
+              parent = parent.parentElement;
+            }
+          }
+          
+          if (!isClickable) continue;
           
           var score = 0;
-          // 位置在页面中部（素材图区域）的优先
-          if (rect.top > viewportH * 0.2 && rect.top < viewportH * 0.8) score += 100;
-          // 越靠下越可能是生成按钮（在素材图下方）
-          if (rect.top > viewportH * 0.4) score += 50;
-          // 按钮有一定宽度
-          if (rect.width > 80) score += 30;
-          // 是 button 元素加分
-          if (el.tagName === 'BUTTON') score += 20;
+          // 位置在页面中上部（素材图区域，通常在 30%-70% 高度之间）
+          if (rect.top > viewportH * 0.25 && rect.top < viewportH * 0.7) score += 100;
+          // 有一定大小的按钮加分
+          if (rect.width > 60 && rect.height > 30) score += 50;
+          if (rect.width > 100) score += 30;
+          // 背景色不是透明的（有按钮样式）加分
+          if (style.backgroundColor && style.backgroundColor !== 'transparent' && style.backgroundColor !== 'rgba(0, 0, 0, 0)') {
+            score += 40;
+          }
+          // 有圆角（按钮样式）加分
+          if (style.borderRadius && parseInt(style.borderRadius) > 0) {
+            score += 20;
+          }
           
-          candidates.push({ el: el, score: score, text: text, top: rect.top, w: rect.width, h: rect.height });
+          candidates.push({ 
+            el: clickTarget, 
+            score: score, 
+            text: directText,
+            top: Math.round(rect.top), 
+            w: Math.round(rect.width), 
+            h: Math.round(rect.height),
+            tag: clickTarget.tagName
+          });
+        }
+
+        // 策略2：如果没找到，用更模糊的匹配（包含"生成视频"的元素）
+        if (candidates.length === 0) {
+          var allDivs = document.querySelectorAll('div');
+          for (var k = 0; k < allDivs.length; k++) {
+            var div = allDivs[k];
+            var text = (div.textContent || '').trim();
+            if (text.indexOf('生成视频') < 0) continue;
+            if (text.length > 20) continue; // 太长的不是按钮
+            
+            var rect3 = div.getBoundingClientRect();
+            if (rect3.width < 40 || rect3.height < 25) continue;
+            if (rect3.top < 200 || rect3.top > viewportH * 0.85) continue;
+            
+            var style3 = window.getComputedStyle(div);
+            if (style3.cursor !== 'pointer' && div.tagName !== 'BUTTON') continue;
+            
+            candidates.push({
+              el: div,
+              score: 50,
+              text: text,
+              top: Math.round(rect3.top),
+              w: Math.round(rect3.width),
+              h: Math.round(rect3.height),
+              tag: 'DIV'
+            });
+          }
         }
 
         if (candidates.length === 0) {
-          // 兜底：再找一遍，放宽条件（只要有"生成"且在素材图区域）
-          var allClickables = document.querySelectorAll('button, [role="button"], div[onclick], span[onclick]');
-          for (var j = 0; j < allClickables.length; j++) {
-            var el2 = allClickables[j];
-            var text2 = (el2.textContent || '').trim();
-            if (text2 !== '生成视频' && text2 !== '生成') continue;
-            if (el2.disabled) continue;
-            var rect2 = el2.getBoundingClientRect();
-            if (rect2.width < 30 || rect2.height < 20) continue;
-            if (rect2.top < viewportH * 0.3 || rect2.top > viewportH * 0.9) continue;
-            targetBtn = el2;
-            break;
-          }
-        } else {
-          // 按分数排序，取最高的
-          candidates.sort(function(a, b) { return b.score - a.score; });
-          targetBtn = candidates[0].el;
-          console.log('[doubaoBridge] 视频生成按钮候选: ' + candidates.slice(0, 3).map(function(c) { return c.text + '(top=' + Math.round(c.top) + ',w=' + Math.round(c.w) + ',score=' + c.score + ')'; }).join('; '));
+          return { ok: false, error: '未找到生成视频按钮（0候选）' };
         }
 
-        if (targetBtn) {
-          targetBtn.click();
-          return { ok: true, method: 'click-video-generate', text: (targetBtn.textContent || '').trim() };
-        }
+        // 按分数排序
+        candidates.sort(function(a, b) { return b.score - a.score; });
         
-        return { ok: false, error: '未找到视频生成按钮，候选数=' + candidates.length };
+        var best = candidates[0];
+        console.log('[doubaoBridge] 视频生成按钮候选前3: ' + candidates.slice(0, 3).map(function(c) { 
+          return c.text + '(top=' + c.top + ',size=' + c.w + 'x' + c.h + ',score=' + c.score + ',tag=' + c.tag + ')'; 
+        }).join('; '));
+        
+        best.el.click();
+        return { ok: true, method: 'click-video-generate', text: best.text, top: best.top };
       } catch (e) {
         return { ok: false, error: e.message };
       }
