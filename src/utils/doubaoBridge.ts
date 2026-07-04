@@ -1535,12 +1535,73 @@ export async function uploadReferenceImages(
   );
 
   if (result?.ok) {
-    console.log(`[doubaoBridge] 文件注入成功: ${result.count} 张`);
+    console.log(`[doubaoBridge] 文件注入成功: ${result.count} 张，等待上传完成...`);
   } else {
     console.warn('[doubaoBridge] 文件注入失败:', result?.error);
+    return false;
   }
 
-  return result?.ok || false;
+  // 动态等待上传完成：轮询已显示的图片缩略图数量
+  const expectedCount = fileDataList.length;
+  const waitCode = `
+    (function() {
+      return new Promise(function(resolve) {
+        var checked = 0;
+        var maxCheck = 60; // 最多等30秒
+        function check() {
+          checked++;
+          // 统计输入区域内已显示的图片缩略图（已上传完成的）
+          var imgs = document.querySelectorAll('img');
+          var uploadedCount = 0;
+          for (var i = 0; i < imgs.length; i++) {
+            var img = imgs[i];
+            var rect = img.getBoundingClientRect();
+            // 只统计输入框附近的缩略图（排除页面其他图片）
+            if (rect.top > window.innerHeight * 0.4 && rect.top < window.innerHeight * 0.95 && rect.width > 30 && rect.height > 30) {
+              var src = img.src || '';
+              // 已上传的图片通常是 blob: 或 data: 或服务器URL，而非loading占位
+              if (src.indexOf('blob:') === 0 || src.indexOf('data:image') === 0 || (src.indexOf('http') === 0 && src.indexOf('loading') < 0)) {
+                uploadedCount++;
+              }
+            }
+          }
+          // 另一种方式：找上传后的图片容器/缩略图
+          var containers = document.querySelectorAll('[class*="image-item"], [class*="img-item"], [class*="thumb"], [class*="preview"], [class*="upload"] img');
+          var containerCount = 0;
+          for (var j = 0; j < containers.length; j++) {
+            var c = containers[j];
+            if (c.tagName === 'IMG') {
+              var cr = c.getBoundingClientRect();
+              if (cr.top > window.innerHeight * 0.4 && cr.width > 20 && cr.height > 20) containerCount++;
+            } else {
+              var ci = c.querySelector ? c.querySelector('img') : null;
+              if (ci) {
+                var cr2 = ci.getBoundingClientRect();
+                if (cr2.top > window.innerHeight * 0.4 && cr2.width > 20 && cr2.height > 20) containerCount++;
+              }
+            }
+          }
+          var finalCount = Math.max(uploadedCount, containerCount);
+          if (finalCount >= ${expectedCount} || checked >= maxCheck) {
+            resolve({ uploaded: finalCount, expected: ${expectedCount}, checked: checked });
+          } else {
+            setTimeout(check, 500);
+          }
+        }
+        setTimeout(check, 500);
+      });
+    })()
+  `;
+
+  try {
+    const waitResult = await webview.executeJavaScript(waitCode) as { uploaded: number; expected: number; checked: number };
+    console.log(`[doubaoBridge] 图片上传完成检测: 已上传=${waitResult.uploaded}/${waitResult.expected}, 检测次数=${waitResult.checked}`);
+    return true;
+  } catch (e) {
+    console.warn('[doubaoBridge] 等待图片上传超时或失败:', e);
+    // 超时也返回true，不阻塞主流程
+    return true;
+  }
 }
 
 /**
