@@ -2506,46 +2506,38 @@ export async function configureVideoOptions(
       (function() {
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
-          var viewportH = window.innerHeight;
-          var viewportW = window.innerWidth;
 
-          function isVisible(el) {
-            // 快速路径：offsetParent 存在 => 可见（99%的普通元素走这里，0重排开销
-            if (el.offsetParent !== null) return true;
-            // 慢速路径：offsetParent 为 null 时才做精确检测（可能是 portal / fixed 定位）
-            var rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) return false;
-            var style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') return false;
-            return true;
+          function matchText(text, opts) {
+            var t = (text || '').trim();
+            if (!t) return 0;
+            var tLow = t.toLowerCase();
+            var bestScore = 0;
+            for (var i = 0; i < opts.length; i++) {
+              var opt = opts[i];
+              var optLow = opt.toLowerCase();
+              if (t === opt || tLow === optLow) {
+                return 100; // 精确匹配
+              }
+              if (t.indexOf(opt) >= 0 || tLow.indexOf(optLow) >= 0) {
+                var score = 50 + Math.max(0, 30 - t.length); // 包含匹配，文本越短分越高
+                if (score > bestScore) bestScore = score;
+              }
+            }
+            return bestScore;
           }
 
-          var allOptions = document.querySelectorAll('[role="option"], [role="menuitem"], button, div[class*="option"], div[class*="item"], div[class*="menu"], li');
-
+          // ---- 第一阶段：标准选项选择器 ----
+          var allOptions = document.querySelectorAll('[role="option"], [role="menuitem"], button, div[class*="option"], div[class*="item"], li');
           var candidates = [];
           for (var i = 0; i < allOptions.length; i++) {
             var el = allOptions[i];
-            if (!isVisible(el)) continue;
-            var rect = el.getBoundingClientRect();
+            if (el.offsetParent === null) continue; // 快速过滤：offsetParent 为准（v9 验证有效）
             var text = (el.innerText || '').trim();
             if (!text || text.length > 60) continue;
-
-            for (var t = 0; t < optionTexts.length; t++) {
-              var optLower = optionTexts[t].toLowerCase();
-              var textLower = text.toLowerCase();
-              if (text === optionTexts[t] || text.indexOf(optionTexts[t]) >= 0 ||
-                  textLower === optLower || textLower.indexOf(optLower) >= 0) {
-                // 打分：越靠近触发按钮位置越好，文本越短越可能是选项
-                var score = 0;
-                // 文本精确匹配加分
-                if (text === optionTexts[t] || textLower === optLower) score += 100;
-                // 文本短加分（选项通常较短）
-                if (text.length <= 20) score += 30;
-                // 区域合理（不在太偏的位置）
-                if (rect.top > 50 && rect.top < viewportH - 50) score += 20;
-                candidates.push({ el: el, text: text, score: score, rect: rect, tag: el.tagName });
-                break;
-              }
+            var score = matchText(text, optionTexts);
+            if (score > 0) {
+              var rect = el.getBoundingClientRect();
+              candidates.push({ el: el, text: text, score: score, rect: rect, tag: el.tagName });
             }
           }
 
@@ -2556,37 +2548,32 @@ export async function configureVideoOptions(
             return { ok: true, text: best.text.substring(0, 40), tag: best.tag, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
           }
 
-          // 更宽松的匹配：遍历所有可见元素（限制在下半屏，下拉通常在工具栏附近）
-          var allEls = document.querySelectorAll('div, span, li, button, a');
+          // ---- 第二阶段：全元素兜底（v9 同款逻辑，仅增加大小写不敏感）----
+          var allEls = document.querySelectorAll('*');
           var found = null;
           var foundScore = -1;
           for (var j = 0; j < allEls.length; j++) {
             var el2 = allEls[j];
-            if (!isVisible(el2)) continue;
+            if (el2.offsetParent === null) continue;
+            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE') continue;
             var rect2 = el2.getBoundingClientRect();
             if (rect2.width < 20 || rect2.height < 20) continue;
-            // 只看下半屏（下拉通常在底部工具栏附近）
-            if (rect2.top < viewportH * 0.3) continue;
             var text2 = (el2.innerText || '').trim();
-            if (!text2 || text2.length > 50) continue;
-            for (var t2 = 0; t2 < optionTexts.length; t2++) {
-              var low2 = text2.toLowerCase();
-              var optLow2 = optionTexts[t2].toLowerCase();
-              if (text2.indexOf(optionTexts[t2]) >= 0 || low2.indexOf(optLow2) >= 0) {
-                if (el2.children && el2.children.length > 5) continue;
-                var sc = 0;
-                if (text2.length <= 25) sc += 50;
-                if (sc > foundScore) {
-                  foundScore = sc;
-                  found = { el: el2, text: text2, rect: rect2, tag: el2.tagName };
-                }
-                break;
+            if (!text2 || text2.length > 40) continue;
+            var sc = matchText(text2, optionTexts);
+            if (sc > 0) {
+              if (el2.children && el2.children.length > 3) continue;
+              // 文本越短越可能是选项（过滤掉大段文本）
+              sc += Math.max(0, 25 - text2.length);
+              if (sc > foundScore) {
+                foundScore = sc;
+                found = { el: el2, text: text2, rect: rect2, tag: el2.tagName };
               }
             }
           }
           if (found) {
             found.el.click();
-            return { ok: true, text: found.text.substring(0, 40), tag: found.tag, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
+            return { ok: true, text: found.text.substring(0, 30), tag: found.tag, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
           }
 
           return { ok: false };
