@@ -1989,12 +1989,27 @@ export async function getResultUrl(webview: WebviewHandle): Promise<string> {
               result.push(src);
             }
           }
-          // 提取视频 poster
+          // 提取视频 poster + src
           var videos = container.querySelectorAll('video');
           for (var j = 0; j < videos.length; j++) {
             var poster = videos[j].poster || '';
             if (poster && result.indexOf(poster) === -1) {
               result.push(poster);
+            }
+            var vsrc = videos[j].src || '';
+            if (vsrc && vsrc.indexOf('http') === 0 && result.indexOf(vsrc) === -1) {
+              // 视频地址去水印
+              vsrc = vsrc.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+              result.push(vsrc);
+            }
+            // source 子元素
+            var srcs = videos[j].querySelectorAll('source');
+            for (var k2 = 0; k2 < srcs.length; k2++) {
+              var ssrc = srcs[k2].src || '';
+              if (ssrc && ssrc.indexOf('http') === 0 && result.indexOf(ssrc) === -1) {
+                ssrc = ssrc.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+                result.push(ssrc);
+              }
             }
           }
           return result;
@@ -2088,12 +2103,27 @@ export async function getResultUrl(webview: WebviewHandle): Promise<string> {
               urls.push(src3);
             }
           }
-          // 视频兜底
+          // 视频兜底：提取 poster + src
           var allVideos = document.querySelectorAll('video');
           for (var v = 0; v < allVideos.length; v++) {
             var p3 = allVideos[v].poster || '';
             if (p3 && urls.indexOf(p3) === -1) {
               urls.push(p3);
+            }
+            var vSrc = allVideos[v].src || '';
+            if (vSrc && vSrc.indexOf('http') === 0 && urls.indexOf(vSrc) === -1) {
+              // 视频地址去水印
+              vSrc = vSrc.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+              urls.push(vSrc);
+            }
+            // 检查 source 子元素
+            var sources = allVideos[v].querySelectorAll('source');
+            for (var s = 0; s < sources.length; s++) {
+              var sSrc = sources[s].src || '';
+              if (sSrc && sSrc.indexOf('http') === 0 && urls.indexOf(sSrc) === -1) {
+                sSrc = sSrc.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+                urls.push(sSrc);
+              }
             }
           }
         }
@@ -2467,7 +2497,7 @@ export async function configureVideoOptions(
       // 兜底：直接尝试 clickByText 选选项（可能下拉已经展开了）
     } else {
       console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}`);
-      await sleep(400); // 等待下拉动画展开
+      await sleep(800); // 等待下拉动画展开（portal 渲染需要时间）
     }
 
     // ---- 第二步：在下拉中选择目标选项 ----
@@ -2476,50 +2506,87 @@ export async function configureVideoOptions(
       (function() {
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
-          var allOptions = document.querySelectorAll('[role="option"], button, [role="menuitem"], div[class*="option"], div[class*="item"], li');
+          var viewportH = window.innerHeight;
+          var viewportW = window.innerWidth;
 
-          for (var i = 0; i < allOptions.length; i++) {
-            var el = allOptions[i];
-            if (el.offsetParent === null) continue;
+          function isVisible(el) {
             var rect = el.getBoundingClientRect();
-            if (rect.width <= 0 || rect.height <= 0) continue;
-            var text = (el.innerText || '').trim();
-            if (!text) continue;
-
-            for (var t = 0; t < optionTexts.length; t++) {
-              if (text === optionTexts[t] || text.indexOf(optionTexts[t]) >= 0) {
-                // 排除太长的文本（不是选项）
-                if (text.length > 50) continue;
-                el.click();
-                return { ok: true, text: text.substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
-              }
-            }
+            if (rect.width <= 0 || rect.height <= 0) return false;
+            // 元素完全在视口外（上下左右都超出）
+            if (rect.bottom < 0 || rect.top > viewportH) return false;
+            if (rect.right < 0 || rect.left > viewportW) return false;
+            // 检查 visibility
+            var style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none') return false;
+            return true;
           }
 
-          // 更宽松的匹配：遍历所有可见元素
-          var allVisible = document.querySelectorAll('*');
-          var found = null;
-          for (var j = 0; j < allVisible.length; j++) {
-            var el2 = allVisible[j];
-            if (el2.offsetParent === null) continue;
-            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE') continue;
-            var rect2 = el2.getBoundingClientRect();
-            if (rect2.width < 20 || rect2.height < 20) continue;
-            var text2 = (el2.innerText || '').trim();
-            if (!text2 || text2.length > 40) continue;
-            for (var t2 = 0; t2 < optionTexts.length; t2++) {
-              if (text2 === optionTexts[t2] || text2.indexOf(optionTexts[t2]) >= 0) {
-                // 只点击叶子节点（子元素只有文本的）
-                if (el2.children && el2.children.length > 3) continue;
-                found = { el: el2, text: text2, rect: rect2 };
+          var allOptions = document.querySelectorAll('[role="option"], [role="menuitem"], button, div[class*="option"], div[class*="item"], div[class*="menu"], li');
+
+          var candidates = [];
+          for (var i = 0; i < allOptions.length; i++) {
+            var el = allOptions[i];
+            if (!isVisible(el)) continue;
+            var rect = el.getBoundingClientRect();
+            var text = (el.innerText || '').trim();
+            if (!text || text.length > 60) continue;
+
+            for (var t = 0; t < optionTexts.length; t++) {
+              var optLower = optionTexts[t].toLowerCase();
+              var textLower = text.toLowerCase();
+              if (text === optionTexts[t] || text.indexOf(optionTexts[t]) >= 0 ||
+                  textLower === optLower || textLower.indexOf(optLower) >= 0) {
+                // 打分：越靠近触发按钮位置越好，文本越短越可能是选项
+                var score = 0;
+                // 文本精确匹配加分
+                if (text === optionTexts[t] || textLower === optLower) score += 100;
+                // 文本短加分（选项通常较短）
+                if (text.length <= 20) score += 30;
+                // 区域合理（不在太偏的位置）
+                if (rect.top > 50 && rect.top < viewportH - 50) score += 20;
+                candidates.push({ el: el, text: text, score: score, rect: rect, tag: el.tagName });
                 break;
               }
             }
-            if (found) break;
+          }
+
+          if (candidates.length > 0) {
+            candidates.sort(function(a, b) { return b.score - a.score; });
+            var best = candidates[0];
+            best.el.click();
+            return { ok: true, text: best.text.substring(0, 40), tag: best.tag, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
+          }
+
+          // 更宽松的匹配：遍历所有可见元素
+          var allEls = document.querySelectorAll('*');
+          var found = null;
+          var foundScore = -1;
+          for (var j = 0; j < allEls.length; j++) {
+            var el2 = allEls[j];
+            if (!isVisible(el2)) continue;
+            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE' || el2.tagName === 'HTML' || el2.tagName === 'BODY') continue;
+            var rect2 = el2.getBoundingClientRect();
+            if (rect2.width < 20 || rect2.height < 20) continue;
+            var text2 = (el2.innerText || '').trim();
+            if (!text2 || text2.length > 50) continue;
+            for (var t2 = 0; t2 < optionTexts.length; t2++) {
+              var low2 = text2.toLowerCase();
+              var optLow2 = optionTexts[t2].toLowerCase();
+              if (text2.indexOf(optionTexts[t2]) >= 0 || low2.indexOf(optLow2) >= 0) {
+                if (el2.children && el2.children.length > 5) continue;
+                var sc = 0;
+                if (text2.length <= 25) sc += 50;
+                if (sc > foundScore) {
+                  foundScore = sc;
+                  found = { el: el2, text: text2, rect: rect2, tag: el2.tagName };
+                }
+                break;
+              }
+            }
           }
           if (found) {
             found.el.click();
-            return { ok: true, text: found.text.substring(0, 30), tag: found.el.tagName, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
+            return { ok: true, text: found.text.substring(0, 40), tag: found.tag, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
           }
 
           return { ok: false };
@@ -2833,15 +2900,15 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
 
       function findVid(obj, depth) {
         if (depth === undefined) depth = 0;
-        if (depth > 10 || !obj) return null;
+        if (depth > 12 || !obj) return null;
         if (Array.isArray(obj)) {
           for (var i = 0; i < obj.length; i++) {
             var f = findVid(obj[i], depth + 1);
             if (f) return f;
           }
         } else if (typeof obj === 'object') {
-          var vid = obj.vid || obj.video_id;
-          if (vid && typeof vid === 'string' && vid.indexOf('v0') === 0) return vid;
+          var vid = obj.vid || obj.video_id || obj.videoId || obj.key;
+          if (vid && typeof vid === 'string' && vid.length >= 10) return vid;
           for (var key in obj) {
             if (obj.hasOwnProperty(key)) {
               var f = findVid(obj[key], depth + 1);
@@ -2947,6 +3014,8 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
       window.fetch = function patchedFetch(input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var isCompletion = url.indexOf('/chat/completion') >= 0;
+        var isVideoApi = url.indexOf('get_play_info') >= 0 || url.indexOf('play_info') >= 0 ||
+                         url.indexOf('media/') >= 0 || isCompletion;
 
         if (isCompletion && init && init.body) {
           var patched = patchBody(init.body);
@@ -2956,7 +3025,7 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
         }
 
         return originalFetch.apply(this, [input, init]).then(function(resp) {
-          if (isCompletion && resp.body) {
+          if (isVideoApi && resp.body) {
             var ct = resp.headers.get('content-type') || '';
             if (ct.indexOf('text/event-stream') >= 0) {
               var teed = resp.body.tee();
@@ -2966,6 +3035,12 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
                 statusText: resp.statusText,
                 headers: resp.headers,
               });
+            } else if (ct.indexOf('application/json') >= 0) {
+              // 普通 JSON 响应（如 get_play_info），克隆一份解析
+              return resp.clone().json().then(function(data) {
+                processVideoData(data);
+                return resp;
+              }).catch(function() { return resp; });
             }
           }
           return resp;
@@ -2992,7 +3067,11 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
 
         this.addEventListener('load', function() {
           var xhrUrl = xhrUrlMap.get(this) || '';
-          if (xhrUrl.indexOf('chain/single') >= 0 || xhrUrl.indexOf('/chat/completion') >= 0) {
+          if (xhrUrl.indexOf('chain/single') >= 0 ||
+              xhrUrl.indexOf('/chat/completion') >= 0 ||
+              xhrUrl.indexOf('get_play_info') >= 0 ||
+              xhrUrl.indexOf('play_info') >= 0 ||
+              xhrUrl.indexOf('media/') >= 0) {
             try {
               var resp = JSON.parse(this.responseText);
               processVideoData(resp);

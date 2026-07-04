@@ -308,7 +308,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...');
       const injected = await Promise.race([
         injectPrompt(webview, prompt),
-        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 10000)),
+        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 60000)),
       ]);
       if (!injected) throw new Error('注入失败');
       await sleep(800);
@@ -396,6 +396,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           } catch {
             imageUrls = rawResult ? [rawResult] : [];
           }
+          // DOM 兜底也要去水印
+          imageUrls = imageUrls.map(u =>
+            typeof u === 'string' && u.includes('lr=')
+              ? u.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark')
+              : u
+          );
         }
       } else {
         // 图片模式：用 DOM 提取，最多重试 5 次
