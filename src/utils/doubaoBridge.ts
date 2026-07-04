@@ -2510,14 +2510,13 @@ export async function configureVideoOptions(
           var viewportW = window.innerWidth;
 
           function isVisible(el) {
+            // 快速路径：offsetParent 存在 => 可见（99%的普通元素走这里，0重排开销
+            if (el.offsetParent !== null) return true;
+            // 慢速路径：offsetParent 为 null 时才做精确检测（可能是 portal / fixed 定位）
             var rect = el.getBoundingClientRect();
             if (rect.width <= 0 || rect.height <= 0) return false;
-            // 元素完全在视口外（上下左右都超出）
-            if (rect.bottom < 0 || rect.top > viewportH) return false;
-            if (rect.right < 0 || rect.left > viewportW) return false;
-            // 检查 visibility
             var style = window.getComputedStyle(el);
-            if (style.visibility === 'hidden' || style.display === 'none') return false;
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
             return true;
           }
 
@@ -2557,16 +2556,17 @@ export async function configureVideoOptions(
             return { ok: true, text: best.text.substring(0, 40), tag: best.tag, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
           }
 
-          // 更宽松的匹配：遍历所有可见元素
-          var allEls = document.querySelectorAll('*');
+          // 更宽松的匹配：遍历所有可见元素（限制在下半屏，下拉通常在工具栏附近）
+          var allEls = document.querySelectorAll('div, span, li, button, a');
           var found = null;
           var foundScore = -1;
           for (var j = 0; j < allEls.length; j++) {
             var el2 = allEls[j];
             if (!isVisible(el2)) continue;
-            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE' || el2.tagName === 'HTML' || el2.tagName === 'BODY') continue;
             var rect2 = el2.getBoundingClientRect();
             if (rect2.width < 20 || rect2.height < 20) continue;
+            // 只看下半屏（下拉通常在底部工具栏附近）
+            if (rect2.top < viewportH * 0.3) continue;
             var text2 = (el2.innerText || '').trim();
             if (!text2 || text2.length > 50) continue;
             for (var t2 = 0; t2 < optionTexts.length; t2++) {
