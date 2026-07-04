@@ -102,8 +102,10 @@ async function tryInjectOnce(
         var foundByButton = null;
 
         // ---- 策略A：通过发送/生成按钮反向查找输入框（最准） ----
-        var buttonKeywords = ['发送', '生成', 'send', 'Send', 'SEND', '发送消息', '生成图片', '生成视频'];
+        var buttonKeywords = ['发送', 'send', 'Send', 'SEND', '发送消息', '提交'];
+        var excludeTexts = ['视频生成', '图像生成', '图片生成', '模型', 'Seedance', '时长', '比例', '尺寸', '风格'];
         var allButtons = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"], span[class*="btn"]');
+        var buttonCandidates = [];
         
         for (var bi = 0; bi < allButtons.length; bi++) {
           var btn = allButtons[bi];
@@ -118,73 +120,114 @@ async function tryInjectOnce(
           var btnTitle = btn.getAttribute ? (btn.getAttribute('title') || '') : '';
           var combinedText = btnText + ' ' + btnAriaLabel + ' ' + btnTitle;
           
-          var isSendButton = false;
+          // 排除明显是 Tab / 模式切换 / 选项的按钮
+          var isExcluded = false;
+          for (var ei = 0; ei < excludeTexts.length; ei++) {
+            if (btnText.indexOf(excludeTexts[ei]) >= 0 && btnText.length < 15) {
+              isExcluded = true;
+              break;
+            }
+          }
+          if (isExcluded) continue;
+          
+          var btnScore = 0;
+          
+          // 关键词匹配加分
           for (var ki = 0; ki < buttonKeywords.length; ki++) {
-            if (combinedText.indexOf(buttonKeywords[ki]) >= 0 && btnText.length < 10) {
-              isSendButton = true;
+            if (combinedText.indexOf(buttonKeywords[ki]) >= 0) {
+              btnScore += 1000;
               break;
             }
           }
           
-          // 也检查按钮内的 SVG（有些按钮只有图标）
-          if (!isSendButton) {
-            var svgEl = btn.querySelector('svg');
-            if (svgEl && btnRect.top > viewportH * 0.5) {
-              // 下半区的图标按钮很可能是发送按钮
-              isSendButton = true;
+          // 含 SVG 图标（发送按钮通常是图标按钮）
+          var svgEl = btn.querySelector('svg');
+          if (svgEl) {
+            btnScore += 200;
+            var svgHtml = svgEl.outerHTML || '';
+            if (svgHtml.indexOf('arrow') >= 0 || svgHtml.indexOf('Arrow') >= 0 || 
+                svgHtml.indexOf('send') >= 0 || svgHtml.indexOf('Send') >= 0 ||
+                svgHtml.indexOf('paper-plane') >= 0 || svgHtml.indexOf('plane') >= 0) {
+              btnScore += 500; // 箭头/飞机图标 = 发送按钮
             }
           }
           
-          if (isSendButton) {
-            // 在按钮的父容器链中往上找，找最近的包含输入框的容器
-            var parent = btn.parentElement;
-            for (var depth = 0; depth < 8 && parent; depth++) {
-              var textareasInContainer = parent.querySelectorAll('textarea');
-              var editablesInContainer = parent.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
-              
-              var foundEl = null;
-              var foundType = null;
-              
-              // 优先找 textarea
-              for (var ti = 0; ti < textareasInContainer.length; ti++) {
-                var ta = textareasInContainer[ti];
-                if (ta.disabled) continue;
-                var taRect = ta.getBoundingClientRect();
-                if (taRect.width > 50 && taRect.height > 20) {
-                  foundEl = ta;
-                  foundType = 'textarea';
+          // 位置：越靠下越可能是发送按钮
+          if (btnRect.top > viewportH * 0.6) btnScore += 300;
+          if (btnRect.top > viewportH * 0.8) btnScore += 200;
+          
+          // 位置：越靠右越可能是发送按钮
+          if (btnRect.left > viewportW * 0.6) btnScore += 200;
+          if (btnRect.left > viewportW * 0.8) btnScore += 200;
+          
+          // 圆形按钮（宽高接近且不大）
+          var ratio = btnRect.width / btnRect.height;
+          if (ratio > 0.7 && ratio < 1.4 && btnRect.width < 80) {
+            btnScore += 200;
+          }
+          
+          if (btnScore > 0) {
+            buttonCandidates.push({ btn: btn, score: btnScore, text: btnText || btnAriaLabel });
+          }
+        }
+
+        // 按分数排序，取最高分的按钮
+        buttonCandidates.sort(function(a, b) { return b.score - a.score; });
+        
+        if (buttonCandidates.length > 0) {
+          var topBtn = buttonCandidates[0];
+          // 从按钮往上找包含输入框的父容器
+          var parent = topBtn.btn.parentElement;
+          for (var depth = 0; depth < 10 && parent; depth++) {
+            var textareasInContainer = parent.querySelectorAll('textarea');
+            var editablesInContainer = parent.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+            
+            var foundEl = null;
+            var foundType = null;
+            
+            // 优先找 textarea
+            for (var ti = 0; ti < textareasInContainer.length; ti++) {
+              var ta = textareasInContainer[ti];
+              if (ta.disabled) continue;
+              var taRect = ta.getBoundingClientRect();
+              if (taRect.width > 100 && taRect.height > 20) {
+                foundEl = ta;
+                foundType = 'textarea';
+                break;
+              }
+            }
+            
+            // 再找 contenteditable
+            if (!foundEl) {
+              for (var ei = 0; ei < editablesInContainer.length; ei++) {
+                var ed = editablesInContainer[ei];
+                var edRect = ed.getBoundingClientRect();
+                if (edRect.width > 100 && edRect.height > 20) {
+                  foundEl = ed;
+                  foundType = 'contenteditable';
                   break;
                 }
               }
-              
-              // 再找 contenteditable
-              if (!foundEl) {
-                for (var ei = 0; ei < editablesInContainer.length; ei++) {
-                  var ed = editablesInContainer[ei];
-                  var edRect = ed.getBoundingClientRect();
-                  if (edRect.width > 50 && edRect.height > 20) {
-                    foundEl = ed;
-                    foundType = 'contenteditable';
-                    break;
-                  }
-                }
-              }
-              
-              if (foundEl) {
-                foundByButton = { el: foundEl, type: foundType, btnText: btnText || btnAriaLabel };
-                break;
-              }
-              
-              parent = parent.parentElement;
             }
             
-            if (foundByButton) break;
+            if (foundEl) {
+              foundByButton = { el: foundEl, type: foundType, btnText: topBtn.text, btnScore: topBtn.score };
+              break;
+            }
+            
+            parent = parent.parentElement;
           }
         }
 
         if (foundByButton) {
-          console.log('[doubaoBridge] 通过发送按钮定位输入框 type=' + foundByButton.type + ' 按钮文本=' + foundByButton.btnText);
+          console.log('[doubaoBridge] 通过发送按钮定位输入框 type=' + foundByButton.type + ' 按钮文本=' + foundByButton.btnText + ' 按钮分数=' + foundByButton.btnScore + ' 候选按钮数=' + buttonCandidates.length);
           candidates.push({ el: foundByButton.el, type: foundByButton.type, score: Infinity, area: 999999 });
+        } else {
+          // 诊断：输出前5个高分按钮
+          var topBtnsDiag = buttonCandidates.slice(0, 5).map(function(b) {
+            return b.text + '(' + b.score + ')';
+          }).join('; ');
+          console.log('[doubaoBridge] 发送按钮定位失败，候选前5: ' + topBtnsDiag + ' 总数=' + buttonCandidates.length);
         }
 
         // ---- 策略B：面积打分（兜底） ----
