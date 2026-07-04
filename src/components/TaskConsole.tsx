@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useCallback } from 'react';
-import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message } from 'antd';
+import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message, Switch } from 'antd';
 import type { MenuProps, SegmentedProps } from 'antd';
 import {
   PlusOutlined,
@@ -107,6 +107,35 @@ const TaskConsole: React.FC = () => {
   const [audioAttachment, setAudioAttachment] = useState<string>('');
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [autoAssign, setAutoAssign] = useState(false);
+
+  // ---- 自动分配账号 ----
+  const autoAssignTasks = useCallback(async (newTasks: Task[]) => {
+    const availableAccounts = accounts.filter((a) => a.status !== 'error');
+    if (availableAccounts.length === 0) return;
+
+    // 计算每个账号当前的负载（排队中+执行中的任务数）
+    const accountLoad: Record<string, number> = {};
+    availableAccounts.forEach((a) => {
+      accountLoad[a.id] = tasks.filter(
+        (t) => t.assignedAccountId === a.id && (t.status === 'queued' || t.status === 'executing' || t.status === 'generating')
+      ).length;
+    });
+
+    for (const task of newTasks) {
+      // 找负载最小的账号
+      let minLoad = Infinity;
+      let targetAccount = availableAccounts[0];
+      for (const acc of availableAccounts) {
+        if (accountLoad[acc.id] < minLoad) {
+          minLoad = accountLoad[acc.id];
+          targetAccount = acc;
+        }
+      }
+      accountLoad[targetAccount.id]++;
+      await assignTask(task.id, targetAccount.id);
+    }
+  }, [accounts, tasks, assignTask]);
 
   // ---- 添加任务 ----
 
@@ -114,8 +143,12 @@ const TaskConsole: React.FC = () => {
     const vc = selectedMode === 'video' ? videoConfig : undefined;
     const att = (selectedMode === 'video' || selectedMode === 'image') && attachments.length > 0 ? attachments : undefined;
     const audioAtt = selectedMode === 'video' && audioAttachment ? audioAttachment : undefined;
-    const ok = await addTasks(inputText, selectedMode, vc, att, audioAtt);
-    if (ok) {
+    const newTasks = await addTasks(inputText, selectedMode, vc, att, audioAtt);
+    if (newTasks && newTasks.length > 0) {
+      // 自动指派
+      if (autoAssign) {
+        await autoAssignTasks(newTasks);
+      }
       setInputText('');
       setAddModalOpen(false);
       setSelectedMode('chat');
@@ -123,7 +156,7 @@ const TaskConsole: React.FC = () => {
       setAttachments([]);
       setAudioAttachment('');
     }
-  }, [inputText, selectedMode, videoConfig, attachments, audioAttachment, addTasks]);
+  }, [inputText, selectedMode, videoConfig, attachments, audioAttachment, addTasks, autoAssign, autoAssignTasks]);
 
   // ---- 选择参考图片 ----
   const handleSelectImages = useCallback(async () => {
@@ -272,7 +305,7 @@ const TaskConsole: React.FC = () => {
             </span>
           </div>
           <p className="task-item-prompt">{task.prompt}</p>
-          <div className="task-item-bottom">
+          <div className="task-item-bottom" onClick={(e) => e.stopPropagation()}>
             <Select
               size="small"
               placeholder="指派账号"
@@ -280,6 +313,8 @@ const TaskConsole: React.FC = () => {
               onChange={(value) => handleAssign(task.id, value)}
               style={{ width: 130 }}
               disabled={isActive}
+              onClick={(e) => e.stopPropagation()}
+              popupMatchSelectWidth={false}
               options={accounts
                 .filter((a) => a.status !== 'error')
                 .map((a) => ({
@@ -361,6 +396,16 @@ const TaskConsole: React.FC = () => {
           )}
         </div>
         <div className="task-console-actions">
+          <Tooltip title={autoAssign ? '自动指派：开启' : '自动指派：关闭'}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginRight: 8 }}>
+              <Switch
+                size="small"
+                checked={autoAssign}
+                onChange={setAutoAssign}
+              />
+              <span style={{ color: '#9898b8', fontSize: 12 }}>自动指派</span>
+            </div>
+          </Tooltip>
           <Button
             size="small"
             icon={<PlusOutlined />}

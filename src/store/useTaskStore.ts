@@ -38,7 +38,7 @@ interface TaskState {
 
   // ---- Actions ----
   loadTasks: () => Promise<void>;
-  addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<boolean>;
+  addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   deleteTask: (taskId: string) => Promise<boolean>;
@@ -93,21 +93,21 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     if (prompts.length === 0) {
       set({ error: '请输入至少一条提示词' });
-      return false;
+      return null;
     }
 
     try {
       const result = await window.electronAPI.tasks.add(prompts, mode, videoConfig, attachments, audioAttachment);
       if (result.success && result.tasks) {
         set({ tasks: [...get().tasks, ...result.tasks] });
-        return true;
+        return result.tasks;
       } else {
         set({ error: result.error || '添加失败' });
-        return false;
+        return null;
       }
     } catch (err: any) {
       set({ error: err.message });
-      return false;
+      return null;
     }
   },
 
