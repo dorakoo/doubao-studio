@@ -272,11 +272,12 @@ const TaskConsole: React.FC = () => {
     );
   };
 
-  // ---- 打开任务详情 ----
+  // ---- 点击任务跳转到对应账号 ----
 
-  const openTaskDetail = (task: Task) => {
-    setSelectedTask(task);
-    setDetailModalOpen(true);
+  const handleTaskClick = (task: Task) => {
+    if (task.assignedAccountId) {
+      selectAccount(task.assignedAccountId);
+    }
   };
 
   // ---- 渲染任务项 ----
@@ -292,7 +293,7 @@ const TaskConsole: React.FC = () => {
         <div
           className={`task-item ${isActive ? 'task-item-active' : ''}`}
           style={{ cursor: 'pointer' }}
-          onClick={() => openTaskDetail(task)}
+          onClick={() => handleTaskClick(task)}
         >
           <div className="task-item-top">
             {renderStatusTag(task.status)}
