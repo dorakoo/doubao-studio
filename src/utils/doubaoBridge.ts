@@ -22,6 +22,17 @@ export interface WebviewHandle {
   executeJavaScript(code: string): Promise<any>;
   loadURL(url: string): void;
   getURL(): string;
+  sendInputEvent?(event: ElectronKeyboardEvent): void;
+}
+
+/** Electron webview sendInputEvent 的键盘事件类型 */
+interface ElectronKeyboardEvent {
+  type: 'keyDown' | 'keyUp' | 'char';
+  keyCode?: string;
+  code?: string;
+  key?: string;
+  text?: string;
+  modifiers?: string[];
 }
 
 // ==================== 工具函数 ====================
@@ -128,21 +139,16 @@ export async function injectPrompt(
 
 /** 逐字输入兜底（单独函数，确保 React 状态 100% 同步） */
 async function injectCharByChar(webview: WebviewHandle, promptText: string): Promise<boolean> {
-  const safePrompt = JSON.stringify(promptText);
-  const code = `
+  // ========== 第一步：找到输入框并 focus + 清空 ==========
+  const prepareCode = `
     (function() {
       try {
-        // ========== 找到最佳输入元素（placeholder匹配优先 > 面积打分） ==========
-        var targetPrompt = ${safePrompt};
+        var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
+        var viewportH = window.innerHeight;
         var input = null;
         var inputType = null;
 
-        var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
-        var viewportH = window.innerHeight;
-        var viewportW = window.innerWidth;
-
-        // ---- 策略0：通过 placeholder 定位（最准） ----
-        // textarea
+        // ---- placeholder 匹配（最准） ----
         var allTextareas = document.querySelectorAll('textarea');
         for (var pi = 0; pi < allTextareas.length; pi++) {
           var pta = allTextareas[pi];
@@ -160,7 +166,6 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
           }
           if (input) break;
         }
-        // contenteditable 的 placeholder（aria-label / data-placeholder / 内部提示文本）
         if (!input) {
           var allEditables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
           for (var pei = 0; pei < allEditables.length; pei++) {
@@ -185,10 +190,9 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
           }
         }
 
-        // ---- 兜底：面积打分找最大的输入元素 ----
+        // ---- 面积打分兜底 ----
         if (!input) {
           var candidates = [];
-          // textarea
           for (var ti = 0; ti < allTextareas.length; ti++) {
             var ta = allTextareas[ti];
             if (ta.disabled) continue;
@@ -197,23 +201,19 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
             if (rect.top < 0 || rect.left < 0) continue;
             var area = rect.width * rect.height;
             var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0;
-            var score = area + bottomScore * 100000;
-            candidates.push({ el: ta, type: 'textarea', score: score });
+            candidates.push({ el: ta, type: 'textarea', score: area + bottomScore * 100000 });
           }
-          // contenteditable
           var editables2 = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
           for (var ei = 0; ei < editables2.length; ei++) {
             var ed = editables2[ei];
             if (ed.offsetParent === null) continue;
             var rect2 = ed.getBoundingClientRect();
             if (rect2.width < 30 || rect2.height < 20) continue;
-            if (rect2.top < 0 || rect2.left < 0) continue;
-            if (rect2.top > viewportH) continue;
+            if (rect2.top < 0 || rect2.left < 0 || rect2.top > viewportH) continue;
             var area2 = rect2.width * rect2.height;
             if (area2 < 2000 && rect2.height < 40) continue;
             var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
-            var score2 = area2 + bottomScore2 * 100000;
-            candidates.push({ el: ed, type: 'contenteditable', score: score2 });
+            candidates.push({ el: ed, type: 'contenteditable', score: area2 + bottomScore2 * 100000 });
           }
           if (candidates.length > 0) {
             candidates.sort(function(a, b) { return b.score - a.score; });
@@ -222,27 +222,250 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
           }
         }
 
-        if (!input) {
-          return { ok: false, error: '未找到输入框' };
+        if (!input) return { ok: false, error: '未找到输入框' };
+
+        // focus + 滚动到可视区域
+        input.focus();
+        if (typeof input.scrollIntoView === 'function') {
+          input.scrollIntoView({ block: 'center', inline: 'center' });
         }
 
-        console.log('[injectCharByChar] 输入框 type=' + inputType + ' tag=' + input.tagName);
+        // 清空内容
+        if (inputType === 'textarea') {
+          input.value = '';
+        } else {
+          input.innerHTML = '<br>';
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
 
+        return { ok: true, inputType: inputType, tag: input.tagName };
+      } catch(e) {
+        return { ok: false, error: e.message };
+      }
+    })()
+  `;
+
+  const prepareResult = await safeExecuteJS<{ ok: boolean; inputType?: string; tag?: string; error?: string }>(
+    webview, prepareCode, 8000, 'prepareInputForChar'
+  );
+
+  if (!prepareResult.ok) {
+    console.warn('[doubaoBridge] injectCharByChar 准备输入框失败:', prepareResult.error);
+    return false;
+  }
+  console.log(`[doubaoBridge] 输入框已就绪: type=${prepareResult.inputType}, tag=${prepareResult.tag}`);
+
+  // ========== 第二步：优先使用真实键盘事件（sendInputEvent）==========
+  const wv = webview as any;
+  if (typeof wv.sendInputEvent === 'function') {
+    try {
+      console.log('[doubaoBridge] 使用真实键盘事件输入 (sendInputEvent)');
+      const chars = promptText.split('');
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        if (ch === '\n' || ch === '\r') {
+          wv.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+          wv.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+        } else if (ch === '\b') {
+          wv.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
+          wv.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+        } else {
+          wv.sendInputEvent({ type: 'keyDown', keyCode: ch, key: ch });
+          wv.sendInputEvent({ type: 'char', keyCode: ch, key: ch });
+          wv.sendInputEvent({ type: 'keyUp', keyCode: ch, key: ch });
+        }
+        // 每50个字符稍作停顿
+        if (i > 0 && i % 50 === 0) {
+          await sleep(15);
+        }
+      }
+      // 等待 React 状态完全同步
+      await sleep(300);
+
+      // 验证：读取 DOM 内容长度
+      const verifyCode = `
+        (function() {
+          try {
+            var inputType = '${prepareResult.inputType}';
+            var expectedLen = ${promptText.length};
+            var input = null;
+
+            var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
+            var allEls = inputType === 'textarea'
+              ? document.querySelectorAll('textarea')
+              : document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+
+            for (var i = 0; i < allEls.length; i++) {
+              var el = allEls[i];
+              if (inputType === 'textarea' && el.disabled) continue;
+              if (inputType !== 'textarea' && el.offsetParent === null) continue;
+              var ph = inputType === 'textarea'
+                ? el.placeholder || ''
+                : (el.getAttribute('aria-label') || el.getAttribute('data-placeholder') || '');
+              var rect = el.getBoundingClientRect();
+              if (rect.width < 50 || rect.height < 20) continue;
+              for (var k = 0; k < placeholderKeywords.length; k++) {
+                if (ph.indexOf(placeholderKeywords[k]) >= 0) {
+                  input = el;
+                  break;
+                }
+              }
+              if (input) break;
+            }
+
+            // 兜底：innerText 最长的那个
+            if (!input) {
+              var maxLen = 0;
+              for (var j = 0; j < allEls.length; j++) {
+                var el2 = allEls[j];
+                if (inputType !== 'textarea' && el2.offsetParent === null) continue;
+                var len = inputType === 'textarea' ? el2.value.length : (el2.textContent || '').length;
+                if (len > maxLen) { maxLen = len; input = el2; }
+              }
+            }
+
+            if (!input) return { ok: false, error: '验证时找不到输入框' };
+
+            var actualText = inputType === 'textarea' ? input.value : (input.innerText || '');
+            var actualLen = actualText.length;
+
+            // 检查 Fiber 节点是否存在（确认 React 接管）
+            var hasFiber = false;
+            try {
+              var targetEl = input;
+              for (var d = 0; d < 15 && targetEl; d++) {
+                var keys = Object.keys(targetEl);
+                for (var ki = 0; ki < keys.length; ki++) {
+                  if (keys[ki].startsWith('__reactFiber') || keys[ki].startsWith('__reactProps')) {
+                    hasFiber = true;
+                    break;
+                  }
+                }
+                if (hasFiber) break;
+                targetEl = targetEl.parentElement;
+              }
+            } catch(e) {}
+
+            return {
+              ok: actualLen >= expectedLen * 0.8,
+              actualLen: actualLen,
+              expectedLen: expectedLen,
+              hasFiber: hasFiber,
+              preview: actualText.substring(0, 60)
+            };
+          } catch(e) {
+            return { ok: false, error: e.message };
+          }
+        })()
+      `;
+
+      const verifyResult = await safeExecuteJS<{
+        ok: boolean; actualLen: number; expectedLen: number; hasFiber: boolean; preview?: string; error?: string;
+      }>(webview, verifyCode, 5000, 'verifyRealKeyboardInput');
+
+      if (verifyResult.ok) {
+        console.log(`[doubaoBridge] 真实键盘输入成功, len=${verifyResult.actualLen}/${verifyResult.expectedLen}, hasFiber=${verifyResult.hasFiber}, preview="${verifyResult.preview}..."`);
+        return true;
+      }
+      console.warn(`[doubaoBridge] 真实键盘输入验证失败: actualLen=${verifyResult.actualLen}, expected=${promptText.length}, error=${verifyResult.error || '内容长度不足'}`);
+      // 失败回退到 JS 模拟模式
+    } catch (e: any) {
+      console.warn('[doubaoBridge] sendInputEvent 模式异常，回退到JS模拟:', e.message);
+    }
+  }
+
+  // ========== 第三步：回退 - JS 模拟逐字输入 + React Fiber 强制同步 ==========
+  console.log('[doubaoBridge] 使用 JS 模拟逐字输入');
+  const safePrompt = JSON.stringify(promptText);
+  const fallbackCode = `
+    (function() {
+      try {
+        var targetPrompt = ${safePrompt};
+        var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
+        var viewportH = window.innerHeight;
+        var input = null;
+        var inputType = null;
+
+        var allTextareas = document.querySelectorAll('textarea');
+        // placeholder 匹配
+        for (var pi = 0; pi < allTextareas.length; pi++) {
+          var pta = allTextareas[pi];
+          if (pta.disabled) continue;
+          var pPlaceholder = pta.placeholder || '';
+          var pRect = pta.getBoundingClientRect();
+          if (pRect.width < 50 || pRect.height < 20) continue;
+          if (pRect.top < 0 || pRect.top > viewportH) continue;
+          for (var pki = 0; pki < placeholderKeywords.length; pki++) {
+            if (pPlaceholder.indexOf(placeholderKeywords[pki]) >= 0) {
+              input = pta;
+              inputType = 'textarea';
+              break;
+            }
+          }
+          if (input) break;
+        }
+        if (!input) {
+          var allEditables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var pei = 0; pei < allEditables.length; pei++) {
+            var ped = allEditables[pei];
+            var pAria = ped.getAttribute ? (ped.getAttribute('aria-label') || ped.getAttribute('data-placeholder') || ped.getAttribute('placeholder') || '') : '';
+            var pRect2 = ped.getBoundingClientRect();
+            if (pRect2.width < 50 || pRect2.height < 20) continue;
+            if (pRect2.top < 0 || pRect2.top > viewportH) continue;
+            var innerText = (ped.textContent || '').trim();
+            for (var pki2 = 0; pki2 < placeholderKeywords.length; pki2++) {
+              if (pAria.indexOf(placeholderKeywords[pki2]) >= 0 || (innerText.length < 30 && innerText.indexOf(placeholderKeywords[pki2]) >= 0)) {
+                input = ped;
+                inputType = 'contenteditable';
+                break;
+              }
+            }
+          }
+        }
+
+        // 面积打分兜底
+        if (!input) {
+          var candidates = [];
+          for (var ti = 0; ti < allTextareas.length; ti++) {
+            var ta = allTextareas[ti];
+            if (ta.disabled) continue;
+            var rect = ta.getBoundingClientRect();
+            if (rect.width < 30 || rect.height < 20) continue;
+            if (rect.top < 0 || rect.left < 0) continue;
+            var area = rect.width * rect.height;
+            var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0;
+            candidates.push({ el: ta, type: 'textarea', score: area + bottomScore * 100000 });
+          }
+          var editables2 = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var ei = 0; ei < editables2.length; ei++) {
+            var ed = editables2[ei];
+            if (ed.offsetParent === null) continue;
+            var rect2 = ed.getBoundingClientRect();
+            if (rect2.width < 30 || rect2.height < 20) continue;
+            if (rect2.top < 0 || rect2.left < 0 || rect2.top > viewportH) continue;
+            var area2 = rect2.width * rect2.height;
+            if (area2 < 2000 && rect2.height < 40) continue;
+            var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
+            candidates.push({ el: ed, type: 'contenteditable', score: area2 + bottomScore2 * 100000 });
+          }
+          if (candidates.length > 0) {
+            candidates.sort(function(a, b) { return b.score - a.score; });
+            input = candidates[0].el;
+            inputType = candidates[0].type;
+          }
+        }
+
+        if (!input) return { ok: false, error: '未找到输入框' };
         input.focus();
 
         // 清空
         if (inputType === 'textarea') {
-          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-          if (nativeSetter) nativeSetter.call(input, '');
+          var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          if (ns) ns.call(input, '');
           else input.value = '';
         } else {
-          // contenteditable: 全选删除
-          var range = document.createRange();
-          range.selectNodeContents(input);
-          var sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
-          document.execCommand('delete', false, null);
+          input.innerHTML = '<br>';
         }
         input.dispatchEvent(new Event('input', { bubbles: true }));
 
@@ -252,88 +475,73 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
         for (var ci = 0; ci < chars.length; ci++) {
           var ch = chars[ci];
           var chCode = ch.charCodeAt(0);
-          var keyCode = chCode;
 
-          // keydown
           input.dispatchEvent(new KeyboardEvent('keydown', {
-            key: ch, keyCode: keyCode, which: keyCode,
+            key: ch, keyCode: chCode, which: chCode,
             bubbles: true, cancelable: true
           }));
-
-          // keypress
           input.dispatchEvent(new KeyboardEvent('keypress', {
-            key: ch, keyCode: keyCode, which: keyCode,
+            key: ch, keyCode: chCode, which: chCode,
             bubbles: true, cancelable: true
           }));
 
-          // 更新内容
           currentVal += ch;
           if (inputType === 'textarea') {
-            var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-            if (ns) ns.call(input, currentVal);
+            var ns2 = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (ns2) ns2.call(input, currentVal);
             else input.value = currentVal;
           } else {
             document.execCommand('insertText', false, ch);
           }
 
-          // input
           try {
             input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
           } catch(e) {
             input.dispatchEvent(new Event('input', { bubbles: true }));
           }
 
-          // keyup
           input.dispatchEvent(new KeyboardEvent('keyup', {
-            key: ch, keyCode: keyCode, which: keyCode,
+            key: ch, keyCode: chCode, which: chCode,
             bubbles: true, cancelable: true
           }));
         }
 
-        // 最终事件
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: targetPrompt }));
 
-        // ========== React Fiber 强制同步（兜底方案）==========
-        // 对于 React 控制的 contenteditable，JS 模拟事件可能不被 React 识别（isTrusted=false）
-        // 直接找到 fiber 节点调用 onInput/onChange，确保 React state 与 DOM 同步
+        // ========== React Fiber 强制同步（增强版：向上遍历父元素）==========
         (function syncReactFiber() {
           try {
             var fiberKey = null;
-            var keys = Object.keys(input);
-            for (var ki = 0; ki < keys.length; ki++) {
-              if (keys[ki].startsWith('__reactFiber') || keys[ki].startsWith('__reactProps')) {
-                fiberKey = keys[ki];
-                break;
+            var targetEl = input;
+            var searchDepth = 0;
+            while (targetEl && searchDepth < 15) {
+              var keys = Object.keys(targetEl);
+              for (var ki = 0; ki < keys.length; ki++) {
+                if (keys[ki].startsWith('__reactFiber') || keys[ki].startsWith('__reactProps')) {
+                  fiberKey = keys[ki];
+                  break;
+                }
               }
+              if (fiberKey) break;
+              targetEl = targetEl.parentElement;
+              searchDepth++;
             }
             if (!fiberKey) return false;
 
             var targetValue = inputType === 'textarea' ? input.value : (input.innerText || '');
-            var fakeTarget = {
-              value: targetValue,
-              innerText: targetValue,
-              textContent: targetValue
-            };
+            var fakeTarget = { value: targetValue, innerText: targetValue, textContent: targetValue };
             var fakeEvent = {
-              target: fakeTarget,
-              currentTarget: fakeTarget,
-              bubbles: true,
-              cancelable: true,
-              defaultPrevented: false,
+              target: fakeTarget, currentTarget: fakeTarget,
+              bubbles: true, cancelable: true, defaultPrevented: false,
               preventDefault: function() { this.defaultPrevented = true; },
-              stopPropagation: function() {},
-              persist: function() {},
-              isTrusted: true,
-              type: 'input',
-              inputType: 'insertText',
-              data: targetValue,
+              stopPropagation: function() {}, persist: function() {},
+              isTrusted: true, type: 'input', inputType: 'insertText', data: targetValue,
               nativeEvent: { data: targetValue, inputType: 'insertText' }
             };
 
-            // 方式1：__reactProps 直接存 props
             if (fiberKey.startsWith('__reactProps')) {
-              var rprops = input[fiberKey];
+              var rprops = targetEl[fiberKey];
               if (rprops && typeof rprops.onInput === 'function') {
                 rprops.onInput(fakeEvent);
                 console.log('[reactSync] __reactProps.onInput 同步成功');
@@ -347,8 +555,7 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
               return false;
             }
 
-            // 方式2：遍历 fiber 树向上找 onInput/onChange
-            var fiber = input[fiberKey];
+            var fiber = targetEl[fiberKey];
             var current = fiber;
             var depth = 0;
             while (current && depth < 30) {
@@ -364,41 +571,36 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
               current = current.return;
               depth++;
             }
-            console.log('[reactSync] 未找到 onInput/onChange 处理器');
             return false;
-          } catch(e) {
-            console.log('[reactSync] 异常:', e.message);
-            return false;
-          }
+          } catch(e) { return false; }
         })();
 
-        // 验证
         var actualLen = inputType === 'textarea' ? input.value.length : input.innerText.length;
         var ok = actualLen >= targetPrompt.length * 0.8;
-
-        return { ok: ok, actualLen: actualLen, method: 'char-by-char' };
+        return { ok: ok, actualLen: actualLen, method: 'char-by-char-js' };
       } catch(e) {
         return { ok: false, error: e.message };
       }
-    })();
+    })()
   `;
 
   try {
     const result = await safeExecuteJS<{ ok: boolean; actualLen: number; method: string }>(
-      webview, code, 15000, 'injectCharByChar'
+      webview, fallbackCode, 15000, 'injectCharByCharFallback'
     );
     if (result.ok) {
-      // 再次验证发送按钮
-      const btnReady = await checkSendButtonReady(webview);
-      return btnReady;
+      console.log(`[doubaoBridge] JS模拟逐字输入成功, len=${result.actualLen}, method=${result.method}`);
+      return true;
     }
+    console.warn('[doubaoBridge] JS模拟逐字输入失败, actualLen=' + result.actualLen);
     return false;
-  } catch {
+  } catch (e: any) {
+    console.warn('[doubaoBridge] injectCharByChar 异常:', e.message);
     return false;
   }
 }
 
-/** 检查发送按钮是否可用（React 状态是否同步） */
+
 async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
   const code = `
     (function() {
@@ -2185,88 +2387,179 @@ export async function configureVideoOptions(
 ): Promise<void> {
   // 模型名称映射（豆包页面显示的文本）
   const modelLabels: Record<string, string[]> = {
-    'seedance-2.0': ['Seedance 2.0'],
-    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast'],
+    'seedance-2.0': ['Seedance 2.0', '2.0'],
+    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast', 'Fast'],
     'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini'],
   };
 
   const modelTexts = modelLabels[config.model] || [config.model];
+  const durationSec = config.duration.replace('s', '');
+  const durationTexts = [durationSec + ' 秒', durationSec + '秒', config.duration];
 
-  // 通用点击函数：通过文本匹配找到并点击元素
-  const clickByText = async (texts: string[], label: string): Promise<boolean> => {
-    for (const text of texts) {
-      const code = `
-        (function() {
-          try {
-            var allEls = document.querySelectorAll('button, [role="tab"], [role="option"], div, span, label');
-            for (var i = 0; i < allEls.length; i++) {
-              var el = allEls[i];
-              var innerText = (el.innerText || '').trim();
-              var directText = '';
-              for (var j = 0; j < el.childNodes.length; j++) {
-                if (el.childNodes[j].nodeType === 3) directText += el.childNodes[j].textContent || '';
-              }
-              directText = directText.trim();
+  /**
+   * 点击下拉选项：先点击触发按钮展开下拉，再选择目标选项
+   * triggerTexts: 触发按钮的文本关键词（用于找到并点击展开）
+   * optionTexts: 下拉选项的文本
+   */
+  const selectDropdownOption = async (
+    triggerTexts: string[],
+    optionTexts: string[],
+    label: string
+  ): Promise<boolean> => {
+    // ---- 第一步：找到并点击触发按钮（展开下拉） ----
+    const triggerCode = `
+      (function() {
+        try {
+          var triggerTexts = ${JSON.stringify(triggerTexts)};
+          var viewportH = window.innerHeight;
+          var candidates = [];
 
-              if (directText === '${text}' || innerText === '${text}') {
-                var rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0 && el.offsetParent !== null) {
-                  el.click();
-                  return { ok: true, tag: el.tagName, text: '${text}', pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
-                }
+          // 在输入框附近找可点击元素（button / div[role=button] / 带 pointer 的 div）
+          var allClickable = document.querySelectorAll('button, [role="button"], div, span');
+          for (var i = 0; i < allClickable.length; i++) {
+            var el = allClickable[i];
+            if (el.offsetParent === null) continue;
+            var rect = el.getBoundingClientRect();
+            if (rect.width < 20 || rect.height < 20) continue;
+            if (rect.top < viewportH * 0.5) continue; // 只看下半部分（工具栏区域）
+            var text = (el.innerText || '').trim();
+            if (!text || text.length > 30) continue;
+
+            // 检查是否匹配触发文本
+            var matched = false;
+            for (var t = 0; t < triggerTexts.length; t++) {
+              if (text.indexOf(triggerTexts[t]) >= 0) {
+                matched = true;
+                break;
               }
             }
-            // 尝试 includes 匹配（更宽松）
-            for (var i = 0; i < allEls.length; i++) {
-              var el = allEls[i];
-              var innerText = (el.innerText || '').trim();
-              if (innerText.indexOf('${text}') >= 0 && innerText.length < 80) {
-                var rect = el.getBoundingClientRect();
-                if (rect.width > 0 && rect.height > 0 && rect.width < 200 && el.offsetParent !== null) {
-                  el.click();
-                  return { ok: true, tag: el.tagName, text: innerText.substring(0, 30), pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
-                }
-              }
-            }
-            return { ok: false };
-          } catch (e) {
-            return { ok: false, error: e.message };
+            if (!matched) continue;
+
+            // 排除输入框和大容器
+            if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') continue;
+            if (rect.width > 300) continue;
+
+            // 打分：越靠近底部越可能是工具栏按钮
+            var bottomScore = rect.top > viewportH * 0.7 ? 100 : 0;
+            var sizeScore = rect.width * rect.height < 10000 ? 50 : 0;
+            candidates.push({ el: el, text: text, score: bottomScore + sizeScore, rect: rect });
           }
-        })()
-      `;
-      const result = await safeExecuteJS<{ ok: boolean; tag?: string; text?: string; pos?: string; error?: string }>(
-        webview, code, 3000, 'clickByText'
-      );
-      if (result.ok) {
-        console.log(`[doubaoBridge] 已点击${label}: "${result.text}", tag: ${result.tag}, pos: ${result.pos}`);
-        return true;
-      }
+
+          if (candidates.length === 0) return { ok: false, error: '未找到触发按钮' };
+
+          // 按分数排序，取最高的
+          candidates.sort(function(a, b) { return b.score - a.score; });
+          var best = candidates[0];
+          best.el.click();
+          return { ok: true, text: best.text, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
+        } catch(e) {
+          return { ok: false, error: e.message };
+        }
+      })()
+    `;
+
+    const triggerResult = await safeExecuteJS<{ ok: boolean; text?: string; pos?: string; error?: string }>(
+      webview, triggerCode, 3000, `trigger_${label}`
+    );
+
+    if (!triggerResult.ok) {
+      console.warn(`[doubaoBridge] ${label} 触发按钮未找到:`, triggerResult.error, triggerTexts);
+      // 兜底：直接尝试 clickByText 选选项（可能下拉已经展开了）
+    } else {
+      console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}`);
+      await sleep(400); // 等待下拉动画展开
     }
-    console.warn(`[doubaoBridge] 未找到${label}元素，尝试文本:`, texts);
+
+    // ---- 第二步：在下拉中选择目标选项 ----
+    // 扩大选择器范围，下拉展开后 [role="option"] 应该可见
+    const optionCode = `
+      (function() {
+        try {
+          var optionTexts = ${JSON.stringify(optionTexts)};
+          var allOptions = document.querySelectorAll('[role="option"], button, [role="menuitem"], div[class*="option"], div[class*="item"], li');
+
+          for (var i = 0; i < allOptions.length; i++) {
+            var el = allOptions[i];
+            if (el.offsetParent === null) continue;
+            var rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) continue;
+            var text = (el.innerText || '').trim();
+            if (!text) continue;
+
+            for (var t = 0; t < optionTexts.length; t++) {
+              if (text === optionTexts[t] || text.indexOf(optionTexts[t]) >= 0) {
+                // 排除太长的文本（不是选项）
+                if (text.length > 50) continue;
+                el.click();
+                return { ok: true, text: text.substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+              }
+            }
+          }
+
+          // 更宽松的匹配：遍历所有可见元素
+          var allVisible = document.querySelectorAll('*');
+          var found = null;
+          for (var j = 0; j < allVisible.length; j++) {
+            var el2 = allVisible[j];
+            if (el2.offsetParent === null) continue;
+            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE') continue;
+            var rect2 = el2.getBoundingClientRect();
+            if (rect2.width < 20 || rect2.height < 20) continue;
+            var text2 = (el2.innerText || '').trim();
+            if (!text2 || text2.length > 40) continue;
+            for (var t2 = 0; t2 < optionTexts.length; t2++) {
+              if (text2 === optionTexts[t2] || text2.indexOf(optionTexts[t2]) >= 0) {
+                // 只点击叶子节点（子元素只有文本的）
+                if (el2.children && el2.children.length > 3) continue;
+                found = { el: el2, text: text2, rect: rect2 };
+                break;
+              }
+            }
+            if (found) break;
+          }
+          if (found) {
+            found.el.click();
+            return { ok: true, text: found.text.substring(0, 30), tag: found.el.tagName, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
+          }
+
+          return { ok: false };
+        } catch(e) {
+          return { ok: false, error: e.message };
+        }
+      })()
+    `;
+
+    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string }>(
+      webview, optionCode, 4000, `select_${label}`
+    );
+
+    if (optionResult.ok) {
+      console.log(`[doubaoBridge] 已选择${label}: "${optionResult.text}", tag: ${optionResult.tag}, pos: ${optionResult.pos}`);
+      return true;
+    }
+    console.warn(`[doubaoBridge] ${label} 选项未找到, 尝试文本:`, optionTexts);
     return false;
   };
 
-  // 1. 选择模型
+  // 1. 选择模型（触发按钮包含 "模型" 或当前模型名）
   console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
-  await clickByText(modelTexts, '视频模型');
-  await sleep(500);
+  const modelTriggers = ['模型', 'Mini', 'Fast', '2.0'];
+  await selectDropdownOption(modelTriggers, modelTexts, '视频模型');
+  await sleep(400);
 
-  // 2. 选择时长
+  // 2. 选择时长（触发按钮包含 "秒" 或 "s" 且数字）
   console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-  const durationSec = config.duration.replace('s', '');
-  const durationTexts = [
-    durationSec + ' 秒',
-    durationSec + '秒',
-    config.duration,
-  ];
-  await clickByText(durationTexts, '视频时长');
-  await sleep(500);
+  const durationTriggers = ['秒', 's', '时长'];
+  await selectDropdownOption(durationTriggers, durationTexts, '视频时长');
+  await sleep(400);
 
-  // 3. 选择比例
+  // 3. 选择比例（触发按钮包含 "比例"）
   console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
-  await clickByText([config.aspectRatio], '视频比例');
-  await sleep(500);
+  const ratioTriggers = ['比例', '比'];
+  await selectDropdownOption(ratioTriggers, [config.aspectRatio], '视频比例');
+  await sleep(400);
 }
+
 
 /**
  * 上传参考图片
