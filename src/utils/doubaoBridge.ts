@@ -294,6 +294,84 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
         input.dispatchEvent(new Event('change', { bubbles: true }));
         input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: targetPrompt }));
 
+        // ========== React Fiber 强制同步（兜底方案）==========
+        // 对于 React 控制的 contenteditable，JS 模拟事件可能不被 React 识别（isTrusted=false）
+        // 直接找到 fiber 节点调用 onInput/onChange，确保 React state 与 DOM 同步
+        (function syncReactFiber() {
+          try {
+            var fiberKey = null;
+            var keys = Object.keys(input);
+            for (var ki = 0; ki < keys.length; ki++) {
+              if (keys[ki].startsWith('__reactFiber') || keys[ki].startsWith('__reactProps')) {
+                fiberKey = keys[ki];
+                break;
+              }
+            }
+            if (!fiberKey) return false;
+
+            var targetValue = inputType === 'textarea' ? input.value : (input.innerText || '');
+            var fakeTarget = {
+              value: targetValue,
+              innerText: targetValue,
+              textContent: targetValue
+            };
+            var fakeEvent = {
+              target: fakeTarget,
+              currentTarget: fakeTarget,
+              bubbles: true,
+              cancelable: true,
+              defaultPrevented: false,
+              preventDefault: function() { this.defaultPrevented = true; },
+              stopPropagation: function() {},
+              persist: function() {},
+              isTrusted: true,
+              type: 'input',
+              inputType: 'insertText',
+              data: targetValue,
+              nativeEvent: { data: targetValue, inputType: 'insertText' }
+            };
+
+            // 方式1：__reactProps 直接存 props
+            if (fiberKey.startsWith('__reactProps')) {
+              var rprops = input[fiberKey];
+              if (rprops && typeof rprops.onInput === 'function') {
+                rprops.onInput(fakeEvent);
+                console.log('[reactSync] __reactProps.onInput 同步成功');
+                return true;
+              }
+              if (rprops && typeof rprops.onChange === 'function') {
+                rprops.onChange(fakeEvent);
+                console.log('[reactSync] __reactProps.onChange 同步成功');
+                return true;
+              }
+              return false;
+            }
+
+            // 方式2：遍历 fiber 树向上找 onInput/onChange
+            var fiber = input[fiberKey];
+            var current = fiber;
+            var depth = 0;
+            while (current && depth < 30) {
+              var fprops = current.memoizedProps || current.pendingProps;
+              if (fprops) {
+                if (typeof fprops.onInput === 'function') {
+                  try { fprops.onInput(fakeEvent); console.log('[reactSync] fiber.onInput 同步成功 depth=' + depth); return true; } catch(e) {}
+                }
+                if (typeof fprops.onChange === 'function') {
+                  try { fprops.onChange(fakeEvent); console.log('[reactSync] fiber.onChange 同步成功 depth=' + depth); return true; } catch(e) {}
+                }
+              }
+              current = current.return;
+              depth++;
+            }
+            console.log('[reactSync] 未找到 onInput/onChange 处理器');
+            return false;
+          } catch(e) {
+            console.log('[reactSync] 异常:', e.message);
+            return false;
+          }
+        })();
+
         // 验证
         var actualLen = inputType === 'textarea' ? input.value.length : input.innerText.length;
         var ok = actualLen >= targetPrompt.length * 0.8;
@@ -363,31 +441,69 @@ async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
           }
         }
 
-        // 策略C：contenteditable 附近的圆形按钮（视频模式）
+        // 策略C：contenteditable 附近的发送按钮（视频/图片模式）
+        // 增强版：收集候选+打分排序，排除语音/麦克风按钮，优先匹配箭头图标和蓝色圆形
         if (!btn) {
           var editables = document.querySelectorAll('[contenteditable="true"]');
+          var targetEd = null;
           for (var ei = 0; ei < editables.length; ei++) {
             var ed = editables[ei];
-            if (ed.offsetParent === null) continue;
-            // 找它的父容器中靠右靠下的可点击元素
-            var parent = ed.parentElement;
-            for (var lvl = 0; lvl < 6 && parent; lvl++) {
-              var allBtns = parent.querySelectorAll('button, [role="button"]');
-              for (var bj = 0; bj < allBtns.length; bj++) {
-                var el = allBtns[bj];
-                if (el.offsetParent === null) continue;
-                var rect = el.getBoundingClientRect();
-                var edRect = ed.getBoundingClientRect();
+            if (ed.offsetParent !== null) { targetEd = ed; break; }
+          }
+          if (targetEd) {
+            var candidatesC = [];
+            var parentC = targetEd.parentElement;
+            for (var lvl = 0; lvl < 6 && parentC; lvl++) {
+              var allBtnsC = parentC.querySelectorAll('button, [role="button"]');
+              for (var bj = 0; bj < allBtnsC.length; bj++) {
+                var elC = allBtnsC[bj];
+                if (elC.offsetParent === null) continue;
+                var rectC = elC.getBoundingClientRect();
+                var edRectC = targetEd.getBoundingClientRect();
                 // 在输入框右下角区域
-                if (rect.left > edRect.right - 80 && rect.top > edRect.bottom - 60) {
-                  btn = el;
-                  break;
+                if (rectC.left > edRectC.right - 100 && rectC.top > edRectC.bottom - 60) {
+                  var score = 0;
+                  var htmlC = elC.outerHTML || '';
+                  var svgHtml = '';
+                  var svgs = elC.querySelectorAll('svg');
+                  for (var si = 0; si < svgs.length; si++) {
+                    svgHtml += svgs[si].outerHTML || '';
+                  }
+                  // 箭头/发送图标加分
+                  if (svgHtml.indexOf('arrow') >= 0 || svgHtml.indexOf('Arrow') >= 0 ||
+                      svgHtml.indexOf('send') >= 0 || svgHtml.indexOf('Send') >= 0 ||
+                      svgHtml.indexOf('paper-plane') >= 0 || svgHtml.indexOf('up') >= 0) {
+                    score += 100;
+                  }
+                  // 麦克风/语音减分（排除语音输入按钮）
+                  if (svgHtml.indexOf('mic') >= 0 || svgHtml.indexOf('Mic') >= 0 ||
+                      svgHtml.indexOf('microphone') >= 0 || svgHtml.indexOf('voice') >= 0 ||
+                      svgHtml.indexOf('audio') >= 0) {
+                    score -= 200;
+                  }
+                  // 蓝色背景加分（发送按钮通常是蓝色）
+                  var styleC = window.getComputedStyle(elC);
+                  var bgColor = styleC.backgroundColor || '';
+                  if (bgColor.indexOf('rgb') >= 0) {
+                    var rgbMatch = bgColor.match(/\d+/g);
+                    if (rgbMatch && rgbMatch.length >= 3) {
+                      var r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2]);
+                      if (b > r && b > g && b > 150) score += 50; // 蓝色调
+                    }
+                  }
+                  // 越靠右越可能是发送按钮
+                  score += rectC.left * 0.01;
+                  candidatesC.push({ el: elC, score: score, rect: rectC });
                 }
               }
-              if (btn) break;
-              parent = parent.parentElement;
+              parentC = parentC.parentElement;
             }
-            if (btn) break;
+            if (candidatesC.length > 0) {
+              candidatesC.sort(function(a, b) { return b.score - a.score; });
+              btn = candidatesC[0].el;
+              console.log('[checkSendBtn] 策略C选中按钮, score=' + candidatesC[0].score +
+                ', tag=' + btn.tagName + ', 候选数=' + candidatesC.length);
+            }
           }
         }
 
@@ -1066,13 +1182,13 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           }
         }
 
-        // ========== 策略C：按 Enter 键提交 ==========
+        // ========== 策略C：按 Enter 键提交（兜底，支持 textarea 和 contenteditable） ==========
         if (!sendBtn) {
+          // 尝试找 textarea
           var ta = document.querySelector('textarea');
-          if (ta) {
-            console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交');
+          if (ta && ta.offsetParent !== null) {
+            console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交(textarea)');
             ta.focus();
-            // React 需要 nativeInputValueSetter
             var nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
             if (nativeSetter) {
               nativeSetter.call(ta, ta.value);
@@ -1087,9 +1203,51 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
             ta.dispatchEvent(new KeyboardEvent('keyup', {
               key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
             }));
-            return { ok: true, method: 'enter' };
+            return { ok: true, method: 'enter-textarea' };
           }
-          return { ok: false, error: '未找到发送按钮且无 textarea 可按 Enter' };
+
+          // 尝试找 contenteditable
+          var editable = null;
+          var allEds = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var e = 0; e < allEds.length; e++) {
+            if (allEds[e].offsetParent !== null) {
+              var eRect = allEds[e].getBoundingClientRect();
+              if (eRect.width > 100 && eRect.height > 20) {
+                editable = allEds[e];
+                break;
+              }
+            }
+          }
+          if (editable) {
+            console.log('[doubaoBridge] 未找到发送按钮，尝试按 Enter 提交(contenteditable)');
+            editable.focus();
+            // 将光标移到末尾
+            var range = document.createRange();
+            range.selectNodeContents(editable);
+            range.collapse(false);
+            var sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+
+            editable.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+            editable.dispatchEvent(new KeyboardEvent('keypress', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+            // 某些编辑器通过 beforeinput 处理 Enter
+            try {
+              editable.dispatchEvent(new InputEvent('beforeinput', {
+                bubbles: true, cancelable: true, inputType: 'insertParagraph', data: null
+              }));
+            } catch(e) {}
+            editable.dispatchEvent(new KeyboardEvent('keyup', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true
+            }));
+            return { ok: true, method: 'enter-editable' };
+          }
+
+          return { ok: false, error: '未找到发送按钮且无输入框可按 Enter' };
         }
 
         console.log('[doubaoBridge] 找到发送按钮 tag=' + sendBtn.tagName + ' class=' + (sendBtn.className || '').substring(0, 60));
