@@ -97,11 +97,74 @@ async function tryInjectOnce(
         var viewportH = window.innerHeight;
         var viewportW = window.innerWidth;
 
-        // ========== 找到最佳输入元素（发送按钮反向定位优先，面积打分兜底） ==========
+        // ========== 找到最佳输入元素（placeholder匹配优先 > 发送按钮反向 > 面积打分兜底） ==========
         var candidates = [];
         var foundByButton = null;
+        var foundByPlaceholder = null;
 
-        // ---- 策略A：通过发送/生成按钮反向查找输入框（最准） ----
+        // ---- 策略0：通过 placeholder/提示文本直接定位输入框（最准，视频页面专用） ----
+        var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
+        var allTextareas = document.querySelectorAll('textarea');
+        for (var pi = 0; pi < allTextareas.length; pi++) {
+          var pta = allTextareas[pi];
+          if (pta.disabled) continue;
+          var pPlaceholder = pta.getAttribute ? (pta.getAttribute('placeholder') || '') : '';
+          var pRect = pta.getBoundingClientRect();
+          if (pRect.width < 50 || pRect.height < 20) continue;
+          if (pRect.top < 0 || pRect.top > viewportH) continue;
+          for (var pki = 0; pki < placeholderKeywords.length; pki++) {
+            if (pPlaceholder.indexOf(placeholderKeywords[pki]) >= 0) {
+              foundByPlaceholder = { el: pta, type: 'textarea', placeholder: pPlaceholder };
+              break;
+            }
+          }
+          if (foundByPlaceholder) break;
+        }
+        // 也检查 contenteditable 的 placeholder（aria-label / data-placeholder）
+        if (!foundByPlaceholder) {
+          var allEditables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var pei = 0; pei < allEditables.length; pei++) {
+            var ped = allEditables[pei];
+            var pAria = ped.getAttribute ? (ped.getAttribute('aria-label') || ped.getAttribute('data-placeholder') || ped.getAttribute('placeholder') || '') : '';
+            var pRect2 = ped.getBoundingClientRect();
+            if (pRect2.width < 50 || pRect2.height < 20) continue;
+            if (pRect2.top < 0 || pRect2.top > viewportH) continue;
+            for (var pki2 = 0; pki2 < placeholderKeywords.length; pki2++) {
+              if (pAria.indexOf(placeholderKeywords[pki2]) >= 0) {
+                foundByPlaceholder = { el: ped, type: 'contenteditable', placeholder: pAria };
+                break;
+              }
+            }
+            if (foundByPlaceholder) break;
+          }
+        }
+        // 再兜底：contenteditable 内部的空提示文本
+        if (!foundByPlaceholder) {
+          var allEditables2 = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var pe2 = 0; pe2 < allEditables2.length; pe2++) {
+            var ped2 = allEditables2[pe2];
+            var pRect3 = ped2.getBoundingClientRect();
+            if (pRect3.width < 100 || pRect3.height < 30) continue;
+            if (pRect3.top < 0 || pRect3.top > viewportH) continue;
+            // 检查内部是否有提示文本元素
+            var innerText = (ped2.textContent || '').trim();
+            if (innerText.length > 20) continue;
+            for (var pki3 = 0; pki3 < placeholderKeywords.length; pki3++) {
+              if (innerText.indexOf(placeholderKeywords[pki3]) >= 0) {
+                foundByPlaceholder = { el: ped2, type: 'contenteditable', placeholder: innerText };
+                break;
+              }
+            }
+            if (foundByPlaceholder) break;
+          }
+        }
+
+        if (foundByPlaceholder) {
+          console.log('[doubaoBridge] 通过placeholder定位输入框 type=' + foundByPlaceholder.type + ' placeholder=' + foundByPlaceholder.placeholder);
+          candidates.push({ el: foundByPlaceholder.el, type: foundByPlaceholder.type, score: Infinity, area: 999999 });
+        }
+
+        // ---- 策略A：通过发送/生成按钮反向查找输入框 ----
         var buttonKeywords = ['发送', 'send', 'Send', 'SEND', '发送消息', '提交'];
         var excludeTexts = ['视频生成', '图像生成', '图片生成', '模型', 'Seedance', '时长', '比例', '尺寸', '风格'];
         var allButtons = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"], span[class*="btn"]');
