@@ -2501,79 +2501,62 @@ export async function configureVideoOptions(
     }
 
     // ---- 第二步：在下拉中选择目标选项 ----
-    // 扩大选择器范围，下拉展开后 [role="option"] 应该可见
+    // v9 简单逻辑：offsetParent 可见性过滤 + 大小写不敏感匹配 + 找到第一个就返回
     const optionCode = `
       (function() {
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
-
-          function matchText(text, opts) {
-            var t = (text || '').trim();
-            if (!t) return 0;
-            var tLow = t.toLowerCase();
-            var bestScore = 0;
-            for (var i = 0; i < opts.length; i++) {
-              var opt = opts[i];
-              var optLow = opt.toLowerCase();
-              if (t === opt || tLow === optLow) {
-                return 100; // 精确匹配
-              }
-              if (t.indexOf(opt) >= 0 || tLow.indexOf(optLow) >= 0) {
-                var score = 50 + Math.max(0, 30 - t.length); // 包含匹配，文本越短分越高
-                if (score > bestScore) bestScore = score;
-              }
-            }
-            return bestScore;
+          var optLow = [];
+          for (var k = 0; k < optionTexts.length; k++) {
+            optLow.push(optionTexts[k].toLowerCase());
           }
 
-          // ---- 第一阶段：标准选项选择器 ----
-          var allOptions = document.querySelectorAll('[role="option"], [role="menuitem"], button, div[class*="option"], div[class*="item"], li');
-          var candidates = [];
+          function textMatch(text) {
+            var t = (text || '').trim();
+            if (!t) return false;
+            var tl = t.toLowerCase();
+            for (var m = 0; m < optionTexts.length; m++) {
+              if (t === optionTexts[m] || tl === optLow[m]) return true;
+              if (t.indexOf(optionTexts[m]) >= 0 || tl.indexOf(optLow[m]) >= 0) return true;
+            }
+            return false;
+          }
+
+          // ---- 第一阶段：标准选项选择器（v9 同款） ----
+          var allOptions = document.querySelectorAll('[role="option"], button, [role="menuitem"], div[class*="option"], div[class*="item"], li');
           for (var i = 0; i < allOptions.length; i++) {
             var el = allOptions[i];
-            if (el.offsetParent === null) continue; // 快速过滤：offsetParent 为准（v9 验证有效）
+            if (el.offsetParent === null) continue;
             var text = (el.innerText || '').trim();
-            if (!text || text.length > 60) continue;
-            var score = matchText(text, optionTexts);
-            if (score > 0) {
+            if (!text) continue;
+            if (textMatch(text)) {
+              if (text.length > 50) continue;
               var rect = el.getBoundingClientRect();
-              candidates.push({ el: el, text: text, score: score, rect: rect, tag: el.tagName });
+              el.click();
+              return { ok: true, text: text.substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
             }
           }
 
-          if (candidates.length > 0) {
-            candidates.sort(function(a, b) { return b.score - a.score; });
-            var best = candidates[0];
-            best.el.click();
-            return { ok: true, text: best.text.substring(0, 40), tag: best.tag, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
-          }
-
-          // ---- 第二阶段：全元素兜底（v9 同款逻辑，仅增加大小写不敏感）----
-          var allEls = document.querySelectorAll('*');
+          // ---- 第二阶段：全元素兜底（v9 同款，大小写不敏感）----
+          var allVisible = document.querySelectorAll('*');
           var found = null;
-          var foundScore = -1;
-          for (var j = 0; j < allEls.length; j++) {
-            var el2 = allEls[j];
+          for (var j = 0; j < allVisible.length; j++) {
+            var el2 = allVisible[j];
             if (el2.offsetParent === null) continue;
             if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE') continue;
             var rect2 = el2.getBoundingClientRect();
             if (rect2.width < 20 || rect2.height < 20) continue;
             var text2 = (el2.innerText || '').trim();
             if (!text2 || text2.length > 40) continue;
-            var sc = matchText(text2, optionTexts);
-            if (sc > 0) {
+            if (textMatch(text2)) {
               if (el2.children && el2.children.length > 3) continue;
-              // 文本越短越可能是选项（过滤掉大段文本）
-              sc += Math.max(0, 25 - text2.length);
-              if (sc > foundScore) {
-                foundScore = sc;
-                found = { el: el2, text: text2, rect: rect2, tag: el2.tagName };
-              }
+              found = { el: el2, text: text2, rect: rect2 };
+              break;
             }
           }
           if (found) {
             found.el.click();
-            return { ok: true, text: found.text.substring(0, 30), tag: found.tag, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
+            return { ok: true, text: found.text.substring(0, 30), tag: found.el.tagName, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
           }
 
           return { ok: false };
@@ -2601,11 +2584,17 @@ export async function configureVideoOptions(
   await selectDropdownOption(modelTriggers, modelTexts, '视频模型');
   await sleep(400);
 
-  // 2. 选择时长（触发按钮包含 "秒" 或 "s" 且数字）
-  console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-  const durationTriggers = ['秒', 's', '时长'];
-  await selectDropdownOption(durationTriggers, durationTexts, '视频时长');
-  await sleep(400);
+  // 2. 选择时长
+  const is15sPatch = config.duration === '15s';
+  if (is15sPatch) {
+    // 15s 通过请求拦截实现，UI 上没有此选项，跳过
+    console.log(`[doubaoBridge] 配置视频时长: 15s（通过请求拦截实现，UI 跳过）`);
+  } else {
+    console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
+    const durationTriggers = ['秒', 's', '时长'];
+    await selectDropdownOption(durationTriggers, durationTexts, '视频时长');
+  }
+  await sleep(300);
 
   // 3. 选择比例（触发按钮包含 "比例"）
   console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
@@ -3001,36 +2990,48 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
       window.fetch = function patchedFetch(input, init) {
         var url = typeof input === 'string' ? input : (input && input.url) || '';
         var isCompletion = url.indexOf('/chat/completion') >= 0;
-        var isVideoApi = url.indexOf('get_play_info') >= 0 || url.indexOf('play_info') >= 0 ||
-                         url.indexOf('media/') >= 0 || isCompletion;
+        // 仅拦截明确的视频相关 API，避免误伤其他请求导致页面异常
+        var isVideoApi = isCompletion ||
+                         url.indexOf('get_play_info') >= 0 ||
+                         url.indexOf('play_info') >= 0 ||
+                         url.indexOf('/video/') >= 0;
 
         if (isCompletion && init && init.body) {
-          var patched = patchBody(init.body);
-          if (patched.changed) {
-            init = Object.assign({}, init, { body: patched.body });
-          }
+          try {
+            var patched = patchBody(init.body);
+            if (patched.changed) {
+              init = Object.assign({}, init, { body: patched.body });
+            }
+          } catch(e) {}
         }
 
         return originalFetch.apply(this, [input, init]).then(function(resp) {
           if (isVideoApi && resp.body) {
-            var ct = resp.headers.get('content-type') || '';
-            if (ct.indexOf('text/event-stream') >= 0) {
-              var teed = resp.body.tee();
-              readSSEStream(teed[1].getReader());
-              return new Response(teed[0], {
-                status: resp.status,
-                statusText: resp.statusText,
-                headers: resp.headers,
-              });
-            } else if (ct.indexOf('application/json') >= 0) {
-              // 普通 JSON 响应（如 get_play_info），克隆一份解析
-              return resp.clone().json().then(function(data) {
-                processVideoData(data);
-                return resp;
-              }).catch(function() { return resp; });
+            try {
+              var ct = resp.headers.get('content-type') || '';
+              if (ct.indexOf('text/event-stream') >= 0) {
+                var teed = resp.body.tee();
+                readSSEStream(teed[1].getReader());
+                return new Response(teed[0], {
+                  status: resp.status,
+                  statusText: resp.statusText,
+                  headers: resp.headers,
+                });
+              } else if (ct.indexOf('application/json') >= 0) {
+                // 普通 JSON 响应（如 get_play_info），克隆一份解析
+                return resp.clone().json().then(function(data) {
+                  processVideoData(data);
+                  return resp;
+                }).catch(function() { return resp; });
+              }
+            } catch(e) {
+              // 任何异常都不影响原始响应
+              return resp;
             }
           }
           return resp;
+        }).catch(function(err) {
+          throw err; // 透传原始错误
         });
       };
 

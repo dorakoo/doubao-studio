@@ -243,11 +243,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await sleep(1500); // 等待 Tab 切换动画
         }
 
-        // 视频模式：注入 15s Seedance 2.0 补丁 + 配置参数
+        // 视频模式：配置参数 + 按需注入 15s 补丁
         if (mode === 'video') {
-          setAccountAutomationState(accountId, 'injecting', '注入 Seedance 2.0 补丁...');
-          await inject15sVideoPatch(webview);
-          await sleep(500);
+          // 15s 补丁：仅当用户选择 15s 时长时注入（修改请求参数实现15s）
+          // 选 5s/10s 等原生时长时不注入，保持原版行为
+          const need15sPatch = videoConfig?.duration === '15s';
+          if (need15sPatch) {
+            setAccountAutomationState(accountId, 'injecting', '注入 Seedance 2.0 补丁...');
+            await inject15sVideoPatch(webview);
+            await sleep(500);
+          }
           if (videoConfig) {
             setAccountAutomationState(accountId, 'injecting', '配置视频参数...');
             await configureVideoOptions(webview, videoConfig);
