@@ -469,41 +469,77 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
         }
         input.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // 逐字输入
-        var chars = targetPrompt.split('');
-        var currentVal = '';
-        for (var ci = 0; ci < chars.length; ci++) {
-          var ch = chars[ci];
-          var chCode = ch.charCodeAt(0);
+        // 批量注入（性能优化：每批设置内容+触发事件，避免逐字导致的数千次重渲染）
+        var BATCH_SIZE = 80;
+        var totalLen = targetPrompt.length;
+        var batches = Math.ceil(totalLen / BATCH_SIZE);
 
-          input.dispatchEvent(new KeyboardEvent('keydown', {
-            key: ch, keyCode: chCode, which: chCode,
-            bubbles: true, cancelable: true
-          }));
-          input.dispatchEvent(new KeyboardEvent('keypress', {
-            key: ch, keyCode: chCode, which: chCode,
-            bubbles: true, cancelable: true
-          }));
-
-          currentVal += ch;
+        function setInputContent(text) {
           if (inputType === 'textarea') {
             var ns2 = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
-            if (ns2) ns2.call(input, currentVal);
-            else input.value = currentVal;
+            if (ns2) ns2.call(input, text);
+            else input.value = text;
           } else {
-            document.execCommand('insertText', false, ch);
+            // contenteditable: 直接用 textContent + 光标置末
+            input.textContent = text;
+            // 移动光标到末尾
+            var range = document.createRange();
+            range.selectNodeContents(input);
+            range.collapse(false);
+            var sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
           }
+        }
+
+        function syncReactFiberFast() {
+          try {
+            var fiberKey = null;
+            var targetEl = input;
+            var depth = 0;
+            while (targetEl && depth < 10) {
+              var keys = Object.keys(targetEl);
+              for (var ki = 0; ki < keys.length; ki++) {
+                if (keys[ki].startsWith('__reactProps')) {
+                  fiberKey = keys[ki];
+                  break;
+                }
+              }
+              if (fiberKey) break;
+              targetEl = targetEl.parentElement;
+              depth++;
+            }
+            if (!fiberKey) return;
+            var rprops = targetEl[fiberKey];
+            var targetVal = inputType === 'textarea' ? input.value : (input.innerText || '');
+            var fakeTarget = { value: targetVal, innerText: targetVal, textContent: targetVal };
+            var fakeEvent = {
+              target: fakeTarget, currentTarget: fakeTarget,
+              bubbles: true, cancelable: true,
+              preventDefault: function() {}, stopPropagation: function() {},
+              isTrusted: true, type: 'input', inputType: 'insertText', data: targetVal,
+              nativeEvent: { data: targetVal, inputType: 'insertText' }
+            };
+            if (rprops && typeof rprops.onInput === 'function') rprops.onInput(fakeEvent);
+            else if (rprops && typeof rprops.onChange === 'function') rprops.onChange(fakeEvent);
+          } catch(e) {}
+        }
+
+        for (var bi = 0; bi < batches; bi++) {
+          var startIdx = bi * BATCH_SIZE;
+          var endIdx = Math.min(startIdx + BATCH_SIZE, totalLen);
+          var batchText = targetPrompt.substring(0, endIdx);
+
+          setInputContent(batchText);
 
           try {
-            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: batchText }));
           } catch(e) {
             input.dispatchEvent(new Event('input', { bubbles: true }));
           }
 
-          input.dispatchEvent(new KeyboardEvent('keyup', {
-            key: ch, keyCode: chCode, which: chCode,
-            bubbles: true, cancelable: true
-          }));
+          // 每批快速同步 React 状态
+          syncReactFiberFast();
         }
 
         input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2537,26 +2573,21 @@ export async function configureVideoOptions(
             }
           }
 
-          // ---- 第二阶段：全元素兜底（v9 同款，大小写不敏感）----
-          var allVisible = document.querySelectorAll('*');
-          var found = null;
-          for (var j = 0; j < allVisible.length; j++) {
-            var el2 = allVisible[j];
-            if (el2.offsetParent === null) continue;
-            if (el2.tagName === 'SCRIPT' || el2.tagName === 'STYLE') continue;
-            var rect2 = el2.getBoundingClientRect();
-            if (rect2.width < 20 || rect2.height < 20) continue;
-            var text2 = (el2.innerText || '').trim();
-            if (!text2 || text2.length > 40) continue;
-            if (textMatch(text2)) {
-              if (el2.children && el2.children.length > 3) continue;
-              found = { el: el2, text: text2, rect: rect2 };
-              break;
+          // ---- 第二阶段：扩大选择器范围（性能安全，不做全元素遍历）----
+          var extraOptions = document.querySelectorAll(
+            '[class*="select-item"], [class*="dropdown-item"], [class*="menu-item"], ' +
+            '[class*="option-item"], [class*="list-item"], span[class*="item"], a'
+          );
+          for (var k = 0; k < extraOptions.length; k++) {
+            var el3 = extraOptions[k];
+            if (el3.offsetParent === null) continue;
+            var text3 = (el3.innerText || '').trim();
+            if (!text3 || text3.length > 50) continue;
+            if (textMatch(text3)) {
+              var rect3 = el3.getBoundingClientRect();
+              el3.click();
+              return { ok: true, text: text3.substring(0, 30), tag: el3.tagName, pos: Math.round(rect3.left) + ',' + Math.round(rect3.top) };
             }
-          }
-          if (found) {
-            found.el.click();
-            return { ok: true, text: found.text.substring(0, 30), tag: found.el.tagName, pos: Math.round(found.rect.left) + ',' + Math.round(found.rect.top) };
           }
 
           return { ok: false };
