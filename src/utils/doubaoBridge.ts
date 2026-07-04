@@ -63,7 +63,23 @@ export async function injectPrompt(
 ): Promise<boolean> {
   console.log(`[doubaoBridge] injectPrompt 原始提示词长度=${prompt.length}, 前30字="${prompt.substring(0, 30)}..."`);
 
-  let charByCharTried = false;
+  // 注入前先检查按钮初始状态
+  const initialBtnReady = await checkSendButtonReady(webview);
+  console.log(`[doubaoBridge] 注入前按钮状态: ${initialBtnReady ? '已激活' : '未激活'}`);
+
+  // 如果按钮本来就激活（如视频模式有图就激活），按钮状态不能作为验证标准
+  // 直接走逐字输入（模拟真实按键，React 100% 捕获）
+  if (initialBtnReady) {
+    console.log('[doubaoBridge] 按钮初始已激活，直接使用逐字输入确保 React 状态同步');
+    const charResult = await injectCharByChar(webview, prompt);
+    if (charResult) {
+      console.log('[doubaoBridge] 逐字输入成功');
+      return true;
+    }
+    console.warn('[doubaoBridge] 逐字输入失败，尝试常规注入 + DOM 验证');
+  }
+
+  let charByCharTried = initialBtnReady; // 如果初始按钮已激活，上面已经试过了
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     console.log(`[doubaoBridge] injectPrompt 第 ${attempt}/${maxRetries} 次尝试`);
@@ -116,36 +132,101 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
   const code = `
     (function() {
       try {
-        // 先找到输入框
+        // ========== 找到最佳输入元素（placeholder匹配优先 > 面积打分） ==========
+        var targetPrompt = ${safePrompt};
         var input = null;
         var inputType = null;
-        var targetPrompt = ${safePrompt};
 
-        // 找 contenteditable
-        var editables = document.querySelectorAll('[contenteditable="true"]');
-        for (var i = 0; i < editables.length; i++) {
-          if (editables[i].offsetParent !== null) {
-            input = editables[i];
-            inputType = 'contenteditable';
-            break;
-          }
-        }
+        var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
+        var viewportH = window.innerHeight;
+        var viewportW = window.innerWidth;
 
-        // 找 textarea
-        if (!input) {
-          var textareas = document.querySelectorAll('textarea');
-          for (var j = 0; j < textareas.length; j++) {
-            if (textareas[j].offsetParent !== null) {
-              input = textareas[j];
+        // ---- 策略0：通过 placeholder 定位（最准） ----
+        // textarea
+        var allTextareas = document.querySelectorAll('textarea');
+        for (var pi = 0; pi < allTextareas.length; pi++) {
+          var pta = allTextareas[pi];
+          if (pta.disabled) continue;
+          var pPlaceholder = pta.placeholder || '';
+          var pRect = pta.getBoundingClientRect();
+          if (pRect.width < 50 || pRect.height < 20) continue;
+          if (pRect.top < 0 || pRect.top > viewportH) continue;
+          for (var pki = 0; pki < placeholderKeywords.length; pki++) {
+            if (pPlaceholder.indexOf(placeholderKeywords[pki]) >= 0) {
+              input = pta;
               inputType = 'textarea';
               break;
             }
+          }
+          if (input) break;
+        }
+        // contenteditable 的 placeholder（aria-label / data-placeholder / 内部提示文本）
+        if (!input) {
+          var allEditables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var pei = 0; pei < allEditables.length; pei++) {
+            var ped = allEditables[pei];
+            var pAria = ped.getAttribute ? (ped.getAttribute('aria-label') || ped.getAttribute('data-placeholder') || ped.getAttribute('placeholder') || '') : '';
+            var pRect2 = ped.getBoundingClientRect();
+            if (pRect2.width < 50 || pRect2.height < 20) continue;
+            if (pRect2.top < 0 || pRect2.top > viewportH) continue;
+            var innerText = (ped.textContent || '').trim();
+            var hasPlaceholderText = false;
+            for (var pki2 = 0; pki2 < placeholderKeywords.length; pki2++) {
+              if (pAria.indexOf(placeholderKeywords[pki2]) >= 0 || (innerText.length < 30 && innerText.indexOf(placeholderKeywords[pki2]) >= 0)) {
+                hasPlaceholderText = true;
+                break;
+              }
+            }
+            if (hasPlaceholderText) {
+              input = ped;
+              inputType = 'contenteditable';
+              break;
+            }
+          }
+        }
+
+        // ---- 兜底：面积打分找最大的输入元素 ----
+        if (!input) {
+          var candidates = [];
+          // textarea
+          for (var ti = 0; ti < allTextareas.length; ti++) {
+            var ta = allTextareas[ti];
+            if (ta.disabled) continue;
+            var rect = ta.getBoundingClientRect();
+            if (rect.width < 30 || rect.height < 20) continue;
+            if (rect.top < 0 || rect.left < 0) continue;
+            var area = rect.width * rect.height;
+            var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0;
+            var score = area + bottomScore * 100000;
+            candidates.push({ el: ta, type: 'textarea', score: score });
+          }
+          // contenteditable
+          var editables2 = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var ei = 0; ei < editables2.length; ei++) {
+            var ed = editables2[ei];
+            if (ed.offsetParent === null) continue;
+            var rect2 = ed.getBoundingClientRect();
+            if (rect2.width < 30 || rect2.height < 20) continue;
+            if (rect2.top < 0 || rect2.left < 0) continue;
+            if (rect2.top > viewportH) continue;
+            var area2 = rect2.width * rect2.height;
+            if (area2 < 2000 && rect2.height < 40) continue;
+            var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
+            var score2 = area2 + bottomScore2 * 100000;
+            candidates.push({ el: ed, type: 'contenteditable', score: score2 });
+          }
+          if (candidates.length > 0) {
+            candidates.sort(function(a, b) { return b.score - a.score; });
+            input = candidates[0].el;
+            inputType = candidates[0].type;
           }
         }
 
         if (!input) {
           return { ok: false, error: '未找到输入框' };
         }
+
+        console.log('[injectCharByChar] 输入框 type=' + inputType + ' tag=' + input.tagName);
 
         input.focus();
 
