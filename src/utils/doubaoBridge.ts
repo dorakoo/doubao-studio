@@ -62,13 +62,40 @@ export async function injectPrompt(
   maxRetries: number = 3
 ): Promise<boolean> {
   console.log(`[doubaoBridge] injectPrompt 原始提示词长度=${prompt.length}, 前30字="${prompt.substring(0, 30)}..."`);
+
+  let charByCharTried = false;
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     console.log(`[doubaoBridge] injectPrompt 第 ${attempt}/${maxRetries} 次尝试`);
 
     const result = await tryInjectOnce(webview, prompt);
     if (result.ok) {
       console.log(`[doubaoBridge] injectPrompt 成功 method=${result.method} tag=${result.tag} actualLen=${result.actualLen} expectedLen=${prompt.length} preview="${result.preview || ''}"`);
-      return true;
+
+      // 关键验证：检查发送按钮是否变为可用状态（React 状态同步的金标准）
+      const btnReady = await checkSendButtonReady(webview);
+      if (btnReady) {
+        console.log('[doubaoBridge] 发送按钮已激活，注入确认成功');
+        return true;
+      }
+
+      console.warn('[doubaoBridge] DOM 有文字但发送按钮仍禁用，React 未同步');
+
+      // 如果还没试过逐字输入，直接走逐字输入兜底（比重复 execCommand 有效得多）
+      if (!charByCharTried) {
+        console.log('[doubaoBridge] 切换到逐字输入兜底策略...');
+        charByCharTried = true;
+        const charResult = await injectCharByChar(webview, prompt);
+        if (charResult) {
+          console.log('[doubaoBridge] 逐字输入成功，发送按钮已激活');
+          return true;
+        }
+        console.warn('[doubaoBridge] 逐字输入也失败，继续重试...');
+      }
+
+      // 继续下一轮
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
     }
 
     console.warn(`[doubaoBridge] injectPrompt 第 ${attempt} 次失败:`, result.error, `actualLen=${result.actualLen}`);
@@ -81,6 +108,240 @@ export async function injectPrompt(
 
   console.error('[doubaoBridge] injectPrompt 全部重试失败');
   return false;
+}
+
+/** 逐字输入兜底（单独函数，确保 React 状态 100% 同步） */
+async function injectCharByChar(webview: WebviewHandle, promptText: string): Promise<boolean> {
+  const safePrompt = JSON.stringify(promptText);
+  const code = `
+    (function() {
+      try {
+        // 先找到输入框
+        var input = null;
+        var inputType = null;
+        var targetPrompt = ${safePrompt};
+
+        // 找 contenteditable
+        var editables = document.querySelectorAll('[contenteditable="true"]');
+        for (var i = 0; i < editables.length; i++) {
+          if (editables[i].offsetParent !== null) {
+            input = editables[i];
+            inputType = 'contenteditable';
+            break;
+          }
+        }
+
+        // 找 textarea
+        if (!input) {
+          var textareas = document.querySelectorAll('textarea');
+          for (var j = 0; j < textareas.length; j++) {
+            if (textareas[j].offsetParent !== null) {
+              input = textareas[j];
+              inputType = 'textarea';
+              break;
+            }
+          }
+        }
+
+        if (!input) {
+          return { ok: false, error: '未找到输入框' };
+        }
+
+        input.focus();
+
+        // 清空
+        if (inputType === 'textarea') {
+          var nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+          if (nativeSetter) nativeSetter.call(input, '');
+          else input.value = '';
+        } else {
+          // contenteditable: 全选删除
+          var range = document.createRange();
+          range.selectNodeContents(input);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          document.execCommand('delete', false, null);
+        }
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+
+        // 逐字输入
+        var chars = targetPrompt.split('');
+        var currentVal = '';
+        for (var ci = 0; ci < chars.length; ci++) {
+          var ch = chars[ci];
+          var chCode = ch.charCodeAt(0);
+          var keyCode = chCode;
+
+          // keydown
+          input.dispatchEvent(new KeyboardEvent('keydown', {
+            key: ch, keyCode: keyCode, which: keyCode,
+            bubbles: true, cancelable: true
+          }));
+
+          // keypress
+          input.dispatchEvent(new KeyboardEvent('keypress', {
+            key: ch, keyCode: keyCode, which: keyCode,
+            bubbles: true, cancelable: true
+          }));
+
+          // 更新内容
+          currentVal += ch;
+          if (inputType === 'textarea') {
+            var ns = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+            if (ns) ns.call(input, currentVal);
+            else input.value = currentVal;
+          } else {
+            document.execCommand('insertText', false, ch);
+          }
+
+          // input
+          try {
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+          } catch(e) {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+
+          // keyup
+          input.dispatchEvent(new KeyboardEvent('keyup', {
+            key: ch, keyCode: keyCode, which: keyCode,
+            bubbles: true, cancelable: true
+          }));
+        }
+
+        // 最终事件
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: targetPrompt }));
+
+        // 验证
+        var actualLen = inputType === 'textarea' ? input.value.length : input.innerText.length;
+        var ok = actualLen >= targetPrompt.length * 0.8;
+
+        return { ok: ok, actualLen: actualLen, method: 'char-by-char' };
+      } catch(e) {
+        return { ok: false, error: e.message };
+      }
+    })();
+  `;
+
+  try {
+    const result = await safeExecuteJS<{ ok: boolean; actualLen: number; method: string }>(
+      webview, code, 15000, 'injectCharByChar'
+    );
+    if (result.ok) {
+      // 再次验证发送按钮
+      const btnReady = await checkSendButtonReady(webview);
+      return btnReady;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** 检查发送按钮是否可用（React 状态是否同步） */
+async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
+  const code = `
+    (function() {
+      try {
+        // 找发送按钮（和 submitPrompt 相同的优先级）
+        var btn = null;
+
+        // 策略A：aria-label
+        var ariaSelectors = [
+          'button[aria-label*="发送"]',
+          'button[aria-label*="Send"]',
+          'button[aria-label*="send"]',
+          'button[aria-label*="提交"]',
+        ];
+        for (var s = 0; s < ariaSelectors.length; s++) {
+          var b = document.querySelector(ariaSelectors[s]);
+          if (b && b.offsetParent !== null) { btn = b; break; }
+        }
+
+        // 策略B：textarea 附近最后一个 button
+        if (!btn) {
+          var textareas = document.querySelectorAll('textarea');
+          var foundTa = null;
+          for (var i = 0; i < textareas.length; i++) {
+            if (textareas[i].offsetParent !== null) { foundTa = textareas[i]; break; }
+          }
+          if (foundTa) {
+            var container = foundTa.parentElement;
+            for (var level = 0; level < 8 && container; level++) {
+              var buttons = container.querySelectorAll('button');
+              for (var bi = buttons.length - 1; bi >= 0; bi--) {
+                if (buttons[bi].offsetParent !== null) {
+                  btn = buttons[bi];
+                  break;
+                }
+              }
+              if (btn) break;
+              container = container.parentElement;
+            }
+          }
+        }
+
+        // 策略C：contenteditable 附近的圆形按钮（视频模式）
+        if (!btn) {
+          var editables = document.querySelectorAll('[contenteditable="true"]');
+          for (var ei = 0; ei < editables.length; ei++) {
+            var ed = editables[ei];
+            if (ed.offsetParent === null) continue;
+            // 找它的父容器中靠右靠下的可点击元素
+            var parent = ed.parentElement;
+            for (var lvl = 0; lvl < 6 && parent; lvl++) {
+              var allBtns = parent.querySelectorAll('button, [role="button"]');
+              for (var bj = 0; bj < allBtns.length; bj++) {
+                var el = allBtns[bj];
+                if (el.offsetParent === null) continue;
+                var rect = el.getBoundingClientRect();
+                var edRect = ed.getBoundingClientRect();
+                // 在输入框右下角区域
+                if (rect.left > edRect.right - 80 && rect.top > edRect.bottom - 60) {
+                  btn = el;
+                  break;
+                }
+              }
+              if (btn) break;
+              parent = parent.parentElement;
+            }
+            if (btn) break;
+          }
+        }
+
+        if (!btn) {
+          // 找不到按钮，无法验证，保守返回 true（避免误判）
+          console.log('[checkSendBtn] 未找到发送按钮，跳过验证');
+          return { ready: true, found: false };
+        }
+
+        // 检查按钮是否可用
+        var style = window.getComputedStyle(btn);
+        var isDisabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true' ||
+                        parseFloat(style.opacity) < 0.5 || style.pointerEvents === 'none';
+
+        console.log('[checkSendBtn] 按钮状态: disabled=' + isDisabled +
+          ', disabledAttr=' + btn.disabled +
+          ', ariaDisabled=' + btn.getAttribute('aria-disabled') +
+          ', opacity=' + style.opacity +
+                  ', tag=' + btn.tagName);
+
+        return { ready: !isDisabled, found: true, disabled: isDisabled, tag: btn.tagName };
+      } catch(e) {
+        return { ready: true, error: e.message };
+      }
+    })();
+  `;
+
+  try {
+    const result = await safeExecuteJS<{ ready: boolean; found: boolean; disabled?: boolean }>(
+      webview, code, 5000, 'checkSendButtonReady'
+    );
+    return result.ready;
+  } catch {
+    return true; // 验证失败时保守放行
+  }
 }
 
 /** 单次注入尝试 */
@@ -389,28 +650,40 @@ async function tryInjectOnce(
           input.dispatchEvent(new Event('input', { bubbles: true }));
         }
 
-        // 策略1：清空 + execCommand insertText（最兼容富文本编辑器）
+        // 策略1：聚焦 + 全选 + execCommand insertText（走编辑器原生流程，React 最容易捕获）
         try {
-          clearInput();
           input.focus();
-          // 把光标移到开头
-          var range = document.createRange();
-          range.selectNodeContents(input);
-          range.collapse(true);
-          var sel = window.getSelection();
-          sel.removeAllRanges();
-          sel.addRange(range);
+          // 全选原有内容（不清空 DOM，避免破坏 React 引用）
+          var range1 = document.createRange();
+          range1.selectNodeContents(input);
+          var sel1 = window.getSelection();
+          sel1.removeAllRanges();
+          sel1.addRange(range1);
 
           var ok1 = document.execCommand('insertText', false, promptText);
           if (ok1) {
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-            // 触发更完整的事件序列，确保 React 捕获
-            input.dispatchEvent(new Event('beforeinput', { bubbles: true, inputType: 'insertText', data: promptText }));
+            // 用 InputEvent 触发（带 data/inputType，React 合成事件更易捕获）
+            try {
+              input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: promptText }));
+            } catch(e) {}
+            try {
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText }));
+            } catch(e) {
+              // 降级用普通 Event
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+            // composition 序列（模拟中文输入完成，覆盖更多 React 富文本库）
             input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
             input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: promptText }));
             input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
-            setTimeout(function() { input.dispatchEvent(new Event('input', { bubbles: true })); }, 50);
-            setTimeout(function() { input.dispatchEvent(new Event('change', { bubbles: true })); }, 100);
+            setTimeout(function() {
+              try {
+                input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText }));
+              } catch(e) {
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+              }
+            }, 30);
+            setTimeout(function() { input.dispatchEvent(new Event('change', { bubbles: true })); }, 80);
             var v1 = verifyValue();
             if (v1.pass) {
               console.log('[doubaoBridge] execCommand 注入成功, len=' + v1.actualLen + ', preview=' + v1.preview);
@@ -474,17 +747,97 @@ async function tryInjectOnce(
           }
         }
 
-        // 策略4：直接设置 textContent（contenteditable 兜底）
+        // 策略4：直接设置 textContent + 完整事件序列（contenteditable 兜底）
         if (best.type === 'contenteditable') {
           input.innerHTML = '';
           input.textContent = promptText;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
+          // 模拟完整输入事件序列
+          try { input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: promptText })); } catch(e) {}
+          try { input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: promptText })); } catch(e) { input.dispatchEvent(new Event('input', { bubbles: true })); }
+          input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+          input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: promptText }));
+          input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
           input.dispatchEvent(new Event('change', { bubbles: true }));
           input.focus();
           var v4 = verifyValue();
           if (v4.pass) {
             return { ok: true, tag: input.tagName, method: 'textContent', actualLen: v4.actualLen, preview: v4.preview };
           }
+        }
+
+        // 策略5：逐字符模拟真实键盘输入（最慢但最可靠，确保 React 100% 捕获）
+        try {
+          // 先清空
+          if (best.type === 'textarea') {
+            input.value = '';
+          } else {
+            // 全选后删除
+            input.focus();
+            var selRange = document.createRange();
+            selRange.selectNodeContents(input);
+            var curSel = window.getSelection();
+            curSel.removeAllRanges();
+            curSel.addRange(selRange);
+            document.execCommand('delete', false, null);
+          }
+
+          var chars = promptText.split('');
+          var currentVal = '';
+          for (var ci = 0; ci < chars.length; ci++) {
+            var ch = chars[ci];
+            var keyCode = ch.charCodeAt(0);
+
+            // keydown
+            input.dispatchEvent(new KeyboardEvent('keydown', {
+              key: ch, code: 'Key' + ch.toUpperCase(), keyCode: keyCode, which: keyCode,
+              bubbles: true, cancelable: true
+            }));
+
+            // keypress
+            input.dispatchEvent(new KeyboardEvent('keypress', {
+              key: ch, code: 'Key' + ch.toUpperCase(), keyCode: keyCode, which: keyCode,
+              bubbles: true, cancelable: true
+            }));
+
+            // 更新值
+            currentVal += ch;
+            if (best.type === 'textarea') {
+              var nativeSetter5 = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+              if (nativeSetter5) {
+                nativeSetter5.call(input, currentVal);
+              } else {
+                input.value = currentVal;
+              }
+            } else {
+              // contenteditable: 在光标处插入字符
+              document.execCommand('insertText', false, ch);
+            }
+
+            // input 事件
+            try {
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+            } catch(e) {
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+
+            // keyup
+            input.dispatchEvent(new KeyboardEvent('keyup', {
+              key: ch, code: 'Key' + ch.toUpperCase(), keyCode: keyCode, which: keyCode,
+              bubbles: true, cancelable: true
+            }));
+          }
+
+          // 输入完成后触发 change
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
+
+          var v5 = verifyValue();
+          if (v5.pass) {
+            console.log('[doubaoBridge] 逐字输入成功, len=' + v5.actualLen);
+            return { ok: true, tag: input.tagName, method: 'type-char-by-char', actualLen: v5.actualLen, preview: v5.preview };
+          }
+        } catch(e) {
+          console.log('[doubaoBridge] 逐字输入异常:', e.message);
         }
 
         // 全部失败
@@ -659,6 +1012,16 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
         }
 
         console.log('[doubaoBridge] 找到发送按钮 tag=' + sendBtn.tagName + ' class=' + (sendBtn.className || '').substring(0, 60));
+
+        // 先检测按钮是否可用（disabled/aria-disabled/低透明度 都算不可用）
+        var btnStyle = window.getComputedStyle(sendBtn);
+        var isDisabled = sendBtn.disabled || sendBtn.getAttribute('aria-disabled') === 'true' ||
+                        parseFloat(btnStyle.opacity) < 0.5 || btnStyle.pointerEvents === 'none';
+        if (isDisabled) {
+          console.log('[doubaoBridge] 发送按钮处于禁用状态，点击无效');
+          return { ok: false, error: '发送按钮被禁用，提示词可能未被 React 捕获' };
+        }
+
         sendBtn.click();
         return { ok: true, method: 'click' };
       } catch (e) {
