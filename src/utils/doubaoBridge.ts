@@ -371,17 +371,49 @@ async function tryInjectOnce(
           return { pass: ratio >= 0.5, actual: val, ratio: ratio, actualLen: actualLen, preview: val.substring(0, 50) };
         }
 
-        // 策略1：聚焦 + execCommand insertText（最兼容富文本编辑器）
+        // 清空输入框（移除 placeholder 等 contenteditable=false 的元素）
+        function clearInput() {
+          if (best.type === 'textarea') {
+            input.value = '';
+          } else {
+            // 移除所有子节点，彻底清掉 placeholder 等元素
+            while (input.firstChild) {
+              input.removeChild(input.firstChild);
+            }
+            // 确保至少有一个空行（contenteditable 常规要求）
+            var emptyP = document.createElement('p');
+            var emptyBr = document.createElement('br');
+            emptyP.appendChild(emptyBr);
+            input.appendChild(emptyP);
+          }
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // 策略1：清空 + execCommand insertText（最兼容富文本编辑器）
         try {
+          clearInput();
           input.focus();
-          document.execCommand('selectAll', false, null);
+          // 把光标移到开头
+          var range = document.createRange();
+          range.selectNodeContents(input);
+          range.collapse(true);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+
           var ok1 = document.execCommand('insertText', false, promptText);
           if (ok1) {
             input.dispatchEvent(new Event('input', { bubbles: true }));
+            // 触发更完整的事件序列，确保 React 捕获
+            input.dispatchEvent(new Event('beforeinput', { bubbles: true, inputType: 'insertText', data: promptText }));
+            input.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+            input.dispatchEvent(new CompositionEvent('compositionupdate', { bubbles: true, data: promptText }));
+            input.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: promptText }));
+            setTimeout(function() { input.dispatchEvent(new Event('input', { bubbles: true })); }, 50);
+            setTimeout(function() { input.dispatchEvent(new Event('change', { bubbles: true })); }, 100);
             var v1 = verifyValue();
             if (v1.pass) {
-              console.log('[doubaoBridge] execCommand 注入成功, len=' + v1.actualLen);
-              setTimeout(function() { input.dispatchEvent(new Event('input', { bubbles: true })); }, 100);
+              console.log('[doubaoBridge] execCommand 注入成功, len=' + v1.actualLen + ', preview=' + v1.preview);
               return { ok: true, tag: input.tagName, method: 'execCommand', actualLen: v1.actualLen, preview: v1.preview };
             }
             console.log('[doubaoBridge] execCommand 验证失败, ratio=' + v1.ratio.toFixed(2));
