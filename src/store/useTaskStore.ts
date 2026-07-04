@@ -42,6 +42,7 @@ interface TaskState {
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   deleteTask: (taskId: string) => Promise<boolean>;
+  retryTask: (taskId: string) => Promise<boolean>;
   batchPause: () => Promise<boolean>;
   getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
   clearError: () => void;
@@ -160,6 +161,36 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         return true;
       } else {
         set({ error: result.error || '删除失败' });
+        return false;
+      }
+    } catch (err: any) {
+      set({ error: err.message });
+      return false;
+    }
+  },
+
+  retryTask: async (taskId: string) => {
+    set({ error: null });
+    try {
+      const result = await window.electronAPI.tasks.retry(taskId);
+      if (result.success && result.task) {
+        const tasks = get().tasks.map((t) =>
+          t.id === taskId ? { ...result.task! } : t
+        );
+        set({ tasks });
+
+        // 如果已指派账号且账号空闲，自动启动
+        const task = result.task;
+        if (task.assignedAccountId && !get().accountBusy[task.assignedAccountId]) {
+          setTimeout(() => get().startAutomation(taskId), 100);
+        } else if (task.assignedAccountId) {
+          // 账号忙，触发队列调度
+          setTimeout(() => get().processQueue(), 100);
+        }
+
+        return true;
+      } else {
+        set({ error: result.error || '重试失败' });
         return false;
       }
     } catch (err: any) {

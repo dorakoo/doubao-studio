@@ -179,6 +179,29 @@ export function registerTaskIPC(): void {
     }
   );
 
+  // ---- 重试任务（失败/已完成任务重置为排队状态） ----
+  ipcMain.handle(
+    'tasks:retry',
+    async (_event, params: { taskId: string }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((t) => t.id === params.taskId);
+      if (!task) {
+        return { success: false, error: '任务不存在' };
+      }
+      if (task.status === 'executing' || task.status === 'generating') {
+        return { success: false, error: '任务正在执行中，无法重试' };
+      }
+
+      task.status = 'queued';
+      task.result = null;
+      task.outputs = [];
+      task.updatedAt = new Date().toISOString();
+      saveTasks(tasks);
+
+      return { success: true, task };
+    }
+  );
+
   // ---- 批量暂停/继续 ----
   ipcMain.handle(
     'tasks:batchPause',

@@ -78,6 +78,7 @@ export interface ElectronAPI {
       outputs?: string[]
     ) => Promise<{ success: boolean; error?: string }>;
     delete: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+    retry: (taskId: string) => Promise<{ success: boolean; task?: Task; error?: string }>;
     batchPause: () => Promise<{ success: boolean }>;
     getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
     selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;

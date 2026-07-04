@@ -71,6 +71,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs }),
     delete: (taskId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:delete', { taskId }),
+    retry: (taskId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:retry', { taskId }),
     batchPause: (): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('tasks:batchPause'),
     getCompletedOutputs: (): Promise<{ taskId: string; prompt: string; outputs: string[] }[]> =>

@@ -25,9 +25,13 @@ import {
   SyncOutlined,
   PictureOutlined,
   AudioOutlined,
+  EyeOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
+import TaskDetailModal from './TaskDetailModal';
+import type { Task } from '../types';
 import {
   TASK_STATUS_CONFIG,
   GENERATION_MODE_CONFIG,
@@ -101,6 +105,8 @@ const TaskConsole: React.FC = () => {
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachmentBase64s, setAttachmentBase64s] = useState<Record<string, string>>({});
   const [audioAttachment, setAudioAttachment] = useState<string>('');
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
   // ---- 添加任务 ----
 
@@ -163,15 +169,38 @@ const TaskConsole: React.FC = () => {
 
   // ---- 右键菜单 ----
 
-  const getContextMenu = (taskId: string): MenuProps['items'] => [
-    {
-      key: 'delete',
-      label: '删除任务',
-      icon: <DeleteOutlined />,
-      danger: true,
-      onClick: () => deleteTask(taskId),
-    },
-  ];
+  const getContextMenu = (taskId: string): MenuProps['items'] => {
+    const task = tasks.find((t) => t.id === taskId);
+    const canRetry = task && (task.status === 'fail' || task.status === 'done');
+
+    return [
+      {
+        key: 'detail',
+        label: '查看详情',
+        icon: <EyeOutlined />,
+        onClick: () => {
+          setSelectedTask(task || null);
+          setDetailModalOpen(true);
+        },
+      },
+      ...(canRetry ? [
+        {
+          key: 'retry',
+          label: '重新执行',
+          icon: <ReloadOutlined />,
+          onClick: () => useTaskStore.getState().retryTask(taskId),
+        },
+      ] : []),
+      { type: 'divider' as const },
+      {
+        key: 'delete',
+        label: '删除任务',
+        icon: <DeleteOutlined />,
+        danger: true,
+        onClick: () => deleteTask(taskId),
+      },
+    ];
+  };
 
   // ---- 渲染模式标签 ----
 
@@ -210,6 +239,13 @@ const TaskConsole: React.FC = () => {
     );
   };
 
+  // ---- 打开任务详情 ----
+
+  const openTaskDetail = (task: Task) => {
+    setSelectedTask(task);
+    setDetailModalOpen(true);
+  };
+
   // ---- 渲染任务项 ----
 
   const renderTaskItem = (task: (typeof tasks)[0]) => {
@@ -222,12 +258,8 @@ const TaskConsole: React.FC = () => {
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
         <div
           className={`task-item ${isActive ? 'task-item-active' : ''}`}
-          style={{ cursor: task.assignedAccountId ? 'pointer' : 'default' }}
-          onClick={() => {
-            if (task.assignedAccountId) {
-              selectAccount(task.assignedAccountId);
-            }
-          }}
+          style={{ cursor: 'pointer' }}
+          onClick={() => openTaskDetail(task)}
         >
           <div className="task-item-top">
             {renderStatusTag(task.status)}
@@ -654,6 +686,16 @@ const TaskConsole: React.FC = () => {
           }}
         />
       </Modal>
+
+      {/* 任务详情弹窗 */}
+      <TaskDetailModal
+        open={detailModalOpen}
+        task={selectedTask}
+        onClose={() => {
+          setDetailModalOpen(false);
+          setSelectedTask(null);
+        }}
+      />
     </div>
   );
 };
