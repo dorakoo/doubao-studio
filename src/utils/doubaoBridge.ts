@@ -651,6 +651,98 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
   }
 }
 
+/**
+ * 视频模式：点击「生成视频」按钮（素材图区域的，不是顶部Tab）
+ * 视频模式下必须点这个按钮才会用完整提示词生成，点普通发送按钮会走聊天流程导致提示词被曲解
+ */
+export async function submitVideoGeneration(webview: WebviewHandle): Promise<boolean> {
+  const code = `
+    (function() {
+      try {
+        var viewportH = window.innerHeight;
+        var targetBtn = null;
+        var candidates = [];
+
+        // 找所有可点击元素中包含"生成视频"文字的
+        var clickables = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"], span[class*="btn"]');
+        for (var i = 0; i < clickables.length; i++) {
+          var el = clickables[i];
+          var text = (el.textContent || '').trim();
+          if (text.indexOf('生成视频') < 0) continue;
+          if (el.disabled) continue;
+          var rect = el.getBoundingClientRect();
+          if (rect.width < 20 || rect.height < 20) continue;
+          if (rect.top < 0 || rect.top > viewportH) continue;
+          
+          // 排除顶部 Tab 区域（top < 150 的大概率是Tab）
+          if (rect.top < 150) continue;
+          
+          // 排除非常小的文字标签（不是按钮）
+          if (rect.width < 50 && rect.height < 30) continue;
+          
+          var score = 0;
+          // 位置在页面中部（素材图区域）的优先
+          if (rect.top > viewportH * 0.2 && rect.top < viewportH * 0.8) score += 100;
+          // 越靠下越可能是生成按钮（在素材图下方）
+          if (rect.top > viewportH * 0.4) score += 50;
+          // 按钮有一定宽度
+          if (rect.width > 80) score += 30;
+          // 是 button 元素加分
+          if (el.tagName === 'BUTTON') score += 20;
+          
+          candidates.push({ el: el, score: score, text: text, top: rect.top, w: rect.width, h: rect.height });
+        }
+
+        if (candidates.length === 0) {
+          // 兜底：再找一遍，放宽条件（只要有"生成"且在素材图区域）
+          var allClickables = document.querySelectorAll('button, [role="button"], div[onclick], span[onclick]');
+          for (var j = 0; j < allClickables.length; j++) {
+            var el2 = allClickables[j];
+            var text2 = (el2.textContent || '').trim();
+            if (text2 !== '生成视频' && text2 !== '生成') continue;
+            if (el2.disabled) continue;
+            var rect2 = el2.getBoundingClientRect();
+            if (rect2.width < 30 || rect2.height < 20) continue;
+            if (rect2.top < viewportH * 0.3 || rect2.top > viewportH * 0.9) continue;
+            targetBtn = el2;
+            break;
+          }
+        } else {
+          // 按分数排序，取最高的
+          candidates.sort(function(a, b) { return b.score - a.score; });
+          targetBtn = candidates[0].el;
+          console.log('[doubaoBridge] 视频生成按钮候选: ' + candidates.slice(0, 3).map(function(c) { return c.text + '(top=' + Math.round(c.top) + ',w=' + Math.round(c.w) + ',score=' + c.score + ')'; }).join('; '));
+        }
+
+        if (targetBtn) {
+          targetBtn.click();
+          return { ok: true, method: 'click-video-generate', text: (targetBtn.textContent || '').trim() };
+        }
+        
+        return { ok: false, error: '未找到视频生成按钮，候选数=' + candidates.length };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    })()
+  `;
+
+  try {
+    const result = await safeExecuteJS<{ ok: boolean; method?: string; text?: string; error?: string }>(
+      webview, code, 10000, 'submitVideoGeneration'
+    );
+    if (!result.ok) {
+      console.warn('[doubaoBridge] submitVideoGeneration 失败:', result.error, '，回退到普通 submitPrompt');
+      // 回退到普通发送
+      return false;
+    }
+    console.log('[doubaoBridge] submitVideoGeneration 成功, 按钮文本:', result.text);
+    return true;
+  } catch (err: any) {
+    console.error('[doubaoBridge] submitVideoGeneration 异常:', err.message);
+    return false;
+  }
+}
+
 // ==================== 生成状态网络监控（后台 webview 可用） ====================
 
 /**

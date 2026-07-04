@@ -16,6 +16,7 @@ import type { AutomationState } from '../store/useTaskStore';
 import {
   injectPrompt,
   submitPrompt,
+  submitVideoGeneration,
   checkGenerating,
   checkGeneratingDetailed,
   getResultUrl,
@@ -313,10 +314,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await sleep(800);
 
       setAccountAutomationState(accountId, 'submitting', '正在发送...');
-      const submitted = await Promise.race([
-        submitPrompt(webview),
-        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
-      ]);
+      let submitted = false;
+      // 视频模式：优先点「生成视频」按钮（素材图区域的），失败再回退普通发送
+      if (mode === 'video') {
+        try {
+          submitted = await Promise.race([
+            submitVideoGeneration(webview),
+            new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('视频生成按钮提交超时')), 10000)),
+          ]);
+        } catch (e) {
+          console.warn(`[Automation:${accountId}] submitVideoGeneration 失败，回退到普通发送:`, e);
+        }
+      }
+      if (!submitted) {
+        submitted = await Promise.race([
+          submitPrompt(webview),
+          new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
+        ]);
+      }
       if (!submitted) throw new Error('提交失败');
 
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...');
