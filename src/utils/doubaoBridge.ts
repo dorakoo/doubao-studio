@@ -351,8 +351,9 @@ async function tryInjectOnce(
         candidates.sort(function(a, b) { return b.score - a.score; });
         var best = candidates[0];
         var input = best.el;
+        var inputRect = input.getBoundingClientRect();
 
-        console.log('[doubaoBridge] 找到最佳输入框 type=' + best.type + ' size=' + Math.round(best.rect.width) + 'x' + Math.round(best.rect.height) + ' pos=' + Math.round(best.rect.left) + ',' + Math.round(best.rect.top) + ' 候选数=' + candidates.length);
+        console.log('[doubaoBridge] 找到最佳输入框 type=' + best.type + ' size=' + Math.round(inputRect.width) + 'x' + Math.round(inputRect.height) + ' pos=' + Math.round(inputRect.left) + ',' + Math.round(inputRect.top) + ' 候选数=' + candidates.length);
 
         // ========== 注入提示词 ==========
         var promptText = ${safePrompt};
