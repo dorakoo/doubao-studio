@@ -97,39 +97,128 @@ async function tryInjectOnce(
         var viewportH = window.innerHeight;
         var viewportW = window.innerWidth;
 
-        // ========== 找到最佳输入元素（按面积+位置打分） ==========
+        // ========== 找到最佳输入元素（发送按钮反向定位优先，面积打分兜底） ==========
         var candidates = [];
+        var foundByButton = null;
 
-        // 收集所有 textarea
-        var textareas = document.querySelectorAll('textarea');
-        for (var i = 0; i < textareas.length; i++) {
-          var ta = textareas[i];
-          if (ta.disabled) continue;
-          var rect = ta.getBoundingClientRect();
-          if (rect.width < 30 || rect.height < 20) continue;
-          if (rect.top < 0 || rect.left < 0) continue;
-          var area = rect.width * rect.height;
-          var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0; // 偏下半部分加分
-          var widthScore = rect.width > viewportW * 0.5 ? 1 : 0; // 宽度加分
-          var score = area + bottomScore * 100000 + widthScore * 50000;
-          candidates.push({ el: ta, type: 'textarea', rect: rect, score: score, area: area });
+        // ---- 策略A：通过发送/生成按钮反向查找输入框（最准） ----
+        var buttonKeywords = ['发送', '生成', 'send', 'Send', 'SEND', '发送消息', '生成图片', '生成视频'];
+        var allButtons = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"], span[class*="btn"]');
+        
+        for (var bi = 0; bi < allButtons.length; bi++) {
+          var btn = allButtons[bi];
+          var btnRect = btn.getBoundingClientRect();
+          // 按钮必须在视口内且有一定大小
+          if (btnRect.width < 20 || btnRect.height < 20) continue;
+          if (btnRect.top < 0 || btnRect.top > viewportH) continue;
+          if (btn.disabled) continue;
+          
+          var btnText = (btn.textContent || '').trim();
+          var btnAriaLabel = btn.getAttribute ? (btn.getAttribute('aria-label') || '') : '';
+          var btnTitle = btn.getAttribute ? (btn.getAttribute('title') || '') : '';
+          var combinedText = btnText + ' ' + btnAriaLabel + ' ' + btnTitle;
+          
+          var isSendButton = false;
+          for (var ki = 0; ki < buttonKeywords.length; ki++) {
+            if (combinedText.indexOf(buttonKeywords[ki]) >= 0 && btnText.length < 10) {
+              isSendButton = true;
+              break;
+            }
+          }
+          
+          // 也检查按钮内的 SVG（有些按钮只有图标）
+          if (!isSendButton) {
+            var svgEl = btn.querySelector('svg');
+            if (svgEl && btnRect.top > viewportH * 0.5) {
+              // 下半区的图标按钮很可能是发送按钮
+              isSendButton = true;
+            }
+          }
+          
+          if (isSendButton) {
+            // 在按钮的父容器链中往上找，找最近的包含输入框的容器
+            var parent = btn.parentElement;
+            for (var depth = 0; depth < 8 && parent; depth++) {
+              var textareasInContainer = parent.querySelectorAll('textarea');
+              var editablesInContainer = parent.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+              
+              var foundEl = null;
+              var foundType = null;
+              
+              // 优先找 textarea
+              for (var ti = 0; ti < textareasInContainer.length; ti++) {
+                var ta = textareasInContainer[ti];
+                if (ta.disabled) continue;
+                var taRect = ta.getBoundingClientRect();
+                if (taRect.width > 50 && taRect.height > 20) {
+                  foundEl = ta;
+                  foundType = 'textarea';
+                  break;
+                }
+              }
+              
+              // 再找 contenteditable
+              if (!foundEl) {
+                for (var ei = 0; ei < editablesInContainer.length; ei++) {
+                  var ed = editablesInContainer[ei];
+                  var edRect = ed.getBoundingClientRect();
+                  if (edRect.width > 50 && edRect.height > 20) {
+                    foundEl = ed;
+                    foundType = 'contenteditable';
+                    break;
+                  }
+                }
+              }
+              
+              if (foundEl) {
+                foundByButton = { el: foundEl, type: foundType, btnText: btnText || btnAriaLabel };
+                break;
+              }
+              
+              parent = parent.parentElement;
+            }
+            
+            if (foundByButton) break;
+          }
         }
 
-        // 收集所有 contenteditable 元素
-        var editables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
-        for (var j = 0; j < editables.length; j++) {
-          var ed = editables[j];
-          var rect2 = ed.getBoundingClientRect();
-          if (rect2.width < 30 || rect2.height < 20) continue;
-          if (rect2.top < 0 || rect2.left < 0) continue;
-          if (rect2.top > viewportH) continue;
-          var area2 = rect2.width * rect2.height;
-          var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
-          var widthScore2 = rect2.width > viewportW * 0.5 ? 1 : 0;
-          // 排除非常小的可编辑元素（如标签输入框）
-          if (area2 < 2000 && rect2.height < 40) continue;
-          var score2 = area2 + bottomScore2 * 100000 + widthScore2 * 50000;
-          candidates.push({ el: ed, type: 'contenteditable', rect: rect2, score: score2, area: area2 });
+        if (foundByButton) {
+          console.log('[doubaoBridge] 通过发送按钮定位输入框 type=' + foundByButton.type + ' 按钮文本=' + foundByButton.btnText);
+          candidates.push({ el: foundByButton.el, type: foundByButton.type, score: Infinity, area: 999999 });
+        }
+
+        // ---- 策略B：面积打分（兜底） ----
+        if (candidates.length === 0) {
+          // 收集所有 textarea
+          var textareas = document.querySelectorAll('textarea');
+          for (var i = 0; i < textareas.length; i++) {
+            var ta = textareas[i];
+            if (ta.disabled) continue;
+            var rect = ta.getBoundingClientRect();
+            if (rect.width < 30 || rect.height < 20) continue;
+            if (rect.top < 0 || rect.left < 0) continue;
+            var area = rect.width * rect.height;
+            var bottomScore = rect.top > viewportH * 0.4 ? 1 : 0;
+            var widthScore = rect.width > viewportW * 0.5 ? 1 : 0;
+            var score = area + bottomScore * 100000 + widthScore * 50000;
+            candidates.push({ el: ta, type: 'textarea', rect: rect, score: score, area: area });
+          }
+
+          // 收集所有 contenteditable 元素
+          var editables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var j = 0; j < editables.length; j++) {
+            var ed = editables[j];
+            var rect2 = ed.getBoundingClientRect();
+            if (rect2.width < 30 || rect2.height < 20) continue;
+            if (rect2.top < 0 || rect2.left < 0) continue;
+            if (rect2.top > viewportH) continue;
+            var area2 = rect2.width * rect2.height;
+            var bottomScore2 = rect2.top > viewportH * 0.4 ? 1 : 0;
+            var widthScore2 = rect2.width > viewportW * 0.5 ? 1 : 0;
+            if (area2 < 2000 && rect2.height < 40) continue;
+            var score2 = area2 + bottomScore2 * 100000 + widthScore2 * 50000;
+            candidates.push({ el: ed, type: 'contenteditable', rect: rect2, score: score2, area: area2 });
+          }
         }
 
         if (candidates.length === 0) {
