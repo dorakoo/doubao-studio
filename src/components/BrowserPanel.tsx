@@ -26,6 +26,7 @@ import {
   clickAITab,
   configureVideoOptions,
   uploadReferenceImages,
+  uploadReferenceAudio,
   inject15sVideoPatch,
   injectGenerationMonitor,
   getCachedVideoUrl,
@@ -206,7 +207,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (!task) return;
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
       runningRef.current.add(accountId);
-      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview, task.videoConfig, task.attachments);
+      executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview, task.videoConfig, task.attachments, task.audioAttachment);
     });
   }, [accountBusy, executingTasks]);
 
@@ -218,7 +219,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     mode: string,
     webview: HTMLWebViewElement,
     videoConfig?: Task['videoConfig'],
-    attachments?: string[]
+    attachments?: string[],
+    audioAttachment?: string
   ) => {
     const { setAccountAutomationState, completeAutomation, failAutomation } =
       useTaskStore.getState();
@@ -275,6 +277,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             await uploadReferenceImages(webview, fileDataList);
           }
           await sleep(1000);
+        }
+
+        // 有参考音频时上传（仅视频模式）
+        if (mode === 'video' && audioAttachment) {
+          setAccountAutomationState(accountId, 'injecting', '上传参考音频...');
+          try {
+            const result = await window.electronAPI.tasks.readFileAsBase64(audioAttachment);
+            if (result.success && result.data) {
+              const fileName = audioAttachment.split(/[/\\]/).pop() || 'audio.mp3';
+              const mimeMatch = result.data.match(/^data:(audio\/[\w.+-]+);base64,/);
+              const mime = mimeMatch ? mimeMatch[1] : 'audio/mpeg';
+              const base64 = result.data.replace(/^data:audio\/[\w.+-]+;base64,/, '');
+              await uploadReferenceAudio(webview, { name: fileName, base64, mime });
+              await sleep(800);
+            }
+          } catch (e: any) {
+            console.warn(`[BrowserPanel] 上传音频失败:`, e.message);
+          }
         }
       } else {
         await navigateToChat(webview);

@@ -82,6 +82,7 @@ export function registerTaskIPC(): void {
       mode?: GenerationMode;
       videoConfig?: Task['videoConfig'];
       attachments?: string[];
+      audioAttachment?: string;
     }): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
       try {
         if (!params.prompts || params.prompts.length === 0) {
@@ -100,6 +101,7 @@ export function registerTaskIPC(): void {
             mode,
             videoConfig: params.videoConfig,
             attachments: params.attachments,
+            audioAttachment: params.audioAttachment,
             result: null,
             outputs: [],
             createdAt: new Date().toISOString(),
@@ -230,6 +232,28 @@ export function registerTaskIPC(): void {
     }
   );
 
+  // ---- 选择参考音频（文件对话框） ----
+  ipcMain.handle(
+    'tasks:selectAudio',
+    async (): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+      try {
+        const result = await dialog.showOpenDialog({
+          properties: ['openFile'],
+          filters: [
+            { name: '音频文件', extensions: ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'] },
+          ],
+          title: '选择参考音频',
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+          return { success: true };
+        }
+        return { success: true, filePath: result.filePaths[0] };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+
   console.log('[IPC] 任务调度模块已注册');
 }
 
@@ -249,6 +273,12 @@ export function registerTaskIPC(): void {
           jpeg: 'image/jpeg',
           webp: 'image/webp',
           bmp: 'image/bmp',
+          mp3: 'audio/mpeg',
+          wav: 'audio/wav',
+          m4a: 'audio/mp4',
+          aac: 'audio/aac',
+          flac: 'audio/flac',
+          ogg: 'audio/ogg',
         };
         const mime = mimeTypes[ext || ''] || 'image/jpeg';
         return { success: true, data: `data:${mime};base64,${base64}` };

@@ -1347,6 +1347,135 @@ export async function uploadReferenceImages(
   return result?.ok || false;
 }
 
+/**
+ * 上传参考音频文件（视频生成配音用）
+ * 策略：先尝试找音频专属上传入口，找不到则尝试通用文件上传
+ */
+export async function uploadReferenceAudio(
+  webview: WebviewHandle,
+  fileData: { name: string; base64: string; mime: string }
+): Promise<boolean> {
+  console.log(`[doubaoBridge] 上传参考音频: ${fileData.name}`);
+
+  const fileJson = JSON.stringify(fileData);
+  const injectCode = `
+    (function() {
+      try {
+        var fd = ${fileJson};
+        
+        // 策略1：找 accept 包含 audio 的 file input
+        var audioInputs = document.querySelectorAll('input[type="file"]');
+        var targetInput = null;
+        
+        for (var i = 0; i < audioInputs.length; i++) {
+          var inp = audioInputs[i];
+          var accept = (inp.accept || '').toLowerCase();
+          if (accept.indexOf('audio') >= 0 || accept.indexOf('mp3') >= 0 || accept.indexOf('wav') >= 0) {
+            targetInput = inp;
+            break;
+          }
+        }
+        
+        // 策略2：找"音频"/"配音"/"音乐"/"BGM"相关按钮附近的 file input
+        if (!targetInput) {
+          var keywords = ['音频', '配音', '音乐', 'BGM', 'bgm', '语音', 'sound', 'audio', 'voice', 'music'];
+          var allButtons = document.querySelectorAll('button, [role="button"], div[class*="btn"], div[class*="button"]');
+          
+          for (var i = 0; i < allButtons.length; i++) {
+            var btn = allButtons[i];
+            var text = (btn.textContent || '').trim();
+            var matched = false;
+            for (var k = 0; k < keywords.length; k++) {
+              if (text.indexOf(keywords[k]) >= 0 && text.length < 20) {
+                matched = true;
+                break;
+              }
+            }
+            if (matched) {
+              // 在按钮附近找 file input
+              var parent = btn.parentElement;
+              for (var d = 0; d < 5 && parent; d++) {
+                var nearbyInputs = parent.querySelectorAll('input[type="file"]');
+                if (nearbyInputs.length > 0) {
+                  targetInput = nearbyInputs[0];
+                  break;
+                }
+                parent = parent.parentElement;
+              }
+              if (targetInput) break;
+            }
+          }
+        }
+        
+        // 策略3：点击"添加音频"类按钮触发后再找 input（有些是动态出现的）
+        if (!targetInput) {
+          var clickKeywords = ['添加音频', '上传音频', '选择音频', '添加配音', '上传配音', '选择配音', '添加音乐', '上传音乐', '选择BGM', '添加BGM'];
+          var allElements = document.querySelectorAll('button, span, div, a');
+          for (var i = 0; i < allElements.length; i++) {
+            var el = allElements[i];
+            var text = (el.textContent || '').trim();
+            for (var k = 0; k < clickKeywords.length; k++) {
+              if (text === clickKeywords[k] || text.indexOf(clickKeywords[k]) >= 0 && text.length < 15) {
+                try {
+                  el.click();
+                } catch(e) {}
+                // 等待一下再搜索
+                break;
+              }
+            }
+          }
+          // 重新搜索 audio input
+          var allInputs2 = document.querySelectorAll('input[type="file"]');
+          for (var i = 0; i < allInputs2.length; i++) {
+            var inp2 = allInputs2[i];
+            var accept2 = (inp2.accept || '').toLowerCase();
+            if (accept2.indexOf('audio') >= 0 || accept2.indexOf('mp3') >= 0) {
+              targetInput = inp2;
+              break;
+            }
+          }
+        }
+        
+        if (!targetInput) {
+          return { ok: false, error: '未找到音频上传入口' };
+        }
+        
+        // 构造 File 并注入
+        var binary = atob(fd.base64);
+        var bytes = new Uint8Array(binary.length);
+        for (var j = 0; j < binary.length; j++) {
+          bytes[j] = binary.charCodeAt(j);
+        }
+        var file = new File([bytes], fd.name, { type: fd.mime });
+        
+        var dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        targetInput.files = dataTransfer.files;
+        targetInput.dispatchEvent(new Event('change', { bubbles: true }));
+        
+        return { ok: true, method: targetInput.accept || 'default' };
+      } catch (e) {
+        return { ok: false, error: e.message };
+      }
+    })()
+  `;
+
+  const result = await safeExecuteJS<{ ok: boolean; method?: string; error?: string }>(
+    webview,
+    injectCode,
+    8000,
+    'injectAudio'
+  );
+
+  if (result?.ok) {
+    console.log(`[doubaoBridge] 音频上传成功, 方法: ${result.method}`);
+  } else {
+    console.warn('[doubaoBridge] 音频上传失败:', result?.error);
+  }
+
+  return result?.ok || false;
+}
+
 // ==================== 15秒 Seedance 2.0 视频生成注入 ====================
 
 /**

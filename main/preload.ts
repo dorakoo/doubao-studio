@@ -58,8 +58,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---- 任务调度 ----
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
-    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[]): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
-      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments }),
+    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
+      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment }),
     assign: (taskId: string, accountId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:assign', { taskId, accountId }),
     updateStatus: (
@@ -77,6 +77,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:getCompletedOutputs'),
     selectImages: (): Promise<{ success: boolean; filePaths?: string[]; error?: string }> =>
       ipcRenderer.invoke('tasks:selectImages'),
+    selectAudio: (): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke('tasks:selectAudio'),
     readFileAsBase64: (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:readFileAsBase64', filePath),
     downloadOutputs: (

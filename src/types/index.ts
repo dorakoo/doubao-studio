@@ -109,6 +109,8 @@ export interface Task {
   };
   /** 参考图片路径列表（图生视频/图生图用） */
   attachments?: string[];
+  /** 参考音频文件路径（视频生成配音用） */
+  audioAttachment?: string;
   result: string | null;
   outputs: string[];
   createdAt: string;

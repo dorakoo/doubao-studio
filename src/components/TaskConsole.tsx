@@ -24,6 +24,7 @@ import {
   ThunderboltOutlined,
   SyncOutlined,
   PictureOutlined,
+  AudioOutlined,
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
@@ -99,21 +100,24 @@ const TaskConsole: React.FC = () => {
   const [videoConfig, setVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachmentBase64s, setAttachmentBase64s] = useState<Record<string, string>>({});
+  const [audioAttachment, setAudioAttachment] = useState<string>('');
 
   // ---- 添加任务 ----
 
   const handleAddTasks = useCallback(async () => {
     const vc = selectedMode === 'video' ? videoConfig : undefined;
     const att = (selectedMode === 'video' || selectedMode === 'image') && attachments.length > 0 ? attachments : undefined;
-    const ok = await addTasks(inputText, selectedMode, vc, att);
+    const audioAtt = selectedMode === 'video' && audioAttachment ? audioAttachment : undefined;
+    const ok = await addTasks(inputText, selectedMode, vc, att, audioAtt);
     if (ok) {
       setInputText('');
       setAddModalOpen(false);
       setSelectedMode('chat');
       setVideoConfig({ ...DEFAULT_VIDEO_CONFIG });
       setAttachments([]);
+      setAudioAttachment('');
     }
-  }, [inputText, selectedMode, videoConfig, attachments, addTasks]);
+  }, [inputText, selectedMode, videoConfig, attachments, audioAttachment, addTasks]);
 
   // ---- 选择参考图片 ----
   const handleSelectImages = useCallback(async () => {
@@ -127,6 +131,14 @@ const TaskConsole: React.FC = () => {
           setAttachmentBase64s((prev) => ({ ...prev, [filePath]: base64Result.data! }));
         }
       }
+    }
+  }, []);
+
+  // ---- 选择参考音频 ----
+  const handleSelectAudio = useCallback(async () => {
+    const result = await window.electronAPI.tasks.selectAudio();
+    if (result.success && result.filePath) {
+      setAudioAttachment(result.filePath);
     }
   }, []);
 
@@ -530,6 +542,85 @@ const TaskConsole: React.FC = () => {
                 <PictureOutlined style={{ fontSize: 20 }} />
                 添加
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* 参考音频上传（仅视频模式） */}
+        {selectedMode === 'video' && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>
+              参考音频（可选，视频配音用）
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {audioAttachment ? (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '8px 12px',
+                    background: '#1a1a24',
+                    border: '1px solid #2a2a3e',
+                    borderRadius: 6,
+                    flex: 1,
+                    minWidth: 0,
+                  }}
+                >
+                  <AudioOutlined style={{ color: '#6b6b88', fontSize: 16, flexShrink: 0 }} />
+                  <span
+                    style={{
+                      color: '#d0d0e0',
+                      fontSize: 12,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      flex: 1,
+                    }}
+                  >
+                    {audioAttachment.split(/[/\\]/).pop()}
+                  </span>
+                  <button
+                    onClick={() => setAudioAttachment('')}
+                    style={{
+                      width: 18,
+                      height: 18,
+                      borderRadius: '50%',
+                      border: 'none',
+                      background: 'rgba(0,0,0,0.6)',
+                      color: '#fff',
+                      fontSize: 10,
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      lineHeight: 1,
+                      flexShrink: 0,
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={handleSelectAudio}
+                  style={{
+                    padding: '8px 16px',
+                    borderRadius: 6,
+                    border: '1px dashed #3a3a5e',
+                    background: 'transparent',
+                    color: '#6b6b88',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    fontSize: 12,
+                  }}
+                >
+                  <AudioOutlined style={{ fontSize: 16 }} />
+                  选择音频文件
+                </button>
+              )}
             </div>
           </div>
         )}
