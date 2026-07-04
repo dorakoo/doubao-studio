@@ -257,8 +257,10 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
   console.log(`[doubaoBridge] 输入框已就绪: type=${prepareResult.inputType}, tag=${prepareResult.tag}`);
 
   // ========== 第二步：优先使用真实键盘事件（sendInputEvent）==========
+  // 短文本用真实键盘更可靠，长文本直接走 JS 批量注入更快（避免数千事件卡死页面）
   const wv = webview as any;
-  if (typeof wv.sendInputEvent === 'function') {
+  const useRealKeyboard = typeof wv.sendInputEvent === 'function' && promptText.length <= 500;
+  if (useRealKeyboard) {
     try {
       console.log('[doubaoBridge] 使用真实键盘事件输入 (sendInputEvent)');
       const chars = promptText.split('');
@@ -362,7 +364,7 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
 
       const verifyResult = await safeExecuteJS<{
         ok: boolean; actualLen: number; expectedLen: number; hasFiber: boolean; preview?: string; error?: string;
-      }>(webview, verifyCode, 5000, 'verifyRealKeyboardInput');
+      }>(webview, verifyCode, 2000, 'verifyRealKeyboardInput');
 
       if (verifyResult.ok) {
         console.log(`[doubaoBridge] 真实键盘输入成功, len=${verifyResult.actualLen}/${verifyResult.expectedLen}, hasFiber=${verifyResult.hasFiber}, preview="${verifyResult.preview}..."`);
@@ -469,11 +471,7 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
         }
         input.dispatchEvent(new Event('input', { bubbles: true }));
 
-        // 批量注入（性能优化：每批设置内容+触发事件，避免逐字导致的数千次重渲染）
-        var BATCH_SIZE = 80;
-        var totalLen = targetPrompt.length;
-        var batches = Math.ceil(totalLen / BATCH_SIZE);
-
+        // ===== 注入辅助函数 =====
         function setInputContent(text) {
           if (inputType === 'textarea') {
             var ns2 = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
@@ -492,12 +490,23 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
           }
         }
 
-        function syncReactFiberFast() {
+        // ===== 方案A：一次性全量注入 + React 状态同步（最快，优先尝试） =====
+        setInputContent(targetPrompt);
+
+        try {
+          input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: targetPrompt }));
+        } catch(e) {
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+
+        // 多层级 ReactFiber 同步（从 input 向上找到 onInput/onChange）
+        (function syncReactFiberOneShot() {
           try {
+            // 方式1: __reactProps 路径
             var fiberKey = null;
             var targetEl = input;
             var depth = 0;
-            while (targetEl && depth < 10) {
+            while (targetEl && depth < 15) {
               var keys = Object.keys(targetEl);
               for (var ki = 0; ki < keys.length; ki++) {
                 if (keys[ki].startsWith('__reactProps')) {
@@ -509,37 +518,121 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
               targetEl = targetEl.parentElement;
               depth++;
             }
-            if (!fiberKey) return;
-            var rprops = targetEl[fiberKey];
-            var targetVal = inputType === 'textarea' ? input.value : (input.innerText || '');
-            var fakeTarget = { value: targetVal, innerText: targetVal, textContent: targetVal };
-            var fakeEvent = {
-              target: fakeTarget, currentTarget: fakeTarget,
-              bubbles: true, cancelable: true,
-              preventDefault: function() {}, stopPropagation: function() {},
-              isTrusted: true, type: 'input', inputType: 'insertText', data: targetVal,
-              nativeEvent: { data: targetVal, inputType: 'insertText' }
-            };
-            if (rprops && typeof rprops.onInput === 'function') rprops.onInput(fakeEvent);
-            else if (rprops && typeof rprops.onChange === 'function') rprops.onChange(fakeEvent);
+            if (fiberKey) {
+              var rprops = targetEl[fiberKey];
+              var targetVal = inputType === 'textarea' ? input.value : (input.innerText || '');
+              var fakeTarget = { value: targetVal, innerText: targetVal, textContent: targetVal };
+              var fakeEvent = {
+                target: fakeTarget, currentTarget: fakeTarget,
+                bubbles: true, cancelable: true, defaultPrevented: false,
+                preventDefault: function() { this.defaultPrevented = true; },
+                stopPropagation: function() {}, persist: function() {},
+                isTrusted: true, type: 'input', inputType: 'insertText', data: targetVal,
+                nativeEvent: { data: targetVal, inputType: 'insertText' }
+              };
+              if (typeof rprops.onInput === 'function') rprops.onInput(fakeEvent);
+              else if (typeof rprops.onChange === 'function') rprops.onChange(fakeEvent);
+            }
+
+            // 方式2: __reactFiber 路径（向上遍历 memoizedProps）
+            var fiberKey2 = null;
+            var targetEl2 = input;
+            var depth2 = 0;
+            while (targetEl2 && depth2 < 15) {
+              var keys2 = Object.keys(targetEl2);
+              for (var ki2 = 0; ki2 < keys2.length; ki2++) {
+                if (keys2[ki2].startsWith('__reactFiber')) {
+                  fiberKey2 = keys2[ki2];
+                  break;
+                }
+              }
+              if (fiberKey2) break;
+              targetEl2 = targetEl2.parentElement;
+              depth2++;
+            }
+            if (fiberKey2) {
+              var fiber = targetEl2[fiberKey2];
+              var current = fiber;
+              var fdepth = 0;
+              var targetVal2 = inputType === 'textarea' ? input.value : (input.innerText || '');
+              var fakeTarget2 = { value: targetVal2, innerText: targetVal2, textContent: targetVal2 };
+              var fakeEvent2 = {
+                target: fakeTarget2, currentTarget: fakeTarget2,
+                bubbles: true, cancelable: true, defaultPrevented: false,
+                preventDefault: function() { this.defaultPrevented = true; },
+                stopPropagation: function() {}, persist: function() {},
+                isTrusted: true, type: 'input', inputType: 'insertText', data: targetVal2,
+                nativeEvent: { data: targetVal2, inputType: 'insertText' }
+              };
+              while (current && fdepth < 30) {
+                var fprops = current.memoizedProps || current.pendingProps;
+                if (fprops) {
+                  if (typeof fprops.onInput === 'function') {
+                    try { fprops.onInput(fakeEvent2); break; } catch(e) {}
+                  }
+                  if (typeof fprops.onChange === 'function') {
+                    try { fprops.onChange(fakeEvent2); break; } catch(e) {}
+                  }
+                }
+                current = current.return;
+                fdepth++;
+              }
+            }
           } catch(e) {}
-        }
+        })();
 
-        for (var bi = 0; bi < batches; bi++) {
-          var startIdx = bi * BATCH_SIZE;
-          var endIdx = Math.min(startIdx + BATCH_SIZE, totalLen);
-          var batchText = targetPrompt.substring(0, endIdx);
+        // 验证一次性注入是否成功
+        var actualLenA = inputType === 'textarea' ? input.value.length : (input.innerText || '').length;
+        var oneShotOk = actualLenA >= targetPrompt.length * 0.8;
 
-          setInputContent(batchText);
+        // ===== 方案B：大批量注入兜底（每200字一批，约24批/4800字） =====
+        if (!oneShotOk) {
+          var BATCH_SIZE = 200;
+          var totalLen = targetPrompt.length;
+          var batches = Math.ceil(totalLen / BATCH_SIZE);
 
-          try {
-            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: batchText }));
-          } catch(e) {
-            input.dispatchEvent(new Event('input', { bubbles: true }));
+          for (var bi = 0; bi < batches; bi++) {
+            var endIdx = Math.min((bi + 1) * BATCH_SIZE, totalLen);
+            var batchText = targetPrompt.substring(0, endIdx);
+
+            setInputContent(batchText);
+
+            try {
+              input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: batchText }));
+            } catch(e) {
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+            }
+
+            // 快速同步
+            try {
+              var fk = null;
+              var te = input;
+              var d = 0;
+              while (te && d < 10) {
+                var ks = Object.keys(te);
+                for (var k = 0; k < ks.length; k++) {
+                  if (ks[k].startsWith('__reactProps')) { fk = ks[k]; break; }
+                }
+                if (fk) break;
+                te = te.parentElement;
+                d++;
+              }
+              if (fk) {
+                var rp = te[fk];
+                var tv = inputType === 'textarea' ? input.value : (input.innerText || '');
+                var ft = { value: tv, innerText: tv, textContent: tv };
+                var fe = {
+                  target: ft, currentTarget: ft,
+                  bubbles: true, cancelable: true,
+                  preventDefault: function() {}, stopPropagation: function() {},
+                  isTrusted: true, type: 'input', inputType: 'insertText', data: tv,
+                  nativeEvent: { data: tv, inputType: 'insertText' }
+                };
+                if (typeof rp.onInput === 'function') rp.onInput(fe);
+                else if (typeof rp.onChange === 'function') rp.onChange(fe);
+              }
+            } catch(e) {}
           }
-
-          // 每批快速同步 React 状态
-          syncReactFiberFast();
         }
 
         input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -2453,9 +2546,9 @@ export async function configureVideoOptions(
 ): Promise<void> {
   // 模型名称映射（豆包页面显示的文本）
   const modelLabels: Record<string, string[]> = {
-    'seedance-2.0': ['Seedance 2.0', '2.0'],
-    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast', 'Fast'],
-    'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini'],
+    'seedance-2.0': ['Seedance 2.0', '2.0', '2.0 标准版', '标准', 'Standard'],
+    'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast', 'Fast', '2.0 极速', '极速', '极速版', '2.0 Fast 极速'],
+    'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini', '2.0 轻量', '轻量', '轻量版'],
   };
 
   const modelTexts = modelLabels[config.model] || [config.model];
@@ -2533,11 +2626,11 @@ export async function configureVideoOptions(
       // 兜底：直接尝试 clickByText 选选项（可能下拉已经展开了）
     } else {
       console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}`);
-      await sleep(800); // 等待下拉动画展开（portal 渲染需要时间）
+      await sleep(1200); // 等待下拉动画展开（portal 渲染+动画需要时间）
     }
 
     // ---- 第二步：在下拉中选择目标选项 ----
-    // v9 简单逻辑：offsetParent 可见性过滤 + 大小写不敏感匹配 + 找到第一个就返回
+    // 多阶段查找：标准选择器 → 扩大选择器 → 全量文本匹配（逐步扩大范围，性能可控）
     const optionCode = `
       (function() {
         try {
@@ -2558,36 +2651,82 @@ export async function configureVideoOptions(
             return false;
           }
 
-          // ---- 第一阶段：标准选项选择器（v9 同款） ----
-          var allOptions = document.querySelectorAll('[role="option"], button, [role="menuitem"], div[class*="option"], div[class*="item"], li');
-          for (var i = 0; i < allOptions.length; i++) {
-            var el = allOptions[i];
-            if (el.offsetParent === null) continue;
-            var text = (el.innerText || '').trim();
-            if (!text) continue;
-            if (textMatch(text)) {
-              if (text.length > 50) continue;
-              var rect = el.getBoundingClientRect();
-              el.click();
-              return { ok: true, text: text.substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
-            }
+          // 可见性判断：元素在视口内且有实际尺寸（兼容 portal/fixed 定位的下拉）
+          function isVisible(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            if (r.width < 10 || r.height < 10) return false;
+            if (r.top > window.innerHeight + 100 || r.bottom < -100) return false;
+            if (r.left > window.innerWidth + 100 || r.right < -100) return false;
+            return true;
           }
 
-          // ---- 第二阶段：扩大选择器范围（性能安全，不做全元素遍历）----
-          var extraOptions = document.querySelectorAll(
-            '[class*="select-item"], [class*="dropdown-item"], [class*="menu-item"], ' +
-            '[class*="option-item"], [class*="list-item"], span[class*="item"], a'
-          );
-          for (var k = 0; k < extraOptions.length; k++) {
-            var el3 = extraOptions[k];
-            if (el3.offsetParent === null) continue;
-            var text3 = (el3.innerText || '').trim();
-            if (!text3 || text3.length > 50) continue;
-            if (textMatch(text3)) {
-              var rect3 = el3.getBoundingClientRect();
-              el3.click();
-              return { ok: true, text: text3.substring(0, 30), tag: el3.tagName, pos: Math.round(rect3.left) + ',' + Math.round(rect3.top) };
+          function tryClick(el, text) {
+            if (!el || !isVisible(el)) return false;
+            var rect = el.getBoundingClientRect();
+            el.click();
+            return { ok: true, text: (text || el.innerText || '').trim().substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+          }
+
+          // ---- 第一阶段：标准选项选择器 ----
+          var sels1 = '[role="option"], [role="menuitem"], div[class*="option"], div[class*="item"], li[class*="option"], li[class*="item"]';
+          var all1 = document.querySelectorAll(sels1);
+          for (var i = 0; i < all1.length; i++) {
+            var el1 = all1[i];
+            if (!isVisible(el1)) continue;
+            var text1 = (el1.innerText || '').trim();
+            if (!text1 || text1.length > 50) continue;
+            if (textMatch(text1)) return tryClick(el1, text1);
+          }
+
+          // ---- 第二阶段：扩大选择器范围 ----
+          var sels2 = 'button, span[class*="item"], span[class*="option"], a[class*="item"], ' +
+                      '[class*="select-item"], [class*="dropdown-item"], [class*="menu-item"], ' +
+                      '[class*="option-item"], [class*="list-item"], [class*="popover"] *';
+          var all2 = document.querySelectorAll(sels2);
+          for (var j = 0; j < all2.length; j++) {
+            var el2 = all2[j];
+            if (!isVisible(el2)) continue;
+            var text2 = (el2.innerText || '').trim();
+            if (!text2 || text2.length > 50) continue;
+            if (textMatch(text2)) return tryClick(el2, text2);
+          }
+
+          // ---- 第三阶段：按文本内容全量查找（TreeWalker 遍历，性能可控） ----
+          var candidates = [];
+          var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+            acceptNode: function(node) {
+              var tag = node.tagName;
+              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+              var childCount = node.children ? node.children.length : 0;
+              // 只考虑叶子或近叶子元素（避免大容器）
+              if (childCount > 5) return NodeFilter.FILTER_SKIP;
+              var txt = (node.innerText || '').trim();
+              if (!txt || txt.length > 50 || txt.length < 2) return NodeFilter.FILTER_SKIP;
+              if (!textMatch(txt)) return NodeFilter.FILTER_SKIP;
+              if (!isVisible(node)) return NodeFilter.FILTER_SKIP;
+              return NodeFilter.FILTER_ACCEPT;
             }
+          });
+          var node;
+          while ((node = tw.nextNode())) {
+            candidates.push(node);
+            if (candidates.length > 20) break; // 限制数量避免卡
+          }
+
+          // 选最可能的：面积适中（不大不小）、越靠近视口中间偏下（下拉通常位置）
+          if (candidates.length > 0) {
+            var viewportH = window.innerHeight;
+            var scored = candidates.map(function(el) {
+              var r = el.getBoundingClientRect();
+              var area = r.width * r.height;
+              var sizeScore = area > 200 && area < 50000 ? 100 : 0;
+              var posScore = r.top > viewportH * 0.3 && r.top < viewportH * 0.9 ? 50 : 0;
+              return { el: el, score: sizeScore + posScore, area: area, rect: r };
+            });
+            scored.sort(function(a, b) { return b.score - a.score || a.area - b.area; });
+            var best = scored[0];
+            return tryClick(best.el, (best.el.innerText || '').trim());
           }
 
           return { ok: false };
@@ -2598,7 +2737,7 @@ export async function configureVideoOptions(
     `;
 
     const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string }>(
-      webview, optionCode, 4000, `select_${label}`
+      webview, optionCode, 5000, `select_${label}`
     );
 
     if (optionResult.ok) {
