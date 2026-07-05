@@ -76,6 +76,37 @@ export async function injectPrompt(
 
   // 注入前先检查按钮初始状态
   const initialBtnReady = await checkSendButtonReady(webview);
+  // 视频模式守护：如果当前在视频生成页面，确保不被切走
+  const videoModeGuard = async () => {
+    const checkCode = `
+      (function() {
+        try {
+          // 检查 URL 或页面元素判断是否在视频模式
+          var url = window.location.href;
+          var inVideo = url.indexOf('video') >= 0 || url.indexOf('doubao.com/chat') >= 0;
+          
+          // 检查页面上是否有视频生成相关按钮/标识
+          var videoBtns = document.querySelectorAll('button, [role="button"]');
+          var hasVideoTab = false;
+          for (var i = 0; i < videoBtns.length; i++) {
+            var txt = (videoBtns[i].innerText || '').trim();
+            if (txt === '视频生成' || txt.indexOf('视频生成') >= 0 && txt.length < 10) {
+              hasVideoTab = true;
+              break;
+            }
+          }
+          return { inVideo: hasVideoTab };
+        } catch(e) { return { inVideo: false }; }
+      })()
+    `;
+    try {
+      const r = await safeExecuteJS<{ inVideo: boolean }>(webview, checkCode, 2000, 'video_guard');
+      return r.inVideo;
+    } catch {
+      return false;
+    }
+  };
+  const wasVideoMode = await videoModeGuard();
   console.log(`[doubaoBridge] 注入前按钮状态: ${initialBtnReady ? '已激活' : '未激活'}`);
 
   // 如果按钮本来就激活（如视频模式有图就激活），按钮状态不能作为验证标准
@@ -2564,12 +2595,65 @@ export async function configureVideoOptions(
    * triggerTexts: 触发按钮的文本关键词（用于找到并点击展开）
    * optionTexts: 下拉选项的文本
    */
+  // ========== 辅助：确保视频配置栏可见 ==========
+  const ensureVideoConfigBar = async (): Promise<boolean> => {
+    const code = `
+      (function() {
+        try {
+          // 先找输入框并聚焦
+          var ta = document.querySelector('textarea');
+          var ce = document.querySelector('[contenteditable="true"]');
+          var input = ta || ce;
+          if (input) input.focus();
+
+          // 检查是否有模型/比例/时长相关配置按钮
+          var viewportH = window.innerHeight;
+          var all = document.querySelectorAll('button, [role="button"], div, span');
+          var hasModel = false, hasRatio = false, hasDuration = false;
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            if (el.offsetParent === null) continue;
+            var rect = el.getBoundingClientRect();
+            if (rect.width < 20 || rect.height < 20) continue;
+            if (rect.top < viewportH * 0.5) continue;
+            var text = (el.innerText || '').trim();
+            if (!text || text.length > 30) continue;
+            if (text.indexOf('模型') >= 0 && text.length < 20) hasModel = true;
+            if (text.indexOf('比例') >= 0 && text.length < 10) hasRatio = true;
+            if ((text.indexOf('秒') >= 0 || text.indexOf('s ') >= 0 || /\\d+s$/.test(text)) && text.length < 10) hasDuration = true;
+          }
+          return { ok: hasModel || hasRatio, hasModel: hasModel, hasRatio: hasRatio, hasDuration: hasDuration };
+        } catch(e) {
+          return { ok: false, error: e.message };
+        }
+      })()
+    `;
+    try {
+      const r = await safeExecuteJS<{ ok: boolean; hasModel: boolean; hasRatio: boolean; hasDuration: boolean }>(
+        webview, code, 3000, 'ensure_config_bar'
+      );
+      return r.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  // 先确保配置栏可见
+  await ensureVideoConfigBar();
+  await sleep(300);
+  await ensureVideoConfigBar(); // 二次确认
+
+  // ========== 下拉选择函数 ==========
   const selectDropdownOption = async (
     triggerTexts: string[],
     optionTexts: string[],
     label: string
   ): Promise<boolean> => {
-    // ---- 第一步：找到并点击触发按钮（展开下拉） ----
+    // 操作前确保配置栏可见
+    await ensureVideoConfigBar();
+    await sleep(200);
+
+    // ---- 第一步：找到并点击触发按钮（点击右边缘 = 下拉箭头区域） ----
     const triggerCode = `
       (function() {
         try {
@@ -2577,32 +2661,25 @@ export async function configureVideoOptions(
           var viewportH = window.innerHeight;
           var candidates = [];
 
-          // 在输入框附近找可点击元素（button / div[role=button] / 带 pointer 的 div）
           var allClickable = document.querySelectorAll('button, [role="button"], div, span');
           for (var i = 0; i < allClickable.length; i++) {
             var el = allClickable[i];
             if (el.offsetParent === null) continue;
             var rect = el.getBoundingClientRect();
             if (rect.width < 20 || rect.height < 20) continue;
-            if (rect.top < viewportH * 0.5) continue; // 只看下半部分（工具栏区域）
+            if (rect.top < viewportH * 0.5) continue;
             var text = (el.innerText || '').trim();
             if (!text || text.length > 30) continue;
 
-            // 检查是否匹配触发文本
             var matched = false;
             for (var t = 0; t < triggerTexts.length; t++) {
-              if (text.indexOf(triggerTexts[t]) >= 0) {
-                matched = true;
-                break;
-              }
+              if (text.indexOf(triggerTexts[t]) >= 0) { matched = true; break; }
             }
             if (!matched) continue;
 
-            // 排除输入框和大容器
             if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') continue;
             if (rect.width > 300) continue;
 
-            // 打分：越靠近底部越可能是工具栏按钮
             var bottomScore = rect.top > viewportH * 0.7 ? 100 : 0;
             var sizeScore = rect.width * rect.height < 10000 ? 50 : 0;
             candidates.push({ el: el, text: text, score: bottomScore + sizeScore, rect: rect });
@@ -2610,35 +2687,92 @@ export async function configureVideoOptions(
 
           if (candidates.length === 0) return { ok: false, error: '未找到触发按钮' };
 
-          // 按分数排序，取最高的
           candidates.sort(function(a, b) { return b.score - a.score; });
           var best = candidates[0];
-          best.el.click();
-          return { ok: true, text: best.text, pos: Math.round(best.rect.left) + ',' + Math.round(best.rect.top) };
+          var r = best.rect;
+
+          // 点击右边缘（下拉箭头通常在按钮右侧）
+          var clickX = r.right - 8;
+          var clickY = r.top + r.height / 2;
+
+          // 用 MouseEvent 模拟精确位置点击
+          var evt1 = new MouseEvent('mousedown', {
+            bubbles: true, cancelable: true, view: window,
+            clientX: clickX, clientY: clickY, button: 0
+          });
+          var evt2 = new MouseEvent('mouseup', {
+            bubbles: true, cancelable: true, view: window,
+            clientX: clickX, clientY: clickY, button: 0
+          });
+          var evt3 = new MouseEvent('click', {
+            bubbles: true, cancelable: true, view: window,
+            clientX: clickX, clientY: clickY, button: 0
+          });
+          best.el.dispatchEvent(evt1);
+          best.el.dispatchEvent(evt2);
+          best.el.dispatchEvent(evt3);
+
+          return {
+            ok: true, text: best.text,
+            pos: Math.round(r.left) + ',' + Math.round(r.top),
+            clickPos: Math.round(clickX) + ',' + Math.round(clickY)
+          };
         } catch(e) {
           return { ok: false, error: e.message };
         }
       })()
     `;
 
-    const triggerResult = await safeExecuteJS<{ ok: boolean; text?: string; pos?: string; error?: string }>(
+    // 先拍点击前快照（所有包含选项关键词的可见元素）
+    const snapshotBefore = await safeExecuteJS<string[]>(
+      webview,
+      `(function(){
+        try {
+          var optTexts = ${JSON.stringify(optionTexts)};
+          var result = [];
+          var all = document.querySelectorAll('*');
+          for (var i = 0; i < all.length; i++) {
+            var el = all[i];
+            var r = el.getBoundingClientRect();
+            if (r.width < 10 || r.height < 10) continue;
+            var text = (el.innerText || '').trim();
+            if (!text || text.length > 60 || text.length < 2) continue;
+            for (var j = 0; j < optTexts.length; j++) {
+              if (text.indexOf(optTexts[j]) >= 0 || optTexts[j].indexOf(text) >= 0) {
+                result.push(text.substring(0, 40));
+                break;
+              }
+            }
+          }
+          return result.slice(0, 50);
+        } catch(e) { return []; }
+      })()`,
+      3000,
+      `snapshot_before_${label}`
+    ).catch(() => []);
+
+    const triggerResult = await safeExecuteJS<{ ok: boolean; text?: string; pos?: string; clickPos?: string; error?: string }>(
       webview, triggerCode, 3000, `trigger_${label}`
     );
 
     if (!triggerResult.ok) {
       console.warn(`[doubaoBridge] ${label} 触发按钮未找到:`, triggerResult.error, triggerTexts);
-      // 兜底：直接尝试 clickByText 选选项（可能下拉已经展开了）
     } else {
-      console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}`);
-      await sleep(1200); // 等待下拉动画展开（portal 渲染+动画需要时间）
+      console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}, clickPos: ${triggerResult.clickPos}`);
+      await sleep(1500); // 等待下拉/面板展开
     }
 
-    // ---- 第二步：在下拉中选择目标选项 ----
-    // 多阶段查找：标准选择器 → 扩大选择器 → 全量文本匹配（逐步扩大范围，性能可控）
+    // ---- 第二步：查找并点击选项 ----
     const optionCode = `
       (function() {
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
+          var snapBefore = ${JSON.stringify(snapshotBefore)};
+          var snapMap = {};
+          for (var sb = 0; sb < snapBefore.length; sb++) {
+            snapMap[snapBefore[sb]] = true;
+          }
+
           var optLow = [];
           for (var k = 0; k < optionTexts.length; k++) {
             optLow.push(optionTexts[k].toLowerCase());
@@ -2655,12 +2789,11 @@ export async function configureVideoOptions(
             return false;
           }
 
-          // 可见性判断：元素在视口内且有实际尺寸（兼容 portal/fixed 定位的下拉）
           function isVisible(el) {
             if (!el) return false;
             var r = el.getBoundingClientRect();
             if (r.width < 10 || r.height < 10) return false;
-            if (r.top > window.innerHeight + 100 || r.bottom < -100) return false;
+            if (r.top > window.innerHeight + 200 || r.bottom < -200) return false;
             if (r.left > window.innerWidth + 100 || r.right < -100) return false;
             return true;
           }
@@ -2669,44 +2802,60 @@ export async function configureVideoOptions(
             if (!el || !isVisible(el)) return false;
             var rect = el.getBoundingClientRect();
             el.click();
-            return { ok: true, text: (text || el.innerText || '').trim().substring(0, 30), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+            return { ok: true, text: (text || el.innerText || '').trim().substring(0, 50), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
           }
 
-          // ---- 第一阶段：标准选项选择器 ----
-          var sels1 = '[role="option"], [role="menuitem"], div[class*="option"], div[class*="item"], li[class*="option"], li[class*="item"]';
+          // ---- 策略A：点击后新出现的元素（最可能是下拉选项） ----
+          var newCandidates = [];
+          var allElems = document.querySelectorAll('*');
+          for (var i = 0; i < allElems.length; i++) {
+            var el = allElems[i];
+            if (!isVisible(el)) continue;
+            var childCount = el.children ? el.children.length : 0;
+            if (childCount > 10) continue; // 跳过容器
+            var text = (el.innerText || '').trim();
+            if (!text || text.length > 60 || text.length < 2) continue;
+            if (!textMatch(text)) continue;
+            var shortText = text.substring(0, 40);
+            // 点击前不存在的元素 = 新出现的
+            if (!snapMap[shortText]) {
+              var r = el.getBoundingClientRect();
+              newCandidates.push({ el: el, text: text, rect: r, area: r.width * r.height });
+            }
+          }
+          if (newCandidates.length > 0) {
+            // 选面积最小的（选项通常比容器小），排除按钮本身
+            newCandidates.sort(function(a, b) { return a.area - b.area; });
+            for (var nc = 0; nc < newCandidates.length; nc++) {
+              var res = tryClick(newCandidates[nc].el, newCandidates[nc].text);
+              if (res && res.ok) return res;
+            }
+          }
+
+          // ---- 策略B：标准选项选择器 ----
+          var sels1 = '[role="option"], [role="menuitem"], div[class*="option"], div[class*="item"], li[class*="option"], li[class*="item"], [class*="popover"] button, [class*="dropdown"] *';
           var all1 = document.querySelectorAll(sels1);
-          for (var i = 0; i < all1.length; i++) {
-            var el1 = all1[i];
+          for (var i1 = 0; i1 < all1.length; i1++) {
+            var el1 = all1[i1];
             if (!isVisible(el1)) continue;
             var text1 = (el1.innerText || '').trim();
-            if (!text1 || text1.length > 50) continue;
-            if (textMatch(text1)) return tryClick(el1, text1);
+            if (!text1 || text1.length > 60) continue;
+            if (textMatch(text1)) {
+              var r1 = tryClick(el1, text1);
+              if (r1) return r1;
+            }
           }
 
-          // ---- 第二阶段：扩大选择器范围 ----
-          var sels2 = 'button, span[class*="item"], span[class*="option"], a[class*="item"], ' +
-                      '[class*="select-item"], [class*="dropdown-item"], [class*="menu-item"], ' +
-                      '[class*="option-item"], [class*="list-item"], [class*="popover"] *';
-          var all2 = document.querySelectorAll(sels2);
-          for (var j = 0; j < all2.length; j++) {
-            var el2 = all2[j];
-            if (!isVisible(el2)) continue;
-            var text2 = (el2.innerText || '').trim();
-            if (!text2 || text2.length > 50) continue;
-            if (textMatch(text2)) return tryClick(el2, text2);
-          }
-
-          // ---- 第三阶段：按文本内容全量查找（TreeWalker 遍历，性能可控） ----
+          // ---- 策略C：TreeWalker 全文匹配 ----
           var candidates = [];
           var tw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
             acceptNode: function(node) {
               var tag = node.tagName;
               if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
               var childCount = node.children ? node.children.length : 0;
-              // 只考虑叶子或近叶子元素（避免大容器）
               if (childCount > 5) return NodeFilter.FILTER_SKIP;
               var txt = (node.innerText || '').trim();
-              if (!txt || txt.length > 50 || txt.length < 2) return NodeFilter.FILTER_SKIP;
+              if (!txt || txt.length > 60 || txt.length < 2) return NodeFilter.FILTER_SKIP;
               if (!textMatch(txt)) return NodeFilter.FILTER_SKIP;
               if (!isVisible(node)) return NodeFilter.FILTER_SKIP;
               return NodeFilter.FILTER_ACCEPT;
@@ -2715,17 +2864,16 @@ export async function configureVideoOptions(
           var node;
           while ((node = tw.nextNode())) {
             candidates.push(node);
-            if (candidates.length > 20) break; // 限制数量避免卡
+            if (candidates.length > 30) break;
           }
 
-          // 选最可能的：面积适中（不大不小）、越靠近视口中间偏下（下拉通常位置）
           if (candidates.length > 0) {
             var viewportH = window.innerHeight;
             var scored = candidates.map(function(el) {
               var r = el.getBoundingClientRect();
               var area = r.width * r.height;
               var sizeScore = area > 200 && area < 50000 ? 100 : 0;
-              var posScore = r.top > viewportH * 0.3 && r.top < viewportH * 0.9 ? 50 : 0;
+              var posScore = r.top > viewportH * 0.2 && r.top < viewportH * 0.95 ? 50 : 0;
               return { el: el, score: sizeScore + posScore, area: area, rect: r };
             });
             scored.sort(function(a, b) { return b.score - a.score || a.area - b.area; });
@@ -2733,7 +2881,7 @@ export async function configureVideoOptions(
             return tryClick(best.el, (best.el.innerText || '').trim());
           }
 
-          // ---- 诊断：收集下拉附近的可见文本元素 ----
+          // ---- 诊断：收集视口中下部所有可见文本元素 ----
           var diag = [];
           var diagTw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
             acceptNode: function(node) {
@@ -2745,17 +2893,16 @@ export async function configureVideoOptions(
               if (!txt || txt.length > 30 || txt.length < 1) return NodeFilter.FILTER_SKIP;
               var r = node.getBoundingClientRect();
               if (r.width < 10 || r.height < 10) return NodeFilter.FILTER_SKIP;
-              // 只收集视口中下部（下拉常见位置）
-              if (r.top < window.innerHeight * 0.4 || r.top > window.innerHeight + 50) return NodeFilter.FILTER_SKIP;
-              if (r.left < 200 || r.left > window.innerWidth - 100) return NodeFilter.FILTER_SKIP;
+              if (r.top < 100 || r.top > window.innerHeight + 100) return NodeFilter.FILTER_SKIP;
+              if (r.left < 50 || r.left > window.innerWidth - 50) return NodeFilter.FILTER_SKIP;
               return NodeFilter.FILTER_ACCEPT;
             }
           });
           var dnode;
           var dcount = 0;
-          while ((dnode = diagTw.nextNode()) && dcount < 30) {
+          while ((dnode = diagTw.nextNode()) && dcount < 40) {
             var dr = dnode.getBoundingClientRect();
-            diag.push(dnode.tagName + '|' + (dnode.innerText || '').trim().substring(0, 20) + '|' + Math.round(dr.left) + ',' + Math.round(dr.top));
+            diag.push(dnode.tagName + '|' + (dnode.innerText || '').trim().substring(0, 25) + '|' + Math.round(dr.left) + ',' + Math.round(dr.top));
             dcount++;
           }
           return { ok: false, diag: diag.join('; ') };
@@ -2766,156 +2913,25 @@ export async function configureVideoOptions(
     `;
 
     const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string; diag?: string }>(
-      webview, optionCode, 5000, `select_${label}`
+      webview, optionCode, 6000, `select_${label}`
     );
 
     if (optionResult.ok) {
       console.log(`[doubaoBridge] 已选择${label}: "${optionResult.text}", tag: ${optionResult.tag}, pos: ${optionResult.pos}`);
+      await sleep(300);
+      // 选择后重新确保配置栏可见
+      await ensureVideoConfigBar();
       return true;
     }
 
-    // 输出诊断信息
     if (optionResult.diag) {
       console.warn(`[doubaoBridge] ${label} 下拉诊断(可见元素):`, optionResult.diag);
     }
-    console.warn(`[doubaoBridge] ${label} DOM查找失败, 尝试键盘导航兜底, 候选文本:`, optionTexts);
-
-    // ---- 兜底方案：键盘导航 ----
-    try {
-      const wv = webview as any;
-      if (typeof wv.sendInputEvent === 'function') {
-        // 先按 Escape 关闭可能已打开的下拉，再重新触发
-        wv.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
-        wv.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
-        await sleep(200);
-
-        // 重新点击触发按钮并聚焦
-        const refocusCode = `
-          (function() {
-            var triggerTexts = ${JSON.stringify(triggerTexts)};
-            var viewportH = window.innerHeight;
-            var best = null;
-            var bestScore = -1;
-            var allClickable = document.querySelectorAll('button, [role="button"], div, span');
-            for (var i = 0; i < allClickable.length; i++) {
-              var el = allClickable[i];
-              if (el.offsetParent === null) continue;
-              var rect = el.getBoundingClientRect();
-              if (rect.width < 20 || rect.height < 20) continue;
-              if (rect.top < viewportH * 0.5) continue;
-              var text = (el.innerText || '').trim();
-              if (!text || text.length > 30) continue;
-              var matched = false;
-              for (var t = 0; t < triggerTexts.length; t++) {
-                if (text.indexOf(triggerTexts[t]) >= 0) { matched = true; break; }
-              }
-              if (!matched) continue;
-              if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') continue;
-              if (rect.width > 300) continue;
-              var score = (rect.top > viewportH * 0.7 ? 100 : 0) + (rect.width * rect.height < 10000 ? 50 : 0);
-              if (score > bestScore) { bestScore = score; best = el; }
-            }
-            if (best) {
-              best.focus();
-              best.click();
-              return { ok: true, text: (best.innerText || '').trim() };
-            }
-            return { ok: false };
-          })()
-        `;
-        const refocusResult = await safeExecuteJS<{ ok: boolean; text?: string }>(
-          webview, refocusCode, 3000, `refocus_${label}`
-        );
-
-        if (refocusResult.ok) {
-          await sleep(800); // 等下拉展开
-
-          // 尝试多个候选文本，每个都试试 typeahead
-          for (let ti = 0; ti < optionTexts.length; ti++) {
-            const tryText = optionTexts[ti].substring(0, 6); // 取前几个字符用于 typeahead
-            if (!tryText) continue;
-
-            // 清空可能的输入，按 End 再回删
-            wv.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
-            wv.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
-            for (let bc = 0; bc < 10; bc++) {
-              wv.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
-              wv.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
-            }
-
-            // 输入候选文本
-            for (let ci = 0; ci < tryText.length; ci++) {
-              const ch = tryText[ci];
-              wv.sendInputEvent({ type: 'keyDown', keyCode: ch, key: ch });
-              wv.sendInputEvent({ type: 'char', keyCode: ch, key: ch });
-              wv.sendInputEvent({ type: 'keyUp', keyCode: ch, key: ch });
-            }
-            await sleep(300); // 等筛选
-
-            // 按 Enter 选择
-            wv.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-            wv.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
-            await sleep(500);
-
-            // 验证：读取触发按钮文本是否变化
-            const verifyCode = `
-              (function() {
-                var triggerTexts = ${JSON.stringify(triggerTexts)};
-                var viewportH = window.innerHeight;
-                var allClickable = document.querySelectorAll('button, [role="button"], div, span');
-                for (var i = 0; i < allClickable.length; i++) {
-                  var el = allClickable[i];
-                  if (el.offsetParent === null) continue;
-                  var rect = el.getBoundingClientRect();
-                  if (rect.width < 20 || rect.height < 20) continue;
-                  if (rect.top < viewportH * 0.5) continue;
-                  var text = (el.innerText || '').trim();
-                  if (!text || text.length > 30) continue;
-                  for (var t = 0; t < triggerTexts.length; t++) {
-                    if (text.indexOf(triggerTexts[t]) >= 0) {
-                      return { found: true, text: text };
-                    }
-                  }
-                }
-                return { found: false };
-              })()
-            `;
-            const verifyResult = await safeExecuteJS<{ found: boolean; text?: string }>(
-              webview, verifyCode, 2000, `verify_${label}_${ti}`
-            );
-
-            if (verifyResult.found && verifyResult.text) {
-              // 检查文本是否包含我们的目标选项关键词
-              const lowerTrigger = verifyResult.text.toLowerCase();
-              for (const ot of optionTexts) {
-                if (lowerTrigger.indexOf(ot.toLowerCase()) >= 0) {
-                  console.log(`[doubaoBridge] 已选择${label}(键盘兜底): "${verifyResult.text}", 尝试文本="${tryText}"`);
-                  return true;
-                }
-              }
-            }
-
-            // 如果没成功，重新打开下拉试下一个候选
-            if (ti < optionTexts.length - 1) {
-              await sleep(200);
-              // 重新点击触发按钮
-              const reopenResult = await safeExecuteJS<{ ok: boolean }>(
-                webview, refocusCode, 2000, `reopen_${label}_${ti}`
-              );
-              if (reopenResult.ok) await sleep(600);
-            }
-          }
-        }
-      }
-    } catch (kbErr: any) {
-      console.warn(`[doubaoBridge] ${label} 键盘导航兜底失败:`, kbErr.message);
-    }
-
-    console.warn(`[doubaoBridge] ${label} 选项未找到（全部方案失败）, 尝试文本:`, optionTexts);
+    console.warn(`[doubaoBridge] ${label} DOM查找失败, 候选文本:`, optionTexts);
     return false;
   };
 
-  // 1. 选择模型（触发按钮包含 "模型" 或当前模型名）
+  // 1. 选择模型
   console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
   const modelTriggers = ['模型', 'Mini', 'Fast', '2.0'];
   await selectDropdownOption(modelTriggers, modelTexts, '视频模型');
@@ -2924,7 +2940,6 @@ export async function configureVideoOptions(
   // 2. 选择时长
   const is15sPatch = config.duration === '15s';
   if (is15sPatch) {
-    // 15s 通过请求拦截实现，UI 上没有此选项，跳过
     console.log(`[doubaoBridge] 配置视频时长: 15s（通过请求拦截实现，UI 跳过）`);
   } else {
     console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
@@ -2933,11 +2948,14 @@ export async function configureVideoOptions(
   }
   await sleep(300);
 
-  // 3. 选择比例（触发按钮包含 "比例"）
+  // 3. 选择比例
   console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
   const ratioTriggers = ['比例', '比'];
   await selectDropdownOption(ratioTriggers, [config.aspectRatio], '视频比例');
   await sleep(400);
+
+  // 最后确保在视频模式且配置栏正常
+  await ensureVideoConfigBar();
 }
 
 
