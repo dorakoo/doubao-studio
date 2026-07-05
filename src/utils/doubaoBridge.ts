@@ -2110,10 +2110,10 @@ export async function getResultUrl(webview: WebviewHandle): Promise<string> {
                                src.indexOf('tos-') >= 0 || src.indexOf('bytecdn') >= 0 ||
                                src.indexOf('byteimg') >= 0 || src.indexOf('doubao') >= 0;
             if (!isContentImg) continue;
-            // 跳过太小的图（可能是图标缩略图）
+            // 跳过太小的图（图标、缩略图等，生成产物一般 > 200px）
             var w = imgs[i].naturalWidth || imgs[i].width || 0;
             var h = imgs[i].naturalHeight || imgs[i].height || 0;
-            if (w > 0 && h > 0 && w < 50 && h < 50) continue;
+            if (w > 0 && h > 0 && (w < 100 || h < 100)) continue;
             if (result.indexOf(src) === -1) {
               result.push(src);
             }
@@ -2180,22 +2180,44 @@ export async function getResultUrl(webview: WebviewHandle): Promise<string> {
           }
         }
 
-        // ========== 方法2：如果方法1没找到，用"左侧消息+有图片"判断 AI 消息 ==========
+        // ========== 方法2：如果方法1没找到，用"左侧消息+有图片/视频+非上传区"判断 AI 消息 ==========
         if (aiContainers.length === 0 && bestMsgs.length > 0) {
+          var viewportH = window.innerHeight;
           for (var k = 0; k < bestMsgs.length; k++) {
             var msg2 = bestMsgs[k];
+            var msgRect = msg2.getBoundingClientRect();
+
+            // 排除底部输入区域的元素（上传的参考图、输入框预览等）
+            if (msgRect.top > viewportH * 0.75) continue;
+            // 排除太窄的元素（可能不是完整消息）
+            if (msgRect.width < 100) continue;
+            // 必须在左侧（AI 消息区）
+            if (!isLeftSide(msg2)) continue;
+
             var imgs2 = msg2.querySelectorAll('img');
-            if (imgs2.length > 0 && isLeftSide(msg2)) {
-              // 左侧消息且有图片 → 认为是AI产物消息
-              var hasContentImg = false;
-              for (var p = 0; p < imgs2.length; p++) {
-                var s = imgs2[p].src || '';
-                if (s.indexOf('http') >= 0 && s.indexOf('icon') < 0 && s.indexOf('avatar') < 0 && s.indexOf('emoji') < 0) {
-                  hasContentImg = true;
-                  break;
-                }
+            var videos2 = msg2.querySelectorAll('video');
+            if (imgs2.length === 0 && videos2.length === 0) continue;
+
+            // 检查是否有足够大的内容图（排除头像、图标、小缩略图）
+            var hasLargeContent = false;
+            for (var p = 0; p < imgs2.length; p++) {
+              var s = imgs2[p].src || '';
+              if (s.indexOf('http') < 0) continue;
+              if (s.indexOf('icon') >= 0 || s.indexOf('avatar') >= 0 || s.indexOf('emoji') >= 0 || s.indexOf('logo') >= 0) continue;
+              var iw = imgs2[p].naturalWidth || imgs2[p].width || 0;
+              var ih = imgs2[p].naturalHeight || imgs2[p].height || 0;
+              if (iw >= 150 && ih >= 150) {
+                hasLargeContent = true;
+                break;
               }
-              if (hasContentImg) {
+            }
+            // 有视频元素也算
+            if (!hasLargeContent && videos2.length > 0) hasLargeContent = true;
+
+            if (hasLargeContent) {
+              // 额外检查：消息中不包含上传/输入相关元素
+              var hasUploadEl = msg2.querySelector('[class*="upload"], [class*="input"], [contenteditable="true"], textarea');
+              if (!hasUploadEl) {
                 aiContainers.push(msg2);
               }
             }
@@ -2212,27 +2234,9 @@ export async function getResultUrl(webview: WebviewHandle): Promise<string> {
           }
         }
 
-        // ========== 兜底：如果以上方法都没找到，用旧方法全页面扫描（兼容特殊页面） ==========
+        // ========== 兜底：仅提取视频元素（图片兜底已移除，避免误把上传图当产物） ==========
         if (urls.length === 0) {
-          var allImgs = document.querySelectorAll('img');
-          for (var q = 0; q < allImgs.length; q++) {
-            var src3 = allImgs[q].src || '';
-            if (!src3 || src3.indexOf('data:') === 0) continue;
-            if (src3.indexOf('icon') >= 0 || src3.indexOf('avatar') >= 0 ||
-                src3.indexOf('emoji') >= 0 || src3.indexOf('logo') >= 0 ||
-                src3.indexOf('badge') >= 0 || src3.indexOf('status') >= 0) continue;
-            if (src3.indexOf('http') < 0) continue;
-            var isContent = src3.indexOf('image') >= 0 || src3.indexOf('img') >= 0 ||
-                            src3.indexOf('cdn') >= 0 || src3.indexOf('.png') >= 0 ||
-                            src3.indexOf('.jpg') >= 0 || src3.indexOf('.webp') >= 0 ||
-                            src3.indexOf('tos-') >= 0 || src3.indexOf('bytecdn') >= 0 ||
-                            src3.indexOf('byteimg') >= 0 || src3.indexOf('doubao') >= 0;
-            if (!isContent) continue;
-            if (urls.indexOf(src3) === -1) {
-              urls.push(src3);
-            }
-          }
-          // 视频兜底：提取 poster + src
+          // 只提取视频，不提取图片（图片兜底容易把用户上传的参考图当成产物）
           var allVideos = document.querySelectorAll('video');
           for (var v = 0; v < allVideos.length; v++) {
             var p3 = allVideos[v].poster || '';
@@ -2729,14 +2733,39 @@ export async function configureVideoOptions(
             return tryClick(best.el, (best.el.innerText || '').trim());
           }
 
-          return { ok: false };
+          // ---- 诊断：收集下拉附近的可见文本元素 ----
+          var diag = [];
+          var diagTw = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
+            acceptNode: function(node) {
+              var tag = node.tagName;
+              if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
+              var childCount = node.children ? node.children.length : 0;
+              if (childCount > 3) return NodeFilter.FILTER_SKIP;
+              var txt = (node.innerText || '').trim();
+              if (!txt || txt.length > 30 || txt.length < 1) return NodeFilter.FILTER_SKIP;
+              var r = node.getBoundingClientRect();
+              if (r.width < 10 || r.height < 10) return NodeFilter.FILTER_SKIP;
+              // 只收集视口中下部（下拉常见位置）
+              if (r.top < window.innerHeight * 0.4 || r.top > window.innerHeight + 50) return NodeFilter.FILTER_SKIP;
+              if (r.left < 200 || r.left > window.innerWidth - 100) return NodeFilter.FILTER_SKIP;
+              return NodeFilter.FILTER_ACCEPT;
+            }
+          });
+          var dnode;
+          var dcount = 0;
+          while ((dnode = diagTw.nextNode()) && dcount < 30) {
+            var dr = dnode.getBoundingClientRect();
+            diag.push(dnode.tagName + '|' + (dnode.innerText || '').trim().substring(0, 20) + '|' + Math.round(dr.left) + ',' + Math.round(dr.top));
+            dcount++;
+          }
+          return { ok: false, diag: diag.join('; ') };
         } catch(e) {
           return { ok: false, error: e.message };
         }
       })()
     `;
 
-    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string }>(
+    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string; diag?: string }>(
       webview, optionCode, 5000, `select_${label}`
     );
 
@@ -2744,7 +2773,145 @@ export async function configureVideoOptions(
       console.log(`[doubaoBridge] 已选择${label}: "${optionResult.text}", tag: ${optionResult.tag}, pos: ${optionResult.pos}`);
       return true;
     }
-    console.warn(`[doubaoBridge] ${label} 选项未找到, 尝试文本:`, optionTexts);
+
+    // 输出诊断信息
+    if (optionResult.diag) {
+      console.warn(`[doubaoBridge] ${label} 下拉诊断(可见元素):`, optionResult.diag);
+    }
+    console.warn(`[doubaoBridge] ${label} DOM查找失败, 尝试键盘导航兜底, 候选文本:`, optionTexts);
+
+    // ---- 兜底方案：键盘导航 ----
+    try {
+      const wv = webview as any;
+      if (typeof wv.sendInputEvent === 'function') {
+        // 先按 Escape 关闭可能已打开的下拉，再重新触发
+        wv.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        wv.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        await sleep(200);
+
+        // 重新点击触发按钮并聚焦
+        const refocusCode = `
+          (function() {
+            var triggerTexts = ${JSON.stringify(triggerTexts)};
+            var viewportH = window.innerHeight;
+            var best = null;
+            var bestScore = -1;
+            var allClickable = document.querySelectorAll('button, [role="button"], div, span');
+            for (var i = 0; i < allClickable.length; i++) {
+              var el = allClickable[i];
+              if (el.offsetParent === null) continue;
+              var rect = el.getBoundingClientRect();
+              if (rect.width < 20 || rect.height < 20) continue;
+              if (rect.top < viewportH * 0.5) continue;
+              var text = (el.innerText || '').trim();
+              if (!text || text.length > 30) continue;
+              var matched = false;
+              for (var t = 0; t < triggerTexts.length; t++) {
+                if (text.indexOf(triggerTexts[t]) >= 0) { matched = true; break; }
+              }
+              if (!matched) continue;
+              if (el.tagName === 'TEXTAREA' || el.contentEditable === 'true') continue;
+              if (rect.width > 300) continue;
+              var score = (rect.top > viewportH * 0.7 ? 100 : 0) + (rect.width * rect.height < 10000 ? 50 : 0);
+              if (score > bestScore) { bestScore = score; best = el; }
+            }
+            if (best) {
+              best.focus();
+              best.click();
+              return { ok: true, text: (best.innerText || '').trim() };
+            }
+            return { ok: false };
+          })()
+        `;
+        const refocusResult = await safeExecuteJS<{ ok: boolean; text?: string }>(
+          webview, refocusCode, 3000, `refocus_${label}`
+        );
+
+        if (refocusResult.ok) {
+          await sleep(800); // 等下拉展开
+
+          // 尝试多个候选文本，每个都试试 typeahead
+          for (let ti = 0; ti < optionTexts.length; ti++) {
+            const tryText = optionTexts[ti].substring(0, 6); // 取前几个字符用于 typeahead
+            if (!tryText) continue;
+
+            // 清空可能的输入，按 End 再回删
+            wv.sendInputEvent({ type: 'keyDown', keyCode: 'End' });
+            wv.sendInputEvent({ type: 'keyUp', keyCode: 'End' });
+            for (let bc = 0; bc < 10; bc++) {
+              wv.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
+              wv.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+            }
+
+            // 输入候选文本
+            for (let ci = 0; ci < tryText.length; ci++) {
+              const ch = tryText[ci];
+              wv.sendInputEvent({ type: 'keyDown', keyCode: ch, key: ch });
+              wv.sendInputEvent({ type: 'char', keyCode: ch, key: ch });
+              wv.sendInputEvent({ type: 'keyUp', keyCode: ch, key: ch });
+            }
+            await sleep(300); // 等筛选
+
+            // 按 Enter 选择
+            wv.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+            wv.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+            await sleep(500);
+
+            // 验证：读取触发按钮文本是否变化
+            const verifyCode = `
+              (function() {
+                var triggerTexts = ${JSON.stringify(triggerTexts)};
+                var viewportH = window.innerHeight;
+                var allClickable = document.querySelectorAll('button, [role="button"], div, span');
+                for (var i = 0; i < allClickable.length; i++) {
+                  var el = allClickable[i];
+                  if (el.offsetParent === null) continue;
+                  var rect = el.getBoundingClientRect();
+                  if (rect.width < 20 || rect.height < 20) continue;
+                  if (rect.top < viewportH * 0.5) continue;
+                  var text = (el.innerText || '').trim();
+                  if (!text || text.length > 30) continue;
+                  for (var t = 0; t < triggerTexts.length; t++) {
+                    if (text.indexOf(triggerTexts[t]) >= 0) {
+                      return { found: true, text: text };
+                    }
+                  }
+                }
+                return { found: false };
+              })()
+            `;
+            const verifyResult = await safeExecuteJS<{ found: boolean; text?: string }>(
+              webview, verifyCode, 2000, `verify_${label}_${ti}`
+            );
+
+            if (verifyResult.found && verifyResult.text) {
+              // 检查文本是否包含我们的目标选项关键词
+              const lowerTrigger = verifyResult.text.toLowerCase();
+              for (const ot of optionTexts) {
+                if (lowerTrigger.indexOf(ot.toLowerCase()) >= 0) {
+                  console.log(`[doubaoBridge] 已选择${label}(键盘兜底): "${verifyResult.text}", 尝试文本="${tryText}"`);
+                  return true;
+                }
+              }
+            }
+
+            // 如果没成功，重新打开下拉试下一个候选
+            if (ti < optionTexts.length - 1) {
+              await sleep(200);
+              // 重新点击触发按钮
+              const reopenResult = await safeExecuteJS<{ ok: boolean }>(
+                webview, refocusCode, 2000, `reopen_${label}_${ti}`
+              );
+              if (reopenResult.ok) await sleep(600);
+            }
+          }
+        }
+      }
+    } catch (kbErr: any) {
+      console.warn(`[doubaoBridge] ${label} 键盘导航兜底失败:`, kbErr.message);
+    }
+
+    console.warn(`[doubaoBridge] ${label} 选项未找到（全部方案失败）, 尝试文本:`, optionTexts);
     return false;
   };
 
