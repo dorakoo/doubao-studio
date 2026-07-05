@@ -249,7 +249,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           // 选 5s/10s 等原生时长时不注入，保持原版行为
           const need15sPatch = videoConfig?.duration === '15s';
           if (need15sPatch) {
-            setAccountAutomationState(accountId, 'injecting', '注入 Seedance 2.0 补丁...');
+            setAccountAutomationState(accountId, 'injecting', '注入 15s 时长补丁...');
             await inject15sVideoPatch(webview);
             await sleep(500);
           }
@@ -381,32 +381,46 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       let imageUrls: string[] = [];
 
       if (mode === 'video') {
-        // 视频模式：优先从 SSE 拦截缓存拿无水印地址
-        for (let retry = 0; retry < 8; retry++) {
+        // 视频生成耗时经常远超普通回复结束时间；以拿到视频地址为准。
+        const maxVideoWaitMs = 10 * 60 * 1000;
+        const pollIntervalMs = 5000;
+        const startWait = Date.now();
+        let pollCount = 0;
+
+        while (Date.now() - startWait < maxVideoWaitMs) {
+          pollCount++;
+
           const cached = await getCachedVideoUrl(webview);
           if (cached && cached.videoUrl) {
             imageUrls = [cached.videoUrl];
             console.log(`[Automation:${accountId}] 从缓存获取视频: ${cached.vid}`);
             break;
           }
-          console.log(`[Automation:${accountId}] 视频地址尚未就绪，等待 3s 后重试 (${retry + 1}/8)`);
-          await sleep(3000);
-        }
-        // 如果缓存没拿到，兜底用 DOM 提取
-        if (imageUrls.length === 0) {
-          console.log(`[Automation:${accountId}] 缓存未命中，尝试 DOM 提取视频地址`);
+
+          // 每次都做 DOM 兜底：有些视频地址不会走 SSE 缓存，但会晚些挂到页面 video/download 元素上。
           const rawResult = await getResultUrl(webview);
           try {
             imageUrls = JSON.parse(rawResult);
           } catch {
             imageUrls = rawResult ? [rawResult] : [];
           }
-          // DOM 兜底也要去水印
-          imageUrls = imageUrls.map(u =>
-            typeof u === 'string' && u.includes('lr=')
-              ? u.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark')
-              : u
-          );
+          imageUrls = imageUrls
+            .filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
+            .map((u) => u.includes('lr=') ? u.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark') : u);
+          if (imageUrls.length > 0) {
+            console.log(`[Automation:${accountId}] 从 DOM 获取视频地址: ${imageUrls.length} 个`);
+            break;
+          }
+
+          const elapsedSec = Math.round((Date.now() - startWait) / 1000);
+          const maxSec = Math.round(maxVideoWaitMs / 1000);
+          console.log(`[Automation:${accountId}] 视频产物尚未就绪，等待 ${pollIntervalMs / 1000}s 后重试 (${elapsedSec}/${maxSec}s, 第 ${pollCount} 次)`);
+          setAccountAutomationState(accountId, 'generating', `等待视频产物... (${elapsedSec}/${maxSec}s)`);
+          await sleep(pollIntervalMs);
+        }
+
+        if (imageUrls.length === 0) {
+          throw new Error('视频产物等待超时，尚未获取到可下载地址');
         }
       } else {
         // 图片模式：用 DOM 提取，最多重试 5 次

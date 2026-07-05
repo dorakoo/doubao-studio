@@ -22,7 +22,7 @@ export interface WebviewHandle {
   executeJavaScript(code: string): Promise<any>;
   loadURL(url: string): void;
   getURL(): string;
-  sendInputEvent?(event: ElectronKeyboardEvent): void;
+  sendInputEvent?(event: ElectronInputEvent): void;
 }
 
 /** Electron webview sendInputEvent 的键盘事件类型 */
@@ -34,6 +34,17 @@ interface ElectronKeyboardEvent {
   text?: string;
   modifiers?: string[];
 }
+
+/** Electron webview sendInputEvent 的鼠标事件类型 */
+interface ElectronMouseEvent {
+  type: 'mouseDown' | 'mouseUp' | 'mouseMove';
+  x: number;
+  y: number;
+  button?: 'left' | 'middle' | 'right';
+  clickCount?: number;
+}
+
+type ElectronInputEvent = ElectronKeyboardEvent | ElectronMouseEvent;
 
 // ==================== 工具函数 ====================
 
@@ -907,7 +918,7 @@ async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
 async function tryInjectOnce(
   webview: WebviewHandle,
   prompt: string
-): Promise<{ ok: boolean; error?: string; method?: string; tag?: string; actualLen?: number }> {
+): Promise<{ ok: boolean; error?: string; method?: string; tag?: string; actualLen?: number; preview?: string }> {
   // 安全的 JSON 序列化（处理特殊字符）
   const safePrompt = JSON.stringify(prompt);
 
@@ -1409,7 +1420,7 @@ async function tryInjectOnce(
   `;
 
   try {
-    const result = await safeExecuteJS<{ ok: boolean; error?: string; tag?: string; method?: string; actualLen?: number }>(
+    const result = await safeExecuteJS<{ ok: boolean; error?: string; tag?: string; method?: string; actualLen?: number; preview?: string }>(
       webview, code, 10000, 'injectPrompt'
     );
     return result;
@@ -2649,6 +2660,19 @@ export async function configureVideoOptions(
     optionTexts: string[],
     label: string
   ): Promise<boolean> => {
+    const canNativeClick = typeof webview.sendInputEvent === 'function';
+    const nativeClick = async (clickPos?: string): Promise<boolean> => {
+      if (!canNativeClick || !clickPos) return false;
+      const parts = clickPos.split(',').map((n) => Number(n));
+      if (parts.length !== 2 || parts.some((n) => !Number.isFinite(n))) return false;
+      const [x, y] = parts;
+      webview.sendInputEvent!({ type: 'mouseMove', x, y });
+      webview.sendInputEvent!({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+      await sleep(35);
+      webview.sendInputEvent!({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+      return true;
+    };
+
     // 操作前确保配置栏可见
     await ensureVideoConfigBar();
     await sleep(200);
@@ -2658,6 +2682,8 @@ export async function configureVideoOptions(
       (function() {
         try {
           var triggerTexts = ${JSON.stringify(triggerTexts)};
+          var triggerLabel = ${JSON.stringify(label)};
+          var useNativeClick = ${JSON.stringify(canNativeClick)};
           var viewportH = window.innerHeight;
           var candidates = [];
 
@@ -2692,25 +2718,28 @@ export async function configureVideoOptions(
           var r = best.rect;
 
           // 点击右边缘（下拉箭头通常在按钮右侧）
-          var clickX = r.right - 8;
+          var isModelTrigger = triggerLabel.indexOf('模型') >= 0 || triggerLabel.toLowerCase().indexOf('model') >= 0;
+          var clickX = isModelTrigger ? (r.left + r.width / 2) : (r.right - 8);
           var clickY = r.top + r.height / 2;
 
           // 用 MouseEvent 模拟精确位置点击
-          var evt1 = new MouseEvent('mousedown', {
-            bubbles: true, cancelable: true, view: window,
-            clientX: clickX, clientY: clickY, button: 0
-          });
-          var evt2 = new MouseEvent('mouseup', {
-            bubbles: true, cancelable: true, view: window,
-            clientX: clickX, clientY: clickY, button: 0
-          });
-          var evt3 = new MouseEvent('click', {
-            bubbles: true, cancelable: true, view: window,
-            clientX: clickX, clientY: clickY, button: 0
-          });
-          best.el.dispatchEvent(evt1);
-          best.el.dispatchEvent(evt2);
-          best.el.dispatchEvent(evt3);
+          if (!useNativeClick) {
+            var evt1 = new MouseEvent('mousedown', {
+              bubbles: true, cancelable: true, view: window,
+              clientX: clickX, clientY: clickY, button: 0
+            });
+            var evt2 = new MouseEvent('mouseup', {
+              bubbles: true, cancelable: true, view: window,
+              clientX: clickX, clientY: clickY, button: 0
+            });
+            var evt3 = new MouseEvent('click', {
+              bubbles: true, cancelable: true, view: window,
+              clientX: clickX, clientY: clickY, button: 0
+            });
+            best.el.dispatchEvent(evt1);
+            best.el.dispatchEvent(evt2);
+            best.el.dispatchEvent(evt3);
+          }
 
           return {
             ok: true, text: best.text,
@@ -2759,6 +2788,9 @@ export async function configureVideoOptions(
       console.warn(`[doubaoBridge] ${label} 触发按钮未找到:`, triggerResult.error, triggerTexts);
     } else {
       console.log(`[doubaoBridge] 已点击${label}触发按钮: "${triggerResult.text}", pos: ${triggerResult.pos}, clickPos: ${triggerResult.clickPos}`);
+      if (await nativeClick(triggerResult.clickPos)) {
+        console.log(`[doubaoBridge] ${label} 已发送真实鼠标点击: ${triggerResult.clickPos}`);
+      }
       await sleep(1500); // 等待下拉/面板展开
     }
 
@@ -2768,6 +2800,7 @@ export async function configureVideoOptions(
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
           var snapBefore = ${JSON.stringify(snapshotBefore)};
+          var useNativeClick = ${JSON.stringify(canNativeClick)};
           var snapMap = {};
           for (var sb = 0; sb < snapBefore.length; sb++) {
             snapMap[snapBefore[sb]] = true;
@@ -2801,8 +2834,14 @@ export async function configureVideoOptions(
           function tryClick(el, text) {
             if (!el || !isVisible(el)) return false;
             var rect = el.getBoundingClientRect();
-            el.click();
-            return { ok: true, text: (text || el.innerText || '').trim().substring(0, 50), tag: el.tagName, pos: Math.round(rect.left) + ',' + Math.round(rect.top) };
+            if (!useNativeClick) el.click();
+            return {
+              ok: true,
+              text: (text || el.innerText || '').trim().substring(0, 50),
+              tag: el.tagName,
+              pos: Math.round(rect.left) + ',' + Math.round(rect.top),
+              clickPos: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2)
+            };
           }
 
           // ---- 策略A：点击后新出现的元素（最可能是下拉选项） ----
@@ -2912,16 +2951,118 @@ export async function configureVideoOptions(
       })()
     `;
 
-    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; error?: string; diag?: string }>(
+    const optionResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; clickPos?: string; error?: string; diag?: string }>(
       webview, optionCode, 6000, `select_${label}`
     );
 
     if (optionResult.ok) {
       console.log(`[doubaoBridge] 已选择${label}: "${optionResult.text}", tag: ${optionResult.tag}, pos: ${optionResult.pos}`);
+      if (await nativeClick(optionResult.clickPos)) {
+        console.log(`[doubaoBridge] ${label} 选项已发送真实鼠标点击: ${optionResult.clickPos}`);
+      }
       await sleep(300);
       // 选择后重新确保配置栏可见
       await ensureVideoConfigBar();
       return true;
+    }
+
+    const isModelLabel = label.indexOf('模型') >= 0 || label.toLowerCase().indexOf('model') >= 0;
+    if (isModelLabel && triggerResult.ok) {
+      const targetIndex = optionTexts.some((t) => /fast/i.test(t)) ? 1 : optionTexts.some((t) => /mini/i.test(t)) ? 2 : 0;
+      type ModelFallbackResult = { ok: boolean; clickPos?: string; optionPos?: string; triggerText?: string; error?: string };
+      const fallbackOpen: ModelFallbackResult = await safeExecuteJS<ModelFallbackResult>(
+        webview,
+        `
+          (function() {
+            try {
+              var targetIndex = ${JSON.stringify(targetIndex)};
+              function visible(el) {
+                if (!el) return false;
+                var r = el.getBoundingClientRect();
+                return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.45 && r.bottom < window.innerHeight + 20;
+              }
+              function fire(el, x, y) {
+                var target = document.elementFromPoint(x, y) || el;
+                var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+                try { el.focus && el.focus(); } catch(e) {}
+                try { target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch(e) {}
+                try { target.dispatchEvent(new MouseEvent('mousedown', opts)); } catch(e) {}
+                try { target.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch(e) {}
+                try { target.dispatchEvent(new MouseEvent('mouseup', opts)); } catch(e) {}
+                try { target.dispatchEvent(new MouseEvent('click', opts)); } catch(e) {}
+              }
+              var all = Array.from(document.querySelectorAll('button, [role="button"], div'));
+              var candidates = [];
+              for (var i = 0; i < all.length; i++) {
+                var el = all[i];
+                if (!visible(el)) continue;
+                var text = (el.innerText || '').trim();
+                if (!text || text.length > 35) continue;
+                if (text.indexOf('模型') < 0) continue;
+                var r = el.getBoundingClientRect();
+                if (r.width > 260) continue;
+                var score = (el.tagName === 'BUTTON' ? 100 : 0) + (text.indexOf('Mini') >= 0 || text.indexOf('Fast') >= 0 || text.indexOf('2.0') >= 0 ? 60 : 0) + (r.top > window.innerHeight * 0.7 ? 40 : 0);
+                candidates.push({ el: el, rect: r, text: text, score: score });
+              }
+              if (!candidates.length) return { ok: false, error: 'model trigger not found' };
+              candidates.sort(function(a, b) { return b.score - a.score; });
+              var best = candidates[0];
+              var r = best.rect;
+
+              var points = [
+                [r.right - 12, r.top + r.height / 2],
+                [r.left + r.width / 2, r.top + r.height / 2],
+                [r.left + 24, r.top + r.height / 2]
+              ];
+              for (var p = 0; p < points.length; p++) {
+                fire(best.el, points[p][0], points[p][1]);
+              }
+
+              var optionX = Math.round(r.left + Math.min(Math.max(r.width * 0.75, 100), 170));
+              var rowCentersFromTriggerTop = [-190, -120, -50];
+              var optionY = Math.round(r.top + rowCentersFromTriggerTop[targetIndex]);
+              optionY = Math.max(80, Math.min(window.innerHeight - 40, optionY));
+              return {
+                ok: true,
+                triggerText: best.text,
+                clickPos: Math.round(r.right - 12) + ',' + Math.round(r.top + r.height / 2),
+                optionPos: optionX + ',' + optionY
+              };
+            } catch(e) {
+              return { ok: false, error: e.message };
+            }
+          })()
+        `,
+        4000,
+        `model_fallback_open_${label}`
+      ).catch((err) => ({ ok: false, error: err.message }));
+
+      if (fallbackOpen.ok) {
+        console.log(`[doubaoBridge] ${label} 模型专用兜底已触发: "${fallbackOpen.triggerText}", optionPos=${fallbackOpen.optionPos}`);
+        await sleep(900);
+
+        const retryResult = await safeExecuteJS<{ ok: boolean; text?: string; tag?: string; pos?: string; clickPos?: string; error?: string; diag?: string }>(
+          webview, optionCode, 6000, `select_${label}_fallback`
+        );
+        if (retryResult.ok) {
+          console.log(`[doubaoBridge] 兜底已选择${label}: "${retryResult.text}", tag: ${retryResult.tag}, pos: ${retryResult.pos}`);
+          if (await nativeClick(retryResult.clickPos)) {
+            console.log(`[doubaoBridge] ${label} 兜底选项已发送真实鼠标点击: ${retryResult.clickPos}`);
+          }
+          await sleep(300);
+          await ensureVideoConfigBar();
+          return true;
+        }
+
+        if (await nativeClick(fallbackOpen.optionPos)) {
+          console.log(`[doubaoBridge] ${label} 按截图结构点击模型选项坐标: ${fallbackOpen.optionPos}`);
+          await sleep(500);
+          await ensureVideoConfigBar();
+          return true;
+        }
+      } else {
+        console.warn(`[doubaoBridge] ${label} 模型专用兜底失败:`, fallbackOpen.error);
+      }
     }
 
     if (optionResult.diag) {
@@ -3214,12 +3355,12 @@ export async function uploadReferenceAudio(
   return result?.ok || false;
 }
 
-// ==================== 15秒 Seedance 2.0 视频生成注入 ====================
+// ==================== 15秒视频生成注入 ====================
 
 /**
- * 注入 15 秒 Seedance 2.0 视频生成补丁到豆包页面
+ * 注入 15 秒视频生成补丁到豆包页面
  * 通过 monkey-patch fetch 和 XMLHttpRequest 拦截 /chat/completion 请求
- * 强制视频生成使用 seedance_v2.0 模型 + 15秒时长
+ * 强制视频生成使用 15秒时长
  * 同时拦截 SSE 响应，提取 vid 和无水印视频地址存入 window.__doubaoVideoCache
  */
 export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boolean> {
@@ -3304,10 +3445,9 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
           }
           var param;
           try { param = JSON.parse(ability.ability_param); } catch(e) { param = {}; }
-          param.model = 'seedance_v2.0';
           param.duration = 15;
           ability.ability_param = JSON.stringify(param);
-          console.log('[15sPatch] 已注入 Seedance 2.0 + 15s 参数');
+          console.log('[15sPatch] 已注入 15s 参数，保留页面当前模型');
           return { changed: true, body: JSON.stringify(payload) };
         } catch(e) {
           return { changed: false, body: rawBody };
@@ -3425,7 +3565,7 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
         return originalXHRSend.call(this, body);
       };
 
-      console.log('[15sPatch] Seedance 2.0 + 15s 视频生成补丁已注入');
+      console.log('[15sPatch] 15s 视频生成补丁已注入');
     })();
   `;
 

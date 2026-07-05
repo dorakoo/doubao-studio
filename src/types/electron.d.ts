@@ -69,7 +69,7 @@ export interface ElectronAPI {
   };
   tasks: {
     list: () => Promise<Task[]>;
-    add: (prompts: string[], mode?: string, videoConfig?: any, attachments?: string[]) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
+    add: (prompts: string[], mode?: string, videoConfig?: any, attachments?: string[], audioAttachment?: string) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
     assign: (taskId: string, accountId: string) => Promise<{ success: boolean; error?: string }>;
     updateStatus: (
       taskId: string,
@@ -82,6 +82,7 @@ export interface ElectronAPI {
     batchPause: () => Promise<{ success: boolean }>;
     getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
     selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
+    selectAudio: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
     readFileAsBase64: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
     downloadOutputs: (
       outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>,
