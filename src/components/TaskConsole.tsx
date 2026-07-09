@@ -290,8 +290,7 @@ const TaskConsole: React.FC = () => {
     const canManualExtractVideo =
       taskMode === 'video' &&
       !!task.assignedAccountId &&
-      !isActive &&
-      (task.status === 'fail' || (task.status === 'done' && (!task.outputs || task.outputs.length === 0)));
+      !isActive;
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>

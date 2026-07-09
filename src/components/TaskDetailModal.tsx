@@ -85,7 +85,8 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
   const canManualExtractVideo =
     task.mode === 'video' &&
     !!task.assignedAccountId &&
-    (task.status === 'fail' || (task.status === 'done' && (!task.outputs || task.outputs.length === 0)));
+    task.status !== 'executing' &&
+    task.status !== 'generating';
 
   // ---- 操作处理 ----
 

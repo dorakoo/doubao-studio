@@ -257,6 +257,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       try {
+        useAccountStore.getState().selectAccount(accountId);
         useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '手动提取视频地址...');
         const outputs = await extractVideoOutputs(webview);
         if (outputs.length === 0) {
@@ -267,7 +268,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
         await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
         useTaskStore.getState().setAccountAutomationState(accountId, 'completed', '视频地址已提取');
-        message.success(`已提取 ${outputs.length} 个视频地址`);
+        message.success(`已提取并覆盖 ${outputs.length} 个视频地址`);
       } catch (err: any) {
         message.error(`提取失败：${err.message || err}`);
         useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
