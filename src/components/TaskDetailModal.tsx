@@ -25,6 +25,7 @@ import {
   CalendarOutlined,
   LinkOutlined,
   InfoCircleOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons';
 import type { Task } from '../types';
 import {
@@ -81,6 +82,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
   const canRetry = task.status === 'fail' || task.status === 'done';
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
+  const canManualExtractVideo =
+    task.mode === 'video' &&
+    !!task.assignedAccountId &&
+    (task.status === 'fail' || (task.status === 'done' && (!task.outputs || task.outputs.length === 0)));
 
   // ---- 操作处理 ----
 
@@ -166,6 +171,17 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
           {canRetry && (
             <Button type="primary" icon={<ReloadOutlined />} onClick={handleRetry}>
               重新执行
+            </Button>
+          )}
+          {canManualExtractVideo && (
+            <Button
+              icon={<DownloadOutlined />}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('manual-extract-video-output', { detail: { task } }));
+                message.info('正在尝试提取视频地址...');
+              }}
+            >
+              提取视频
             </Button>
           )}
           <Button onClick={onClose}>关闭</Button>

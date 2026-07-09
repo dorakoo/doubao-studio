@@ -287,6 +287,11 @@ const TaskConsole: React.FC = () => {
     const isQueued = task.status === 'queued';
     const canStart = isQueued && task.assignedAccountId && !accountBusy[task.assignedAccountId];
     const taskMode = task.mode || 'chat';
+    const canManualExtractVideo =
+      taskMode === 'video' &&
+      !!task.assignedAccountId &&
+      !isActive &&
+      (task.status === 'fail' || (task.status === 'done' && (!task.outputs || task.outputs.length === 0)));
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
@@ -349,6 +354,18 @@ const TaskConsole: React.FC = () => {
                 >
                   查看结果
                 </a>
+              )}
+              {canManualExtractVideo && (
+                <Button
+                  size="small"
+                  icon={<DownloadOutlined />}
+                  onClick={() => {
+                    window.dispatchEvent(new CustomEvent('manual-extract-video-output', { detail: { task } }));
+                    message.info('正在尝试提取视频地址...');
+                  }}
+                >
+                  提取视频
+                </Button>
               )}
             </div>
           </div>

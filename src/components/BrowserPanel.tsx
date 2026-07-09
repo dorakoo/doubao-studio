@@ -9,6 +9,7 @@
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
+import { message } from 'antd';
 import type { Account, Task } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -58,6 +59,52 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const accountAutoMsg = useTaskStore((s) => s.accountAutoMessage);
   const executingTasks = useTaskStore((s) => s.executingTasks);
   const tasks = useTaskStore((s) => s.tasks);
+
+  const normalizeVideoUrls = (urls: string[]): string[] => {
+    const seen = new Set<string>();
+    const result: string[] = [];
+    for (const raw of urls) {
+      if (typeof raw !== 'string') continue;
+      const trimmed = raw.trim();
+      if (!trimmed || !/^https?:\/\//i.test(trimmed)) continue;
+      const lower = trimmed.toLowerCase();
+      const isImageOnly = /\.(png|jpe?g|webp|gif)(\?|#|$)/i.test(lower) || lower.includes('image') || lower.includes('poster');
+      const isLikelyVideo =
+        /\.(mp4|mov|m4v|webm|m3u8)(\?|#|$)/i.test(lower) ||
+        lower.includes('video') ||
+        lower.includes('vod') ||
+        lower.includes('play') ||
+        lower.includes('mime_type=video') ||
+        lower.includes('lr=');
+      if (isImageOnly && !isLikelyVideo) continue;
+      if (!isLikelyVideo) continue;
+      const clean = trimmed.includes('lr=')
+        ? trimmed.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark')
+        : trimmed;
+      if (!seen.has(clean)) {
+        seen.add(clean);
+        result.push(clean);
+      }
+    }
+    return result;
+  };
+
+  const extractVideoOutputs = async (webview: HTMLWebViewElement): Promise<string[]> => {
+    const cached = await getCachedVideoUrl(webview);
+    if (cached && cached.videoUrl) {
+      return normalizeVideoUrls([cached.videoUrl]);
+    }
+
+    const rawResult = await getResultUrl(webview);
+    let urls: string[] = [];
+    try {
+      const parsed = JSON.parse(rawResult);
+      urls = Array.isArray(parsed) ? parsed : [];
+    } catch {
+      urls = rawResult ? [rawResult] : [];
+    }
+    return normalizeVideoUrls(urls);
+  };
 
   const activeAutoState: AutomationState | undefined = activeAccount
     ? accountAutoState[activeAccount.id]
@@ -194,6 +241,42 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
   }, [activeAccount?.id]);
+
+  // ---- 手动补抓视频产物/去水印 ----
+  useEffect(() => {
+    const handleManualExtract = async (event: Event) => {
+      const customEvent = event as CustomEvent<{ task: Task }>;
+      const task = customEvent.detail?.task;
+      if (!task || task.mode !== 'video') return;
+
+      const accountId = task.assignedAccountId;
+      const webview = accountId ? registryRef.current.get(accountId) : null;
+      if (!accountId || !webview) {
+        message.error('未找到该任务对应的账号页面');
+        return;
+      }
+
+      try {
+        useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '手动提取视频地址...');
+        const outputs = await extractVideoOutputs(webview);
+        if (outputs.length === 0) {
+          message.warning('暂未提取到视频下载地址，请稍后再试');
+          useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+          return;
+        }
+
+        await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
+        useTaskStore.getState().setAccountAutomationState(accountId, 'completed', '视频地址已提取');
+        message.success(`已提取 ${outputs.length} 个视频地址`);
+      } catch (err: any) {
+        message.error(`提取失败：${err.message || err}`);
+        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+      }
+    };
+
+    window.addEventListener('manual-extract-video-output', handleManualExtract);
+    return () => window.removeEventListener('manual-extract-video-output', handleManualExtract);
+  }, []);
 
   // ---- V3 自动化：监听 per-account 执行状态 ----
   useEffect(() => {
@@ -382,40 +465,29 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       if (mode === 'video') {
         // 视频生成耗时经常远超普通回复结束时间；以拿到视频地址为准。
-        const maxVideoWaitMs = 10 * 60 * 1000;
-        const pollIntervalMs = 5000;
+        const maxVideoWaitMs = 60 * 60 * 1000;
+        const pollIntervalMs = 10000;
         const startWait = Date.now();
         let pollCount = 0;
+        let lastLogBucket = -1;
 
         while (Date.now() - startWait < maxVideoWaitMs) {
           pollCount++;
 
-          const cached = await getCachedVideoUrl(webview);
-          if (cached && cached.videoUrl) {
-            imageUrls = [cached.videoUrl];
-            console.log(`[Automation:${accountId}] 从缓存获取视频: ${cached.vid}`);
-            break;
-          }
-
-          // 每次都做 DOM 兜底：有些视频地址不会走 SSE 缓存，但会晚些挂到页面 video/download 元素上。
-          const rawResult = await getResultUrl(webview);
-          try {
-            imageUrls = JSON.parse(rawResult);
-          } catch {
-            imageUrls = rawResult ? [rawResult] : [];
-          }
-          imageUrls = imageUrls
-            .filter((u): u is string => typeof u === 'string' && u.trim().length > 0)
-            .map((u) => u.includes('lr=') ? u.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark') : u);
+          imageUrls = await extractVideoOutputs(webview);
           if (imageUrls.length > 0) {
-            console.log(`[Automation:${accountId}] 从 DOM 获取视频地址: ${imageUrls.length} 个`);
+            console.log(`[Automation:${accountId}] 获取视频地址成功: ${imageUrls.length} 个`);
             break;
           }
 
           const elapsedSec = Math.round((Date.now() - startWait) / 1000);
           const maxSec = Math.round(maxVideoWaitMs / 1000);
-          console.log(`[Automation:${accountId}] 视频产物尚未就绪，等待 ${pollIntervalMs / 1000}s 后重试 (${elapsedSec}/${maxSec}s, 第 ${pollCount} 次)`);
-          setAccountAutomationState(accountId, 'generating', `等待视频产物... (${elapsedSec}/${maxSec}s)`);
+          const logBucket = Math.floor(elapsedSec / 60);
+          if (logBucket !== lastLogBucket || pollCount <= 3) {
+            console.log(`[Automation:${accountId}] 视频产物尚未就绪，继续等待 (${elapsedSec}/${maxSec}s, 第 ${pollCount} 次)`);
+            lastLogBucket = logBucket;
+          }
+          setAccountAutomationState(accountId, 'generating', `等待视频产物... (${Math.floor(elapsedSec / 60)}/${Math.floor(maxSec / 60)}分钟)`);
           await sleep(pollIntervalMs);
         }
 
