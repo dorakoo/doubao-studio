@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand';
-import type { Account, AccountStatus } from '../types';
+import type { Account, AccountStatus, GenerationMode, TaskErrorCode } from '../types';
 
 // ==================== 类型 ====================
 
@@ -37,6 +37,9 @@ interface AccountState {
   updateAccountStatus: (id: string, status: AccountStatus) => Promise<void>;
   /** 切换置顶状态 */
   togglePinned: (id: string) => Promise<void>;
+  recordSeedanceUsage: (id: string, units: number) => Promise<void>;
+  markSeedanceExhausted: (id: string) => Promise<void>;
+  recordAccountOutcome: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: TaskErrorCode) => Promise<void>;
   /** 清除错误 */
   clearError: () => void;
 }
@@ -170,6 +173,42 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     set({ accounts });
   },
 
+  recordSeedanceUsage: async (id: string, units: number) => {
+    const result = await window.electronAPI.accounts.updateSeedanceQuota(id, 'consume', units);
+    if (result.success && result.account) {
+      set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
+    }
+  },
+
+  markSeedanceExhausted: async (id: string) => {
+    const result = await window.electronAPI.accounts.updateSeedanceQuota(id, 'exhausted');
+    if (result.success && result.account) {
+      set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
+    }
+  },
+
+  recordAccountOutcome: async (id, action, errorCode) => {
+    const result = await window.electronAPI.accounts.updateHealth(id, action, errorCode);
+    if (result.success && result.account) {
+      set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
+    }
+  },
+
   // 清除错误
   clearError: () => set({ error: null }),
 }));
+
+export function getAccountSchedulingScore(account: Account, load: number, mode: GenerationMode): number {
+  const health = account.health;
+  if (account.status === 'error' || health?.loginState === 'expired') return Number.POSITIVE_INFINITY;
+  if (health?.cooldownUntil && new Date(health.cooldownUntil).getTime() > Date.now()) return Number.POSITIVE_INFINITY;
+  if (health?.verificationRequired) return Number.POSITIVE_INFINITY;
+  if (mode === 'video' && account.seedanceQuota?.exhausted) return Number.POSITIVE_INFINITY;
+
+  const quotaRemaining = account.seedanceQuota
+    ? Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)
+    : 0;
+  const failurePenalty = (health?.consecutiveFailures || 0) * 4;
+  const quotaBonus = mode === 'video' ? Math.min(quotaRemaining, 10) * 0.25 : 0;
+  return load * 10 + failurePenalty - quotaBonus - (account.pinned ? 0.5 : 0);
+}

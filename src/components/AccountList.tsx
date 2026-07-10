@@ -67,6 +67,7 @@ export const AccountList: React.FC = () => {
   const getAccountDisplay = useCallback(
     (accountId: string): { label: string; color: string; animated: boolean; detail: string } => {
       const autoState = accountAutomationState[accountId] as AutomationState | undefined;
+      const account = accounts.find((item) => item.id === accountId);
       if (autoState && autoState !== 'idle') {
         const display = AUTO_STATE_DISPLAY[autoState] || AUTO_STATE_DISPLAY.idle;
         return {
@@ -78,9 +79,21 @@ export const AccountList: React.FC = () => {
       if (isBusy) {
         return { label: '忙碌', color: '#fbbf24', animated: true, detail: '' };
       }
+      if (account?.health?.loginState === 'expired') {
+        return { label: '登录已失效', color: '#fb7185', animated: false, detail: '请重新登录' };
+      }
+      if (account?.health?.verificationRequired) {
+        return { label: '需要验证', color: '#fb923c', animated: false, detail: '完成验证后恢复' };
+      }
+      if (account?.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) {
+        return {
+          label: '冷却中', color: '#94a3b8', animated: false,
+          detail: `至 ${new Date(account.health.cooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
+        };
+      }
       return { label: '空闲', color: '#4ade80', animated: false, detail: '' };
     },
-    [accountAutomationState, accountBusy, accountAutoMessage]
+    [accounts, accountAutomationState, accountBusy, accountAutoMessage]
   );
 
   // ---- 排序逻辑 ----
@@ -92,18 +105,29 @@ export const AccountList: React.FC = () => {
       filtered = accounts.filter(a => a.name.toLowerCase().includes(kw));
     }
     return [...filtered].sort((a, b) => {
-      // 1. 置顶优先
+      // 1. 不健康或冷却中的账号沉底
+      const now = Date.now();
+      const aUnavailable = a.health?.loginState === 'expired' || !!a.health?.verificationRequired ||
+        (!!a.health?.cooldownUntil && new Date(a.health.cooldownUntil).getTime() > now);
+      const bUnavailable = b.health?.loginState === 'expired' || !!b.health?.verificationRequired ||
+        (!!b.health?.cooldownUntil && new Date(b.health.cooldownUntil).getTime() > now);
+      if (aUnavailable !== bUnavailable) return aUnavailable ? 1 : -1;
+      // 2. Seedance 今日额度用尽的账号统一沉底
+      const aExhausted = !!a.seedanceQuota?.exhausted;
+      const bExhausted = !!b.seedanceQuota?.exhausted;
+      if (aExhausted !== bExhausted) return aExhausted ? 1 : -1;
+      // 3. 置顶优先
       if (a.pinned !== b.pinned) {
         return a.pinned ? -1 : 1;
       }
-      // 2. 空闲 vs 忙碌
+      // 4. 空闲 vs 忙碌
       const aBusy = accountBusy[a.id] || false;
       const bBusy = accountBusy[b.id] || false;
       if (aBusy !== bBusy) {
         return aBusy ? 1 : -1;
       }
-      // 3. 同为空闲或同为忙碌，按原始顺序
-      return 0;
+      // 5. 连续失败少的账号优先
+      return (a.health?.consecutiveFailures || 0) - (b.health?.consecutiveFailures || 0);
     });
   }, [accounts, accountBusy, searchText]);
 
@@ -326,6 +350,23 @@ export const AccountList: React.FC = () => {
                         </span>
                       )}
                     </div>
+                    {account.seedanceQuota && (
+                      <div
+                        className="text-2xs mt-0.5 truncate"
+                        style={{ color: account.seedanceQuota.exhausted ? '#fb7185' : '#818cf8' }}
+                        title="本地预测值：Seedance 2.0 标准模型通常按 2 个单位估算"
+                      >
+                        {account.seedanceQuota.exhausted
+                          ? 'Seedance 今日额度已用尽'
+                          : `Seedance 预计剩余 ${Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)} 单位`}
+                      </div>
+                    )}
+                    {!!account.health && (account.health.successCount > 0 || account.health.failureCount > 0) && (
+                      <div className="text-2xs mt-0.5 text-db-text-muted truncate">
+                        成功 {account.health.successCount} · 失败 {account.health.failureCount}
+                        {account.health.consecutiveFailures > 0 ? ` · 连续失败 ${account.health.consecutiveFailures}` : ''}
+                      </div>
+                    )}
                   </div>
 
                   {/* 置顶快捷按钮 */}

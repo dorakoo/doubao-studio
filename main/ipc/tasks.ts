@@ -4,7 +4,7 @@
  * 负责：任务队列管理、状态流转、批量操作、生成模式
  */
 
-import { ipcMain, dialog } from 'electron';
+import { ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -22,8 +22,73 @@ export type VideoDuration = '5s' | '10s' | '15s';
 /** 视频比例 */
 export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
 
-/** 任务状态（V2 扩展） */
-export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
+export type TaskStatus =
+  | 'queued'
+  | 'executing'
+  | 'generating'
+  | 'waiting_verification'
+  | 'paused'
+  | 'done'
+  | 'fail'
+  | 'cancelled';
+
+export type TaskStage =
+  | 'queued' | 'preparing_account' | 'new_conversation' | 'switching_mode'
+  | 'configuring' | 'uploading_assets' | 'injecting_prompt' | 'submitting'
+  | 'waiting_verification' | 'generating' | 'extracting_outputs'
+  | 'completed' | 'paused' | 'failed' | 'cancelled';
+
+export interface TaskErrorInfo {
+  code: string;
+  message: string;
+  recoverable: boolean;
+  detectedAt: string;
+}
+
+export interface TaskRunSnapshot {
+  runId: string;
+  attempt: number;
+  stage: TaskStage;
+  message: string;
+  startedAt: string;
+  stageStartedAt: string;
+  lastHeartbeatAt: string;
+  submittedAt?: string;
+  conversationUrl?: string;
+  input: {
+    prompt: string;
+    mode: GenerationMode;
+    videoConfig?: Task['videoConfig'];
+    attachments: string[];
+    audioAttachment?: string;
+  };
+}
+
+export interface TaskArtifact {
+  id: string;
+  url: string;
+  kind: 'image' | 'video' | 'file';
+  source: 'network' | 'page' | 'manual';
+  runId?: string;
+  conversationUrl?: string;
+  discoveredAt: string;
+}
+
+export interface DownloadJob {
+  id: string;
+  taskId: string;
+  accountId: string | null;
+  mode: GenerationMode;
+  url: string;
+  status: 'queued' | 'downloading' | 'done' | 'failed';
+  attempts: number;
+  saveDir: string;
+  filePath?: string;
+  bytes?: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 /** 任务数据结构 */
 export interface Task {
@@ -44,10 +109,15 @@ export interface Task {
   };
   /** 参考图片路径列表 */
   attachments?: string[];
+  /** 参考音频文件路径 */
+  audioAttachment?: string;
   /** 执行结果/产出描述 */
   result: string | null;
   /** 产物的下载链接列表 */
   outputs: string[];
+  artifacts?: TaskArtifact[];
+  runtime?: TaskRunSnapshot;
+  errorInfo?: TaskErrorInfo;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,23 +125,122 @@ export interface Task {
 // ==================== 数据持久化 ====================
 
 const STORE_FILE = 'tasks.json';
+const DOWNLOAD_STORE_FILE = 'downloads.json';
+let downloadRecoveryApplied = false;
 
 function loadTasks(): Task[] {
-  return readJSON<Task[]>(STORE_FILE, []);
+  return readJSON<Task[]>(STORE_FILE, []).map((task) => ({
+    ...task,
+    mode: task.mode || 'chat',
+    outputs: Array.isArray(task.outputs) ? task.outputs : [],
+    artifacts: Array.isArray(task.artifacts) ? task.artifacts : [],
+  }));
+}
+
+function artifactId(url: string): string {
+  let hash = 5381;
+  for (let index = 0; index < url.length; index++) hash = ((hash << 5) + hash) ^ url.charCodeAt(index);
+  return `artifact-${(hash >>> 0).toString(16)}`;
+}
+
+function appendArtifacts(task: Task, outputs: string[], source: TaskArtifact['source'] = 'network'): void {
+  const existing = new Map((task.artifacts || []).map((artifact) => [artifact.url, artifact]));
+  for (const url of outputs) {
+    if (!url || existing.has(url)) continue;
+    const artifact: TaskArtifact = {
+      id: artifactId(url),
+      url,
+      kind: task.mode === 'video' ? 'video' : task.mode === 'image' ? 'image' : 'file',
+      source,
+      runId: task.runtime?.runId,
+      conversationUrl: task.runtime?.conversationUrl,
+      discoveredAt: new Date().toISOString(),
+    };
+    existing.set(url, artifact);
+  }
+  task.artifacts = [...existing.values()];
 }
 
 function saveTasks(tasks: Task[]): boolean {
   return writeJSON(STORE_FILE, tasks);
 }
 
+function loadDownloadJobs(): DownloadJob[] {
+  const jobs = readJSON<DownloadJob[]>(DOWNLOAD_STORE_FILE, []);
+  if (!downloadRecoveryApplied) {
+    downloadRecoveryApplied = true;
+    let changed = false;
+    for (const job of jobs) {
+      if (job.status !== 'downloading') continue;
+      job.status = 'failed';
+      job.error = '程序退出导致下载中断，可重新下载';
+      job.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+    if (changed) writeJSON(DOWNLOAD_STORE_FILE, jobs);
+  }
+  return jobs;
+}
+
+function saveDownloadJobs(jobs: DownloadJob[]): boolean {
+  return writeJSON(DOWNLOAD_STORE_FILE, jobs.slice(-1000));
+}
+
+function resetTaskForQueue(task: Task): void {
+  task.status = 'queued';
+  task.result = null;
+  task.outputs = [];
+  task.errorInfo = undefined;
+  if (task.runtime) {
+    const now = new Date().toISOString();
+    task.runtime = {
+      ...task.runtime,
+      stage: 'queued',
+      message: '等待执行',
+      stageStartedAt: now,
+      lastHeartbeatAt: now,
+    };
+  }
+  task.updatedAt = new Date().toISOString();
+}
+
+function recoverInterruptedTasks(): void {
+  const tasks = loadTasks();
+  let changed = false;
+  const now = new Date().toISOString();
+  for (const task of tasks) {
+    if (task.status !== 'executing' && task.status !== 'generating' && task.status !== 'waiting_verification') continue;
+    task.status = 'paused';
+    task.result = '程序上次退出时任务仍在运行，可重新执行';
+    task.errorInfo = {
+      code: 'cancelled',
+      message: task.result,
+      recoverable: true,
+      detectedAt: now,
+    };
+    if (task.runtime) {
+      task.runtime = {
+        ...task.runtime,
+        stage: 'paused',
+        message: '程序重启，任务已安全暂停',
+        stageStartedAt: now,
+        lastHeartbeatAt: now,
+      };
+    }
+    task.updatedAt = now;
+    changed = true;
+  }
+  if (changed) saveTasks(tasks);
+}
+
 // ==================== IPC 处理器注册 ====================
 
 export function registerTaskIPC(): void {
+  recoverInterruptedTasks();
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
     const tasks = loadTasks();
-    // 兼容旧数据：无 mode 字段默认 chat
-    return tasks.map(t => ({ ...t, mode: t.mode || 'chat' as GenerationMode }));
+    return tasks;
   });
 
   // ---- 添加任务（支持批量 + 指定模式 + 视频配置 + 附件） ----
@@ -104,6 +273,8 @@ export function registerTaskIPC(): void {
             audioAttachment: params.audioAttachment,
             result: null,
             outputs: [],
+            artifacts: [],
+            errorInfo: undefined,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
           }));
@@ -127,13 +298,12 @@ export function registerTaskIPC(): void {
       if (!task) {
         return { success: false, error: '任务不存在' };
       }
-      if (task.status === 'executing' || task.status === 'generating') {
+      if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
         return { success: false, error: '任务正在自动化执行中，无法重新指派' };
       }
 
       task.assignedAccountId = params.accountId;
-      task.status = 'queued';
-      task.updatedAt = new Date().toISOString();
+      resetTaskForQueue(task);
       saveTasks(tasks);
 
       return { success: true };
@@ -155,11 +325,52 @@ export function registerTaskIPC(): void {
 
       task.status = params.status;
       if (params.result !== undefined) task.result = params.result;
-      if (params.outputs !== undefined) task.outputs = params.outputs;
+      if (params.outputs !== undefined) {
+        task.outputs = [...new Set(params.outputs.filter(Boolean))];
+        appendArtifacts(task, task.outputs);
+      }
+      if (params.status === 'done') task.errorInfo = undefined;
       task.updatedAt = new Date().toISOString();
       saveTasks(tasks);
 
       return { success: true };
+    }
+  );
+
+  // ---- 编辑任务并重置为待执行 ----
+  ipcMain.handle(
+    'tasks:update',
+    async (
+      _event,
+      params: {
+        taskId: string;
+        updates: {
+          prompt: string;
+          videoConfig?: Task['videoConfig'];
+          attachments?: string[];
+          audioAttachment?: string;
+        };
+      }
+    ): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((t) => t.id === params.taskId);
+      if (!task) {
+        return { success: false, error: '任务不存在' };
+      }
+
+      const prompt = params.updates?.prompt?.trim();
+      if (!prompt) {
+        return { success: false, error: '提示词不能为空' };
+      }
+
+      task.prompt = prompt;
+      task.videoConfig = params.updates.videoConfig;
+      task.attachments = params.updates.attachments?.length ? params.updates.attachments : undefined;
+      task.audioAttachment = params.updates.audioAttachment || undefined;
+      resetTaskForQueue(task);
+      saveTasks(tasks);
+
+      return { success: true, task };
     }
   );
 
@@ -188,14 +399,11 @@ export function registerTaskIPC(): void {
       if (!task) {
         return { success: false, error: '任务不存在' };
       }
-      if (task.status === 'executing' || task.status === 'generating') {
+      if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
         return { success: false, error: '任务正在执行中，无法重试' };
       }
 
-      task.status = 'queued';
-      task.result = null;
-      task.outputs = [];
-      task.updatedAt = new Date().toISOString();
+      resetTaskForQueue(task);
       saveTasks(tasks);
 
       return { success: true, task };
@@ -208,9 +416,15 @@ export function registerTaskIPC(): void {
     async (): Promise<{ success: boolean }> => {
       const tasks = loadTasks();
       for (const task of tasks) {
-        if (task.status === 'executing' || task.status === 'generating') {
-          task.status = 'queued';
-          task.updatedAt = new Date().toISOString();
+        if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
+          const now = new Date().toISOString();
+          task.status = 'paused';
+          task.result = '批量暂停';
+          task.errorInfo = { code: 'cancelled', message: '批量暂停', recoverable: true, detectedAt: now };
+          if (task.runtime) {
+            task.runtime = { ...task.runtime, stage: 'paused', message: '批量暂停', stageStartedAt: now, lastHeartbeatAt: now };
+          }
+          task.updatedAt = now;
         }
       }
       saveTasks(tasks);
@@ -218,10 +432,40 @@ export function registerTaskIPC(): void {
     }
   );
 
+  // ---- 持久化运行阶段、心跳与结构化错误 ----
+  ipcMain.handle(
+    'tasks:updateRuntime',
+    async (_event, params: {
+      taskId: string;
+      status?: TaskStatus;
+      runtime?: Partial<TaskRunSnapshot>;
+      errorInfo?: TaskErrorInfo | null;
+      result?: string;
+    }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((item) => item.id === params.taskId);
+      if (!task) return { success: false, error: '任务不存在' };
+
+      if (params.status) task.status = params.status;
+      if (params.result !== undefined) task.result = params.result;
+      if (params.errorInfo === null) task.errorInfo = undefined;
+      else if (params.errorInfo) task.errorInfo = params.errorInfo;
+      if (params.runtime) {
+        if (!task.runtime && !params.runtime.runId) {
+          return { success: false, error: '运行快照尚未初始化' };
+        }
+        task.runtime = { ...(task.runtime || {}), ...params.runtime } as TaskRunSnapshot;
+      }
+      task.updatedAt = new Date().toISOString();
+      saveTasks(tasks);
+      return { success: true, task };
+    }
+  );
+
   // ---- 批量获取已完成任务的产物 ----
   ipcMain.handle(
     'tasks:getCompletedOutputs',
-    async (): Promise<{ taskId: string; prompt: string; outputs: string[] }[]> => {
+    async (): Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>> => {
       const tasks = loadTasks();
       return tasks
         .filter((t) => t.status === 'done' && t.outputs.length > 0)
@@ -229,6 +473,8 @@ export function registerTaskIPC(): void {
           taskId: t.id,
           prompt: t.prompt,
           outputs: t.outputs,
+          accountId: t.assignedAccountId,
+          mode: t.mode,
         }));
     }
   );
@@ -316,8 +562,11 @@ export function registerTaskIPC(): void {
     'tasks:downloadOutputs',
     async (
       _event,
-      params: { outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>; saveDir?: string }
-    ): Promise<{ success: boolean; count: number; error?: string }> => {
+      params: {
+        outputs: Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>;
+        saveDir?: string;
+      }
+    ): Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }> => {
       try {
         const fs = require('fs');
         const path = require('path');
@@ -333,36 +582,161 @@ export function registerTaskIPC(): void {
         }
 
         let downloadedCount = 0;
+        const failures: string[] = [];
+        const jobs = loadDownloadJobs();
+        const jobIds: string[] = [];
+        const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
 
         for (const task of params.outputs) {
-          for (const url of task.outputs) {
+          const account = accounts.find((item) => item.id === task.accountId);
+          const accountSession = account
+            ? session.fromPartition(`persist:doubao_${account.partition}`)
+            : session.defaultSession;
+          for (let outputIndex = 0; outputIndex < task.outputs.length; outputIndex++) {
+            const url = task.outputs[outputIndex];
+            const now = new Date().toISOString();
+            const job: DownloadJob = {
+              id: uuidv4(),
+              taskId: task.taskId,
+              accountId: task.accountId,
+              mode: task.mode,
+              url,
+              status: 'downloading',
+              attempts: 1,
+              saveDir,
+              createdAt: now,
+              updatedAt: now,
+            };
+            jobs.push(job);
+            jobIds.push(job.id);
+            saveDownloadJobs(jobs);
             try {
-              // 从 URL 推断文件扩展名
-              const urlPath = new URL(url).pathname;
-              const ext = path.extname(urlPath) || '.png';
-              // 生成文件名：taskId_序号.ext
-              const fileName = `${task.taskId.substring(0, 8)}_${downloadedCount}${ext}`;
-              const filePath = path.join(saveDir, fileName);
-
-              // 下载文件
-              const response = await fetch(url);
+              const controller = new AbortController();
+              const timeout = setTimeout(() => controller.abort(), 60000);
+              const response = await accountSession.fetch(url, {
+                headers: {
+                  Referer: 'https://www.doubao.com/',
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+                },
+                signal: controller.signal,
+              }).finally(() => clearTimeout(timeout));
               if (!response.ok) {
-                console.warn(`[tasks:downloadOutputs] 下载失败 ${url}: ${response.status}`);
+                const failure = `HTTP ${response.status}`;
+                failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
+                job.status = 'failed';
+                job.error = failure;
+                job.updatedAt = new Date().toISOString();
+                saveDownloadJobs(jobs);
                 continue;
               }
 
               const buffer = Buffer.from(await response.arrayBuffer());
+              if (buffer.length === 0) {
+                failures.push(`${task.taskId.slice(0, 8)}: 文件为空`);
+                job.status = 'failed';
+                job.error = '文件为空';
+                job.updatedAt = new Date().toISOString();
+                saveDownloadJobs(jobs);
+                continue;
+              }
+              const contentType = response.headers.get('content-type') || '';
+              let ext = path.extname(new URL(url).pathname).toLowerCase();
+              if (!ext || ext.length > 6) {
+                if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
+                else if (contentType.includes('webp')) ext = '.webp';
+                else if (contentType.includes('jpeg')) ext = '.jpg';
+                else ext = '.png';
+              }
+              const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
+              const filePath = path.join(saveDir, fileName);
               fs.writeFileSync(filePath, buffer);
+              job.status = 'done';
+              job.filePath = filePath;
+              job.bytes = buffer.length;
+              job.updatedAt = new Date().toISOString();
+              saveDownloadJobs(jobs);
               downloadedCount++;
             } catch (e: any) {
+              const failure = e.name === 'AbortError' ? '下载超时' : e.message;
+              failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
+              job.status = 'failed';
+              job.error = failure;
+              job.updatedAt = new Date().toISOString();
+              saveDownloadJobs(jobs);
               console.warn(`[tasks:downloadOutputs] 下载产物失败:`, e.message);
             }
           }
         }
 
-        return { success: true, count: downloadedCount };
+        return {
+          success: downloadedCount > 0,
+          count: downloadedCount,
+          failed: failures.length,
+          saveDir,
+          error: failures.length ? failures.slice(0, 3).join('；') : undefined,
+          jobIds,
+        };
       } catch (err: any) {
-        return { success: false, count: 0, error: err.message };
+        return { success: false, count: 0, failed: 0, error: err.message };
+      }
+    }
+  );
+
+  ipcMain.handle('tasks:listDownloads', async (): Promise<DownloadJob[]> => {
+    const jobs = loadDownloadJobs();
+    saveDownloadJobs(jobs);
+    return jobs;
+  });
+
+  ipcMain.handle(
+    'tasks:exportDiagnostics',
+    async (): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+      try {
+        const fs = require('fs');
+        const path = require('path');
+        const result = await dialog.showSaveDialog({
+          title: '导出诊断包',
+          defaultPath: `doubao-studio-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        if (result.canceled || !result.filePath) return { success: false };
+
+        const tasks = loadTasks().map((task) => ({
+          ...task,
+          prompt: `[已脱敏，长度 ${task.prompt.length}]`,
+          attachments: (task.attachments || []).map((item) => path.basename(item)),
+          audioAttachment: task.audioAttachment ? path.basename(task.audioAttachment) : undefined,
+          outputs: task.outputs.map((_, index) => `[产物地址 ${index + 1}]`),
+          artifacts: (task.artifacts || []).map((artifact) => ({ ...artifact, url: '[已脱敏]' })),
+        }));
+        const accounts = readJSON<Array<Record<string, any>>>('accounts.json', []).map((account) => ({
+          id: account.id,
+          name: account.name,
+          status: account.status,
+          pinned: account.pinned,
+          seedanceQuota: account.seedanceQuota,
+          health: account.health,
+        }));
+        const downloads = loadDownloadJobs().map((job) => ({
+          ...job,
+          url: '[已脱敏]',
+          saveDir: path.basename(job.saveDir),
+          filePath: job.filePath ? path.basename(job.filePath) : undefined,
+        }));
+        const payload = {
+          exportedAt: new Date().toISOString(),
+          appVersion: require('electron').app.getVersion(),
+          platform: process.platform,
+          taskCount: tasks.length,
+          accountCount: accounts.length,
+          tasks,
+          accounts,
+          downloads,
+        };
+        fs.writeFileSync(result.filePath, JSON.stringify(payload, null, 2), 'utf-8');
+        return { success: true, filePath: result.filePath };
+      } catch (err: any) {
+        return { success: false, error: err.message };
       }
     }
   );

@@ -3368,6 +3368,7 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
     (function() {
       if (window.__doubao15sPatched) return;
       window.__doubao15sPatched = true;
+      window.__doubao15sPatchEnabled = false;
       window.__doubaoVideoCache = window.__doubaoVideoCache || {};
 
       function findVid(obj, depth) {
@@ -3425,10 +3426,9 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
               var pi = playInfos[i];
               var mainUrl = pi.main || pi.main_url;
               if (mainUrl && typeof mainUrl === 'string') {
-                var cleanUrl = removeWatermark(mainUrl);
-                window.__doubaoVideoCache[vid] = cleanUrl;
-                window.__doubaoVideoCache.lastVideoUrl = cleanUrl;
-                console.log('[15sPatch] 找到视频:', vid, cleanUrl.substring(0, 80) + '...');
+                window.__doubaoVideoCache[vid] = mainUrl;
+                window.__doubaoVideoCache.lastVideoUrl = mainUrl;
+                console.log('[15sPatch] 找到视频:', vid, mainUrl.substring(0, 80) + '...');
                 break;
               }
             }
@@ -3438,6 +3438,9 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
 
       function patchBody(rawBody) {
         try {
+          if (!window.__doubao15sPatchEnabled) {
+            return { changed: false, body: rawBody };
+          }
           var payload = JSON.parse(rawBody);
           var ability = payload.chat_ability;
           if (!ability || Number(ability.ability_type) !== 17) {
@@ -3579,6 +3582,160 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
 }
 
 /**
+ * 每个自动化任务开始前创建独立新对话，避免产物和缓存串到上一条会话。
+ */
+export async function startNewConversation(webview: WebviewHandle): Promise<boolean> {
+  try {
+    webview.loadURL(`https://www.doubao.com/chat/?doubao_studio_new=${Date.now()}`);
+    const ready = await waitForChatReady(webview, 20000);
+    if (!ready) return false;
+
+    const code = `
+      (function() {
+        var all = document.querySelectorAll('button, a, [role="button"], div, span');
+        var candidates = [];
+        for (var i = 0; i < all.length; i++) {
+          var el = all[i];
+          var text = (el.innerText || el.textContent || '').trim();
+          if (text !== '新对话' && text !== '新建对话' && text !== '开启新对话') continue;
+          if (el.offsetParent === null) continue;
+          var rect = el.getBoundingClientRect();
+          if (rect.width < 20 || rect.height < 20 || rect.left > 500) continue;
+          candidates.push({ el: el, area: rect.width * rect.height });
+        }
+        candidates.sort(function(a, b) { return a.area - b.area; });
+        if (candidates.length > 0) {
+          var target = candidates[0].el;
+          target.click();
+          return { ok: true, method: 'click-new-chat' };
+        }
+        // 根路径本身通常已经是空白新对话，找不到按钮时仍可继续。
+        return { ok: true, method: 'root-chat' };
+      })();
+    `;
+    const result = await safeExecuteJS<{ ok: boolean; method: string }>(webview, code, 5000, 'startNewConversation');
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    console.log('[doubaoBridge] 新对话已就绪:', result?.method);
+    return result?.ok !== false;
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 创建新对话失败:', err.message);
+    return false;
+  }
+}
+
+/** 检测提交后出现的机器人/安全验证界面。 */
+export async function detectRobotVerification(webview: WebviewHandle): Promise<boolean> {
+  const code = `
+    (function() {
+      var frames = document.querySelectorAll('iframe');
+      for (var i = 0; i < frames.length; i++) {
+        var src = (frames[i].src || '').toLowerCase();
+        if (src.indexOf('captcha') >= 0 || src.indexOf('verify') >= 0 ||
+            src.indexOf('challenge') >= 0 || src.indexOf('secsdk') >= 0) {
+          var frameRect = frames[i].getBoundingClientRect();
+          if (frameRect.width > 100 && frameRect.height > 80) return true;
+        }
+      }
+      var phrases = ['请完成验证', '安全验证', '机器人验证', '拖动滑块', '点击进行验证', '验证后继续'];
+      var nodes = document.querySelectorAll('[role="dialog"], [role="alert"], [class*="captcha"], [class*="verify"], [class*="Verify"]');
+      for (var j = 0; j < nodes.length; j++) {
+        var rect = nodes[j].getBoundingClientRect();
+        if (rect.width < 100 || rect.height < 60) continue;
+        var text = nodes[j].innerText || '';
+        for (var p = 0; p < phrases.length; p++) {
+          if (text.indexOf(phrases[p]) >= 0) return true;
+        }
+      }
+      return false;
+    })();
+  `;
+  try {
+    return !!(await safeExecuteJS<boolean>(webview, code, 5000, 'detectRobotVerification'));
+  } catch {
+    return false;
+  }
+}
+
+/** 启用或关闭已经注入的 15 秒请求补丁。 */
+export async function set15sVideoPatchEnabled(webview: WebviewHandle, enabled: boolean): Promise<boolean> {
+  try {
+    const result = await safeExecuteJS<boolean>(
+      webview,
+      `(function() {
+        window.__doubao15sPatchEnabled = ${enabled ? 'true' : 'false'};
+        console.log('[15sPatch] 手动开关:', window.__doubao15sPatchEnabled ? '开启' : '关闭');
+        return window.__doubao15sPatchEnabled;
+      })();`,
+      5000,
+      'set15sPatchEnabled'
+    );
+    return result === enabled;
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 设置15s补丁开关失败:', err.message);
+    return false;
+  }
+}
+
+/** 每次自动视频任务提交前清空上一条视频缓存，避免把旧产物绑定到新任务。 */
+export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<void> {
+  try {
+    await safeExecuteJS(
+      webview,
+      `(function() {
+        window.__doubaoVideoCache = {};
+        window.__doubaoVideoBlockerBaselineLength = document.body ? (document.body.innerText || '').length : 0;
+        return true;
+      })();`,
+      5000,
+      'resetVideoCaptureCache'
+    );
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 清空视频缓存失败:', err.message);
+  }
+}
+
+/** 识别豆包页面已经明确给出的失败、权限或安全限制提示。 */
+export async function detectVideoGenerationBlocker(webview: WebviewHandle): Promise<string | null> {
+  const code = `
+    (function() {
+      var phrases = [
+        '今日视频生成免费次数用完了', '今日视频生成免费次数已用完',
+        '视频生成失败', '生成视频失败', '生成失败', '生成异常',
+        '暂不支持上传真人脸素材', '不支持真人脸', '人脸素材无法作为参考', '肖像保护',
+        '当前模型仅限会员', '会员专享', '次数已用完', '次数不足',
+        '余额不足', '权益不足', '内容未通过', '审核未通过', '无法生成'
+      ];
+      var parts = [];
+      var selectors = [
+        '[role="dialog"]', '[role="alert"]',
+        '[class*="toast"]', '[class*="Toast"]'
+      ];
+      for (var i = 0; i < selectors.length; i++) {
+        var nodes = document.querySelectorAll(selectors[i]);
+        for (var j = 0; j < nodes.length; j++) {
+          var rect = nodes[j].getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) parts.push(nodes[j].innerText || '');
+        }
+      }
+      var bodyText = document.body ? (document.body.innerText || '') : '';
+      var baseline = Number(window.__doubaoVideoBlockerBaselineLength || 0);
+      parts.push(bodyText.length >= baseline ? bodyText.slice(baseline) : bodyText.slice(-2000));
+      var text = parts.join('\\n');
+      for (var k = 0; k < phrases.length; k++) {
+        if (text.indexOf(phrases[k]) >= 0) return phrases[k];
+      }
+      return '';
+    })();
+  `;
+  try {
+    const result = await safeExecuteJS<string>(webview, code, 5000, 'detectVideoGenerationBlocker');
+    return result || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 从页面全局变量获取最新的视频 URL（无水印）
  */
 export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: string; videoUrl: string } | null> {
@@ -3586,8 +3743,8 @@ export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: 
     (function() {
       var cache = window.__doubaoVideoCache;
       if (!cache) return { found: false };
-      if (cache.lastVid && cache.lastVideoUrl) {
-        return { found: true, vid: cache.lastVid, videoUrl: cache.lastVideoUrl };
+      if (cache.lastVid) {
+        return { found: true, vid: cache.lastVid, videoUrl: cache.lastVideoUrl || '' };
       }
       return { found: false };
     })();
@@ -3597,8 +3754,8 @@ export async function getCachedVideoUrl(webview: WebviewHandle): Promise<{ vid: 
     const result = await safeExecuteJS<{ found: boolean; vid?: string; videoUrl?: string }>(
       webview, code, 5000, 'getCachedVideoUrl'
     );
-    if (result.found && result.vid && result.videoUrl) {
-      return { vid: result.vid, videoUrl: result.videoUrl };
+    if (result.found && result.vid) {
+      return { vid: result.vid, videoUrl: result.videoUrl || '' };
     }
     return null;
   } catch {
@@ -3613,6 +3770,41 @@ export async function getVideoPlayUrl(webview: WebviewHandle, vid: string): Prom
   const code = `
     (function() {
       var vid = '${vid}';
+      function findVideoUrl(obj, depth) {
+        if (!obj || depth > 12) return '';
+        if (Array.isArray(obj)) {
+          for (var i = 0; i < obj.length; i++) {
+            var arrayUrl = findVideoUrl(obj[i], depth + 1);
+            if (arrayUrl) return arrayUrl;
+          }
+          return '';
+        }
+        if (typeof obj !== 'object') return '';
+        var preferredKeys = ['no_watermark_url', 'download_url', 'main_url', 'main', 'play_url', 'url'];
+        for (var p = 0; p < preferredKeys.length; p++) {
+          var value = obj[preferredKeys[p]];
+          if (typeof value === 'string' &&
+              (value.indexOf('http://') === 0 || value.indexOf('https://') === 0) &&
+              (value.indexOf('video') >= 0 || value.indexOf('vod') >= 0 ||
+               value.indexOf('.mp4') >= 0 || value.indexOf('tos-') >= 0)) {
+            return value;
+          }
+        }
+        var preferredContainers = ['original_media_info', 'original', 'source', 'play_info', 'play_infos', 'media_info'];
+        for (var c = 0; c < preferredContainers.length; c++) {
+          if (obj[preferredContainers[c]]) {
+            var preferredUrl = findVideoUrl(obj[preferredContainers[c]], depth + 1);
+            if (preferredUrl) return preferredUrl;
+          }
+        }
+        for (var key in obj) {
+          if (obj.hasOwnProperty(key) && preferredContainers.indexOf(key) < 0) {
+            var nestedUrl = findVideoUrl(obj[key], depth + 1);
+            if (nestedUrl) return nestedUrl;
+          }
+        }
+        return '';
+      }
       var uuid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
       var params = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=7622868208475047462&pc_version=3.20.2&web_id=&tea_uuid=&region=CN&sys_region=CN&samantha_web=1&web_platform=browser&use-olympus-account=1&web_tab_id=' + uuid;
       var url = '/samantha/media/get_play_info?' + params;
@@ -3628,17 +3820,27 @@ export async function getVideoPlayUrl(webview: WebviewHandle, vid: string): Prom
         body: JSON.stringify({ key: vid, type: 'video' }),
       }).then(function(r) { return r.json(); })
         .then(function(data) {
-          if (data && data.code === 0 && data.data) {
+          if (data && data.data) {
             var mainUrl = '';
             if (data.data.original_media_info && data.data.original_media_info.main_url) {
               mainUrl = data.data.original_media_info.main_url;
+            } else if (data.data.original_media_info && data.data.original_media_info.main) {
+              mainUrl = data.data.original_media_info.main;
+            } else if (data.data.download_url) {
+              mainUrl = data.data.download_url;
+            } else if (data.data.no_watermark_url) {
+              mainUrl = data.data.no_watermark_url;
             } else if (data.data.play_info && data.data.play_info.main) {
               mainUrl = data.data.play_info.main;
             } else if (data.data.play_infos && data.data.play_infos.length > 0) {
               mainUrl = data.data.play_infos[0].main;
             }
+            if (!mainUrl) mainUrl = findVideoUrl(data.data, 0);
             if (mainUrl) {
-              mainUrl = mainUrl.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+              // 新接口优先使用明确返回的原始媒体地址；旧接口继续兼容 lr 清晰度参数。
+              if (!data.data.original_media_info && !data.data.download_url && !data.data.no_watermark_url) {
+                mainUrl = mainUrl.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark');
+              }
               return { success: true, url: mainUrl };
             }
           }

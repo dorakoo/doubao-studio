@@ -40,7 +40,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
   const handleSave = async () => {
     setLoading(true);
     try {
-      const result = await window.electronAPI.settings.save({ downloadDir });
+      const currentSettings = await window.electronAPI.settings.get();
+      const result = await window.electronAPI.settings.save({ ...currentSettings, downloadDir });
       if (result.success) {
         message.success('设置已保存');
         onClose();

@@ -1,12 +1,12 @@
 {
   "name": "doubao-studio-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "豆包工作室 - AI 内容创作者多账号管理与自动化生产工作台",
   "main": "dist/main/main.js",
   "author": "Doubao Studio Team",
   "license": "MIT",
   "scripts": {
-    "dev": "concurrently -k \"pnpm run dev:renderer\" \"pnpm run dev:main\"",
+    "dev": "node scripts/dev.mjs",
     "dev:renderer": "node node_modules/vite/bin/vite.js",
     "dev:main": "wait-on http://localhost:5173 && pnpm run build:main && electron .",
     "build:main": "tsc -p tsconfig.main.json",

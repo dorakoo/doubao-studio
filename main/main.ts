@@ -61,7 +61,7 @@ function createMainWindow(): BrowserWindow {
   // 加载前端页面
   if (isDev) {
     // 开发模式：加载 Vite 开发服务器
-    win.loadURL('http://localhost:5173');
+    win.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173');
   } else {
     // 生产模式：加载打包后的文件
     win.loadFile(path.join(__dirname, '../renderer/index.html'));

@@ -24,6 +24,24 @@ export interface Account {
   status: AccountStatus;
   /** 是否手动置顶 */
   pinned: boolean;
+  seedanceQuota?: {
+    date: string;
+    usedUnits: number;
+    estimatedTotalUnits: number;
+    exhausted: boolean;
+    updatedAt: string;
+  };
+  health?: {
+    loginState: 'unknown' | 'ok' | 'expired';
+    verificationRequired: boolean;
+    consecutiveFailures: number;
+    successCount: number;
+    failureCount: number;
+    lastSuccessAt?: string;
+    lastFailureAt?: string;
+    lastErrorCode?: string;
+    cooldownUntil?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -31,6 +49,44 @@ export interface Account {
 // ==================== 数据持久化 ====================
 
 const STORE_FILE = 'accounts.json';
+const DEFAULT_SEEDANCE_DAILY_UNITS = 10;
+
+function localDateKey(): string {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function normalizeQuota(account: Account): void {
+  const today = localDateKey();
+  if (!account.seedanceQuota || account.seedanceQuota.date !== today) {
+    account.seedanceQuota = {
+      date: today,
+      usedUnits: 0,
+      estimatedTotalUnits: account.seedanceQuota?.estimatedTotalUnits || DEFAULT_SEEDANCE_DAILY_UNITS,
+      exhausted: false,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+}
+
+function normalizeHealth(account: Account): void {
+  account.health = {
+    loginState: account.health?.loginState || 'unknown',
+    verificationRequired: account.health?.verificationRequired || false,
+    consecutiveFailures: account.health?.consecutiveFailures || 0,
+    successCount: account.health?.successCount || 0,
+    failureCount: account.health?.failureCount || 0,
+    lastSuccessAt: account.health?.lastSuccessAt,
+    lastFailureAt: account.health?.lastFailureAt,
+    lastErrorCode: account.health?.lastErrorCode,
+    cooldownUntil: account.health?.cooldownUntil,
+  };
+  if (account.health.cooldownUntil && new Date(account.health.cooldownUntil).getTime() <= Date.now()) {
+    account.health.cooldownUntil = undefined;
+    account.health.verificationRequired = false;
+  }
+}
 
 /** 读取所有账号 */
 function loadAccounts(): Account[] {
@@ -83,7 +139,11 @@ async function clearAccountSession(partition: string): Promise<void> {
 export function registerAccountIPC(): void {
   // ---- 获取所有账号 ----
   ipcMain.handle('accounts:list', async (): Promise<Account[]> => {
-    return loadAccounts();
+    const accounts = loadAccounts();
+    accounts.forEach(normalizeQuota);
+    accounts.forEach(normalizeHealth);
+    saveAccounts(accounts);
+    return accounts;
   });
 
   // ---- 添加账号 ----
@@ -105,6 +165,20 @@ export function registerAccountIPC(): void {
           partition: `account_${uuidv4().slice(0, 8)}`,
           status: 'idle',
           pinned: false,
+          seedanceQuota: {
+            date: localDateKey(),
+            usedUnits: 0,
+            estimatedTotalUnits: DEFAULT_SEEDANCE_DAILY_UNITS,
+            exhausted: false,
+            updatedAt: new Date().toISOString(),
+          },
+          health: {
+            loginState: 'unknown',
+            verificationRequired: false,
+            consecutiveFailures: 0,
+            successCount: 0,
+            failureCount: 0,
+          },
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
@@ -208,6 +282,78 @@ export function registerAccountIPC(): void {
         saveAccounts(accounts);
       }
       return { success: true };
+    }
+  );
+
+  ipcMain.handle(
+    'accounts:updateHealth',
+    async (_event, params: {
+      id: string;
+      action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear';
+      errorCode?: string;
+    }): Promise<{ success: boolean; account?: Account }> => {
+      const accounts = loadAccounts();
+      const account = accounts.find((item) => item.id === params.id);
+      if (!account) return { success: false };
+      normalizeHealth(account);
+      const health = account.health!;
+      const now = new Date();
+
+      if (params.action === 'success') {
+        health.loginState = 'ok';
+        health.verificationRequired = false;
+        health.consecutiveFailures = 0;
+        health.successCount++;
+        health.lastSuccessAt = now.toISOString();
+        health.lastErrorCode = undefined;
+        health.cooldownUntil = undefined;
+      } else if (params.action === 'failure') {
+        health.consecutiveFailures++;
+        health.failureCount++;
+        health.lastFailureAt = now.toISOString();
+        health.lastErrorCode = params.errorCode;
+        if (health.consecutiveFailures >= 3) {
+          health.cooldownUntil = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
+        }
+      } else if (params.action === 'verification') {
+        health.verificationRequired = true;
+        health.lastErrorCode = 'verification';
+        health.cooldownUntil = new Date(now.getTime() + 10 * 60 * 1000).toISOString();
+      } else if (params.action === 'login_expired') {
+        health.loginState = 'expired';
+        health.lastErrorCode = 'page_changed';
+      } else {
+        account.health = {
+          loginState: 'unknown', verificationRequired: false, consecutiveFailures: 0,
+          successCount: health.successCount, failureCount: health.failureCount,
+        };
+      }
+      account.updatedAt = now.toISOString();
+      saveAccounts(accounts);
+      return { success: true, account };
+    }
+  );
+
+  // ---- 更新 Seedance 每日额度预测 ----
+  ipcMain.handle(
+    'accounts:updateSeedanceQuota',
+    async (_event, params: { id: string; action: 'consume' | 'exhausted'; units?: number }): Promise<{ success: boolean; account?: Account }> => {
+      const accounts = loadAccounts();
+      const account = accounts.find((item) => item.id === params.id);
+      if (!account) return { success: false };
+      normalizeQuota(account);
+      const quota = account.seedanceQuota!;
+      if (params.action === 'consume') {
+        quota.usedUnits += Math.max(1, Math.round(params.units || 1));
+        quota.exhausted = false;
+      } else {
+        quota.exhausted = true;
+        if (quota.usedUnits > 0) quota.estimatedTotalUnits = quota.usedUnits;
+      }
+      quota.updatedAt = new Date().toISOString();
+      account.updatedAt = quota.updatedAt;
+      saveAccounts(accounts);
+      return { success: true, account };
     }
   );
 

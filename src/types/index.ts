@@ -6,6 +6,26 @@
 /** 账号状态 */
 export type AccountStatus = 'idle' | 'busy' | 'error';
 
+export interface SeedanceQuota {
+  date: string;
+  usedUnits: number;
+  estimatedTotalUnits: number;
+  exhausted: boolean;
+  updatedAt: string;
+}
+
+export interface AccountHealth {
+  loginState: 'unknown' | 'ok' | 'expired';
+  verificationRequired: boolean;
+  consecutiveFailures: number;
+  successCount: number;
+  failureCount: number;
+  lastSuccessAt?: string;
+  lastFailureAt?: string;
+  lastErrorCode?: TaskErrorCode;
+  cooldownUntil?: string;
+}
+
 /** 账号数据结构 */
 export interface Account {
   id: string;
@@ -15,6 +35,9 @@ export interface Account {
   status: AccountStatus;
   /** 是否手动置顶 */
   pinned: boolean;
+  /** Seedance 每日额度的本地预测记录。 */
+  seedanceQuota?: SeedanceQuota;
+  health?: AccountHealth;
   createdAt: string;
   updatedAt: string;
 }
@@ -90,8 +113,100 @@ export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
   },
 };
 
-/** 任务状态（V2 扩展） */
-export type TaskStatus = 'queued' | 'executing' | 'generating' | 'done' | 'fail';
+/** 任务的队列级状态。具体执行位置记录在 runtime.stage。 */
+export type TaskStatus =
+  | 'queued'
+  | 'executing'
+  | 'generating'
+  | 'waiting_verification'
+  | 'paused'
+  | 'done'
+  | 'fail'
+  | 'cancelled';
+
+export type TaskStage =
+  | 'queued'
+  | 'preparing_account'
+  | 'new_conversation'
+  | 'switching_mode'
+  | 'configuring'
+  | 'uploading_assets'
+  | 'injecting_prompt'
+  | 'submitting'
+  | 'waiting_verification'
+  | 'generating'
+  | 'extracting_outputs'
+  | 'completed'
+  | 'paused'
+  | 'failed'
+  | 'cancelled';
+
+export type TaskErrorCode =
+  | 'cancelled'
+  | 'verification'
+  | 'quota_exhausted'
+  | 'membership_required'
+  | 'face_restricted'
+  | 'content_rejected'
+  | 'network'
+  | 'timeout'
+  | 'page_changed'
+  | 'submission_failed'
+  | 'generation_failed'
+  | 'output_missing'
+  | 'unknown';
+
+export interface TaskErrorInfo {
+  code: TaskErrorCode;
+  message: string;
+  recoverable: boolean;
+  detectedAt: string;
+}
+
+export interface TaskRunSnapshot {
+  runId: string;
+  attempt: number;
+  stage: TaskStage;
+  message: string;
+  startedAt: string;
+  stageStartedAt: string;
+  lastHeartbeatAt: string;
+  submittedAt?: string;
+  conversationUrl?: string;
+  input: {
+    prompt: string;
+    mode: GenerationMode;
+    videoConfig?: Task['videoConfig'];
+    attachments: string[];
+    audioAttachment?: string;
+  };
+}
+
+export interface TaskArtifact {
+  id: string;
+  url: string;
+  kind: 'image' | 'video' | 'file';
+  source: 'network' | 'page' | 'manual';
+  runId?: string;
+  conversationUrl?: string;
+  discoveredAt: string;
+}
+
+export interface DownloadJob {
+  id: string;
+  taskId: string;
+  accountId: string | null;
+  mode: GenerationMode;
+  url: string;
+  status: 'queued' | 'downloading' | 'done' | 'failed';
+  attempts: number;
+  saveDir: string;
+  filePath?: string;
+  bytes?: number;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 /** 任务数据结构 */
 export interface Task {
@@ -113,8 +228,22 @@ export interface Task {
   audioAttachment?: string;
   result: string | null;
   outputs: string[];
+  /** 跨多次运行保留的产物记录；outputs 仅表示最近一次运行。 */
+  artifacts?: TaskArtifact[];
+  /** 当前或最近一次执行的可恢复快照。 */
+  runtime?: TaskRunSnapshot;
+  /** 结构化失败原因，供恢复、筛选和统计使用。 */
+  errorInfo?: TaskErrorInfo;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 编辑并重新运行任务时可更新的完整输入。 */
+export interface TaskUpdateInput {
+  prompt: string;
+  videoConfig?: Task['videoConfig'];
+  attachments?: string[];
+  audioAttachment?: string;
 }
 
 /** 任务状态标签配置 */
@@ -122,8 +251,29 @@ export const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; color: stri
   queued: { label: '排队中', color: '#60a5fa', className: 'queued' },
   executing: { label: '注入中', color: '#a78bfa', className: 'executing' },
   generating: { label: '生成中', color: '#fbbf24', className: 'generating' },
+  waiting_verification: { label: '等待验证', color: '#fb923c', className: 'waiting-verification' },
+  paused: { label: '已暂停', color: '#94a3b8', className: 'paused' },
   done: { label: '已完成', color: '#34d399', className: 'done' },
   fail: { label: '失败', color: '#fb7185', className: 'fail' },
+  cancelled: { label: '已取消', color: '#94a3b8', className: 'cancelled' },
+};
+
+export const TASK_STAGE_LABELS: Record<TaskStage, string> = {
+  queued: '等待执行',
+  preparing_account: '准备账号',
+  new_conversation: '创建新对话',
+  switching_mode: '切换生成模式',
+  configuring: '配置生成参数',
+  uploading_assets: '上传参考素材',
+  injecting_prompt: '填写提示词',
+  submitting: '提交任务',
+  waiting_verification: '等待人工验证',
+  generating: '豆包生成中',
+  extracting_outputs: '识别任务产物',
+  completed: '已完成',
+  paused: '已暂停',
+  failed: '执行失败',
+  cancelled: '已取消',
 };
 
 /** 账号状态标签配置 */

@@ -9,7 +9,17 @@
  */
 
 import { create } from 'zustand';
-import type { Task, TaskStatus, GenerationMode } from '../types';
+import type {
+  Task,
+  TaskStatus,
+  GenerationMode,
+  TaskUpdateInput,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskStage,
+  TaskArtifact,
+} from '../types';
+import { useAccountStore } from './useAccountStore';
 
 // ==================== 类型 ====================
 
@@ -21,6 +31,7 @@ interface TaskState {
   tasks: Task[];
   loading: boolean;
   error: string | null;
+  schedulerPaused: boolean;
 
   // ---- V3: 多账号并行执行 ----
   /** 每个账号正在执行的任务 ID */
@@ -41,22 +52,56 @@ interface TaskState {
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
+  updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<boolean>;
   retryTask: (taskId: string) => Promise<boolean>;
   batchPause: () => Promise<boolean>;
-  getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
+  resumeAll: () => Promise<boolean>;
+  getCompletedOutputs: () => Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>>;
   clearError: () => void;
 
   // V3 自动化方法
   startAutomation: (taskId: string) => void;
-  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string) => void;
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => void;
+  updateTaskRuntime: (taskId: string, patch: {
+    status?: TaskStatus;
+    runtime?: Partial<TaskRunSnapshot>;
+    errorInfo?: TaskErrorInfo | null;
+    result?: string;
+  }) => Promise<void>;
   completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
-  failAutomation: (taskId: string, accountId: string, errorMsg: string) => Promise<void>;
+  pauseAutomation: (taskId: string, accountId: string, message?: string) => Promise<void>;
+  failAutomation: (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => Promise<void>;
 
   /** 处理队列：检查待执行任务，分配到空闲账号 */
   processQueue: () => void;
   /** 获取指定账号的下一个排队任务 */
   getNextTaskForAccount: (accountId: string) => Task | null;
+}
+
+const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number }>();
+
+function artifactId(url: string): string {
+  let hash = 5381;
+  for (let index = 0; index < url.length; index++) hash = ((hash << 5) + hash) ^ url.charCodeAt(index);
+  return `artifact-${(hash >>> 0).toString(16)}`;
+}
+
+function mergeArtifacts(task: Task, outputs: string[], source: TaskArtifact['source'] = 'network'): TaskArtifact[] {
+  const artifacts = new Map((task.artifacts || []).map((artifact) => [artifact.url, artifact]));
+  for (const url of outputs.filter(Boolean)) {
+    if (artifacts.has(url)) continue;
+    artifacts.set(url, {
+      id: artifactId(url),
+      url,
+      kind: task.mode === 'video' ? 'video' : task.mode === 'image' ? 'image' : 'file',
+      source,
+      runId: task.runtime?.runId,
+      conversationUrl: task.runtime?.conversationUrl,
+      discoveredAt: new Date().toISOString(),
+    });
+  }
+  return [...artifacts.values()];
 }
 
 // ==================== Store ====================
@@ -65,6 +110,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   tasks: [],
   loading: false,
   error: null,
+  schedulerPaused: false,
   executingTasks: {},
   accountBusy: {},
   accountAutomationState: {},
@@ -145,10 +191,35 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     await window.electronAPI.tasks.updateStatus(taskId, status, result, outputs);
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? { ...t, status, result: result ?? t.result, outputs: outputs ?? t.outputs, updatedAt: new Date().toISOString() }
+        ? {
+            ...t,
+            status,
+            result: result ?? t.result,
+            outputs: outputs ?? t.outputs,
+            artifacts: outputs ? mergeArtifacts(t, outputs, 'manual') : t.artifacts,
+            updatedAt: new Date().toISOString(),
+          }
         : t
     );
     set({ tasks });
+  },
+
+  updateTask: async (taskId: string, updates: TaskUpdateInput) => {
+    set({ error: null });
+    try {
+      const result = await window.electronAPI.tasks.update(taskId, updates);
+      if (!result.success || !result.task) {
+        set({ error: result.error || '编辑任务失败' });
+        return false;
+      }
+      set({
+        tasks: get().tasks.map((task) => task.id === taskId ? result.task! : task),
+      });
+      return true;
+    } catch (err: any) {
+      set({ error: err.message });
+      return false;
+    }
   },
 
   deleteTask: async (taskId: string) => {
@@ -201,11 +272,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   batchPause: async () => {
     try {
+      Object.values(get().executingTasks).forEach((taskId) => {
+        window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId } }));
+      });
       const result = await window.electronAPI.tasks.batchPause();
       if (result.success) {
         const tasks = get().tasks.map((t) =>
-          t.status === 'executing' || t.status === 'generating'
-            ? { ...t, status: 'queued' as TaskStatus }
+          t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification'
+            ? {
+                ...t,
+                status: 'paused' as TaskStatus,
+                result: '批量暂停',
+                runtime: t.runtime ? { ...t.runtime, stage: 'paused' as TaskStage, message: '批量暂停' } : t.runtime,
+              }
             : t
         );
         // 清空所有执行状态
@@ -217,6 +296,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           accountAutoMessage: {},
           activeTaskId: null,
           automationState: 'idle',
+          schedulerPaused: true,
         });
         return true;
       }
@@ -224,6 +304,21 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     } catch {
       return false;
     }
+  },
+
+  resumeAll: async () => {
+    const pausedTasks = get().tasks.filter((task) => task.status === 'paused');
+    const resumed = new Map<string, Task>();
+    for (const task of pausedTasks) {
+      const result = await window.electronAPI.tasks.retry(task.id);
+      if (result.success && result.task) resumed.set(task.id, result.task);
+    }
+    set({
+      schedulerPaused: false,
+      tasks: get().tasks.map((task) => resumed.get(task.id) || task),
+    });
+    setTimeout(() => get().processQueue(), 0);
+    return true;
   },
 
   getCompletedOutputs: async () => {
@@ -235,6 +330,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // ---- V3 自动化方法 ----
 
   startAutomation: (taskId: string) => {
+    if (get().schedulerPaused) return;
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
@@ -242,6 +338,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     const accountId = task.assignedAccountId;
+    const assignedAccount = useAccountStore.getState().accounts.find((account) => account.id === accountId);
+    if (task.mode === 'video' && assignedAccount?.seedanceQuota?.exhausted) {
+      console.warn('[TaskStore] 账号 Seedance 今日额度已用尽，跳过视频任务', accountId);
+      return;
+    }
 
     // 检查账号是否忙碌
     if (get().accountBusy[accountId]) {
@@ -254,9 +355,33 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     // 更新任务状态
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? { ...t, status: 'executing' as TaskStatus, updatedAt: new Date().toISOString() }
+        ? {
+            ...t,
+            status: 'executing' as TaskStatus,
+            result: null,
+            errorInfo: undefined,
+            runtime: {
+              runId: `${taskId}-${Date.now()}`,
+              attempt: (t.runtime?.attempt || 0) + 1,
+              stage: 'preparing_account' as TaskStage,
+              message: '准备执行',
+              startedAt: new Date().toISOString(),
+              stageStartedAt: new Date().toISOString(),
+              lastHeartbeatAt: new Date().toISOString(),
+              input: {
+                prompt: t.prompt,
+                mode: t.mode,
+                videoConfig: t.videoConfig,
+                attachments: [...(t.attachments || [])],
+                audioAttachment: t.audioAttachment,
+              },
+            },
+            updatedAt: new Date().toISOString(),
+          }
         : t
     );
+
+    const startedTask = tasks.find((item) => item.id === taskId)!;
 
     set({
       tasks,
@@ -268,24 +393,101 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       activeTaskId: taskId,
       automationState: 'injecting',
     });
+
+    void window.electronAPI.tasks.updateRuntime(taskId, {
+      status: 'executing',
+      runtime: startedTask.runtime,
+      errorInfo: null,
+      result: '',
+    });
   },
 
-  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string) => {
+  setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => {
+    const taskId = get().executingTasks[accountId];
+    const now = new Date().toISOString();
+    const status: TaskStatus | undefined = stage === 'waiting_verification'
+      ? 'waiting_verification'
+      : state === 'generating'
+        ? 'generating'
+        : state === 'injecting' || state === 'submitting'
+          ? 'executing'
+          : undefined;
+    const tasks = taskId
+      ? get().tasks.map((task) => task.id === taskId
+        ? {
+            ...task,
+            status: status || task.status,
+            runtime: task.runtime ? {
+              ...task.runtime,
+              stage: stage || task.runtime.stage,
+              message: message ?? task.runtime.message,
+              stageStartedAt: stage && stage !== task.runtime.stage ? now : task.runtime.stageStartedAt,
+              lastHeartbeatAt: now,
+              submittedAt: stage === 'submitting' ? now : task.runtime.submittedAt,
+            } : task.runtime,
+            updatedAt: now,
+          }
+        : task)
+      : get().tasks;
     set({
+      tasks,
       accountAutomationState: { ...get().accountAutomationState, [accountId]: state },
       accountAutoMessage: message !== undefined
         ? { ...get().accountAutoMessage, [accountId]: message }
         : get().accountAutoMessage,
     });
+    if (taskId) {
+      const task = tasks.find((item) => item.id === taskId);
+      const previousPersist = runtimePersistState.get(taskId);
+      const shouldPersist = !!task?.runtime && (
+        previousPersist?.stage !== task.runtime.stage ||
+        Date.now() - (previousPersist?.savedAt || 0) >= 15_000 ||
+        state === 'failed' ||
+        state === 'completed'
+      );
+      if (task?.runtime && shouldPersist) {
+        runtimePersistState.set(taskId, { stage: task.runtime.stage, savedAt: Date.now() });
+        void window.electronAPI.tasks.updateRuntime(taskId, {
+          status,
+          runtime: task.runtime,
+        });
+      }
+    }
+  },
+
+  updateTaskRuntime: async (taskId, patch) => {
+    const result = await window.electronAPI.tasks.updateRuntime(taskId, patch);
+    if (result.success && result.task) {
+      set({ tasks: get().tasks.map((task) => task.id === taskId ? result.task! : task) });
+    }
   },
 
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
     const finalOutputs = outputs && outputs.length > 0 ? outputs : [resultUrl];
     await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
+    await window.electronAPI.tasks.updateRuntime(taskId, {
+      status: 'done',
+      runtime: {
+        stage: 'completed',
+        message: '生成完成',
+        stageStartedAt: new Date().toISOString(),
+        lastHeartbeatAt: new Date().toISOString(),
+      },
+      errorInfo: null,
+    });
 
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? { ...t, status: 'done' as TaskStatus, result: resultUrl, outputs: finalOutputs, updatedAt: new Date().toISOString() }
+        ? {
+            ...t,
+            status: 'done' as TaskStatus,
+            result: resultUrl,
+            outputs: finalOutputs,
+            artifacts: mergeArtifacts(t, finalOutputs),
+            errorInfo: undefined,
+            runtime: t.runtime ? { ...t.runtime, stage: 'completed' as TaskStage, message: '生成完成' } : t.runtime,
+            updatedAt: new Date().toISOString(),
+          }
         : t
     );
 
@@ -333,12 +535,64 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }, 2000);
   },
 
-  failAutomation: async (taskId: string, accountId: string, errorMsg: string) => {
+  pauseAutomation: async (taskId: string, accountId: string, pauseMessage = '用户已暂停') => {
+    const now = new Date().toISOString();
+    const errorInfo: TaskErrorInfo = {
+      code: 'cancelled',
+      message: pauseMessage,
+      recoverable: true,
+      detectedAt: now,
+    };
+    await window.electronAPI.tasks.updateRuntime(taskId, {
+      status: 'paused',
+      result: pauseMessage,
+      errorInfo,
+      runtime: { stage: 'paused', message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now },
+    });
+
+    const newExecuting = { ...get().executingTasks };
+    const newBusy = { ...get().accountBusy };
+    delete newExecuting[accountId];
+    delete newBusy[accountId];
+    set({
+      tasks: get().tasks.map((task) => task.id === taskId ? {
+        ...task,
+        status: 'paused',
+        result: pauseMessage,
+        errorInfo,
+        runtime: task.runtime ? { ...task.runtime, stage: 'paused', message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now } : task.runtime,
+        updatedAt: now,
+      } : task),
+      executingTasks: newExecuting,
+      accountBusy: newBusy,
+      accountAutomationState: { ...get().accountAutomationState, [accountId]: 'idle' },
+      accountAutoMessage: { ...get().accountAutoMessage, [accountId]: pauseMessage },
+      activeTaskId: get().activeTaskId === taskId ? null : get().activeTaskId,
+      automationState: get().activeTaskId === taskId ? 'idle' : get().automationState,
+    });
+    void window.electronAPI.accounts.setStatus(accountId, 'idle');
+  },
+
+  failAutomation: async (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => {
+    const now = new Date().toISOString();
     await window.electronAPI.tasks.updateStatus(taskId, 'fail', errorMsg);
+    await window.electronAPI.tasks.updateRuntime(taskId, {
+      status: 'fail',
+      result: errorMsg,
+      errorInfo: errorInfo || null,
+      runtime: { stage: 'failed', message: errorMsg, stageStartedAt: now, lastHeartbeatAt: now },
+    });
 
     const tasks = get().tasks.map((t) =>
       t.id === taskId
-        ? { ...t, status: 'fail' as TaskStatus, result: errorMsg, updatedAt: new Date().toISOString() }
+        ? {
+            ...t,
+            status: 'fail' as TaskStatus,
+            result: errorMsg,
+            errorInfo,
+            runtime: t.runtime ? { ...t.runtime, stage: 'failed' as TaskStage, message: errorMsg, stageStartedAt: now, lastHeartbeatAt: now } : t.runtime,
+            updatedAt: now,
+          }
         : t
     );
 
@@ -386,6 +640,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   processQueue: () => {
     const state = get();
+    if (state.schedulerPaused) return;
     // 找出所有已指派但还在 queued 状态的任务
     const queuedTasks = state.tasks.filter(
       (t) => t.status === 'queued' && t.assignedAccountId
@@ -396,6 +651,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     for (const task of queuedTasks) {
       const accountId = task.assignedAccountId!;
+      const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
+      if (task.mode === 'video' && account?.seedanceQuota?.exhausted) continue;
+      if (account?.health?.verificationRequired || account?.health?.loginState === 'expired') continue;
+      if (account?.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) continue;
       if (!state.accountBusy[accountId]) {
         console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
         state.startAutomation(task.id);

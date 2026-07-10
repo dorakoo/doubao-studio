@@ -26,10 +26,13 @@ import {
   LinkOutlined,
   InfoCircleOutlined,
   DownloadOutlined,
+  EditOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import type { Task } from '../types';
 import {
   TASK_STATUS_CONFIG,
+  TASK_STAGE_LABELS,
   GENERATION_MODE_CONFIG,
   VIDEO_MODEL_LABELS,
 } from '../types';
@@ -42,9 +45,10 @@ interface TaskDetailModalProps {
   open: boolean;
   task: Task | null;
   onClose: () => void;
+  onEditAndRerun: (task: Task) => void;
 }
 
-const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }) => {
+const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, onEditAndRerun }) => {
   const { retryTask, deleteTask, assignTask, startAutomation, accountBusy } = useTaskStore();
   const accounts = useAccountStore((s) => s.accounts);
 
@@ -79,14 +83,15 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
   const statusCfg = TASK_STATUS_CONFIG[task.status];
   const assignedAccount = accounts.find((a) => a.id === task.assignedAccountId);
 
-  const canRetry = task.status === 'fail' || task.status === 'done';
+  const canRetry = task.status === 'fail' || task.status === 'done' || task.status === 'paused' || task.status === 'cancelled';
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
   const canManualExtractVideo =
     task.mode === 'video' &&
     !!task.assignedAccountId &&
     task.status !== 'executing' &&
-    task.status !== 'generating';
+    task.status !== 'generating' &&
+    task.status !== 'waiting_verification';
 
   // ---- 操作处理 ----
 
@@ -133,8 +138,11 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
       case 'queued': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
       case 'executing': return <ThunderboltOutlined style={{ color: statusCfg.color }} />;
       case 'generating': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
+      case 'waiting_verification': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
+      case 'paused': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
       case 'done': return <CheckCircleOutlined style={{ color: statusCfg.color }} />;
       case 'fail': return <CloseCircleOutlined style={{ color: statusCfg.color }} />;
+      case 'cancelled': return <CloseCircleOutlined style={{ color: statusCfg.color }} />;
     }
   };
 
@@ -172,6 +180,27 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
           {canRetry && (
             <Button type="primary" icon={<ReloadOutlined />} onClick={handleRetry}>
               重新执行
+            </Button>
+          )}
+          <Button
+            icon={<EditOutlined />}
+            onClick={() => {
+              onClose();
+              onEditAndRerun(task);
+            }}
+          >
+            编辑重跑
+          </Button>
+          {(task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') && (
+            <Button
+              danger
+              icon={<StopOutlined />}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('cancel-task-automation', { detail: { taskId: task.id } }));
+                onClose();
+              }}
+            >
+              暂停任务
             </Button>
           )}
           {canManualExtractVideo && (
@@ -218,7 +247,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
         </div>
 
         {/* 失败原因 */}
-        {task.status === 'fail' && task.result && (
+        {(task.status === 'fail' || task.status === 'paused' || task.status === 'cancelled') && task.result && (
           <div style={{ marginBottom: 16 }}>
             <div style={{ color: '#fb7185', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
               <CloseCircleOutlined /> 失败原因
@@ -277,6 +306,25 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose }
               {new Date(task.updatedAt).toLocaleString('zh-CN')}
             </Space>
           </Descriptions.Item>
+          {task.runtime && (
+            <>
+              <Descriptions.Item label="运行阶段">
+                {TASK_STAGE_LABELS[task.runtime.stage] || task.runtime.stage}
+              </Descriptions.Item>
+              <Descriptions.Item label="运行次数">
+                第 {task.runtime.attempt} 次
+              </Descriptions.Item>
+              <Descriptions.Item label="阶段说明" span={2}>
+                {task.runtime.message}
+              </Descriptions.Item>
+              <Descriptions.Item label="最近心跳">
+                {new Date(task.runtime.lastHeartbeatAt).toLocaleString('zh-CN')}
+              </Descriptions.Item>
+              <Descriptions.Item label="可恢复">
+                {task.errorInfo ? (task.errorInfo.recoverable ? '可以重新执行' : '需要更换账号或配置') : '是'}
+              </Descriptions.Item>
+            </>
+          )}
         </Descriptions>
 
         {/* 视频配置 */}

@@ -4,12 +4,15 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Modal, Checkbox, Button, message, Empty } from 'antd';
-import { DownloadOutlined } from '@ant-design/icons';
+import { DownloadOutlined, VideoCameraOutlined } from '@ant-design/icons';
+import type { GenerationMode } from '../types';
 
-interface OutputItem {
+export interface OutputItem {
   taskId: string;
   prompt: string;
   outputs: string[];
+  accountId: string | null;
+  mode: GenerationMode;
 }
 
 interface OutputPreviewModalProps {
@@ -26,7 +29,7 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
   onDownload,
 }) => {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewMedia, setPreviewMedia] = useState<{ url: string; mode: GenerationMode } | null>(null);
   const [downloading, setDownloading] = useState(false);
 
   useEffect(() => {
@@ -124,27 +127,40 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
                 }}
                 onClick={() => toggleSelect(item.taskId)}
               >
-                <Checkbox checked={isSelected} onChange={() => toggleSelect(item.taskId)} />
+                <Checkbox
+                  checked={isSelected}
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={() => toggleSelect(item.taskId)}
+                />
                 {item.outputs.length > 0 && (
                   <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                    {item.outputs.slice(0, 3).map((url, idx) => (
+                    {item.outputs.slice(0, 3).map((url, idx) => item.mode === 'video' ? (
+                      <button
+                        key={idx}
+                        type="button"
+                        title="播放视频"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setPreviewMedia({ url, mode: item.mode });
+                        }}
+                        style={{
+                          width: 80, height: 80, border: '1px solid #c7d2fe', borderRadius: 4,
+                          background: '#eef2ff', color: '#4f46e5', cursor: 'pointer',
+                          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 5,
+                        }}
+                      >
+                        <VideoCameraOutlined style={{ fontSize: 24 }} />
+                        <span style={{ fontSize: 11 }}>视频 {idx + 1}</span>
+                      </button>
+                    ) : (
                       <img
                         key={idx}
                         src={url}
                         alt={`产物-${idx}`}
-                        style={{
-                          width: 80,
-                          height: 80,
-                          objectFit: 'cover',
-                          borderRadius: 4,
-                          background: '#eee',
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setPreviewUrl(url);
-                        }}
-                        onError={(e) => {
-                          (e.target as HTMLImageElement).style.display = 'none';
+                        style={{ width: 80, height: 80, objectFit: 'cover', borderRadius: 4, background: '#eee' }}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setPreviewMedia({ url, mode: item.mode });
                         }}
                       />
                     ))}
@@ -165,7 +181,7 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
                     {item.prompt.length > 60 ? '...' : ''}
                   </div>
                   <div style={{ fontSize: 12, color: '#999' }}>
-                    {item.outputs.length} 张产物
+                    {item.outputs.length} 个产物
                   </div>
                 </div>
               </div>
@@ -175,15 +191,19 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
       )}
 
       {/* 图片预览 */}
-      {previewUrl && (
+      {previewMedia && (
         <Modal
-          open={!!previewUrl}
+          open={!!previewMedia}
           footer={null}
-          onCancel={() => setPreviewUrl(null)}
-          width={600}
+          onCancel={() => setPreviewMedia(null)}
+          width={previewMedia.mode === 'video' ? 820 : 600}
           styles={{ body: { padding: 0 } }}
         >
-          <img src={previewUrl} alt="预览" style={{ width: '100%', display: 'block' }} />
+          {previewMedia.mode === 'video' ? (
+            <video src={previewMedia.url} controls autoPlay style={{ width: '100%', maxHeight: '75vh', display: 'block', background: '#000' }} />
+          ) : (
+            <img src={previewMedia.url} alt="预览" style={{ width: '100%', display: 'block' }} />
+          )}
         </Modal>
       )}
     </Modal>

@@ -3,7 +3,7 @@
  * Electron API 全局类型声明
  */
 
-import type { Account, Task } from './index';
+import type { Account, DownloadJob, Task, TaskErrorInfo, TaskRunSnapshot, TaskStatus } from './index';
 
 // 扩展 HTMLElement 以支持 webview 标签
 declare global {
@@ -65,6 +65,12 @@ export interface ElectronAPI {
     refresh: (id: string) => Promise<{ success: boolean; error?: string }>;
     setStatus: (id: string, status: string) => Promise<{ success: boolean }>;
     setPinned: (id: string, pinned: boolean) => Promise<{ success: boolean }>;
+    updateSeedanceQuota: (id: string, action: 'consume' | 'exhausted', units?: number) => Promise<{ success: boolean; account?: Account }>;
+    updateHealth: (
+      id: string,
+      action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear',
+      errorCode?: string
+    ) => Promise<{ success: boolean; account?: Account }>;
     getPartition: (id: string) => Promise<string | null>;
   };
   tasks: {
@@ -77,17 +83,31 @@ export interface ElectronAPI {
       result?: string,
       outputs?: string[]
     ) => Promise<{ success: boolean; error?: string }>;
+    updateRuntime: (taskId: string, patch: {
+      status?: TaskStatus;
+      runtime?: Partial<TaskRunSnapshot>;
+      errorInfo?: TaskErrorInfo | null;
+      result?: string;
+    }) => Promise<{ success: boolean; task?: Task; error?: string }>;
+    update: (taskId: string, updates: {
+      prompt: string;
+      videoConfig?: Task['videoConfig'];
+      attachments?: string[];
+      audioAttachment?: string;
+    }) => Promise<{ success: boolean; task?: Task; error?: string }>;
     delete: (taskId: string) => Promise<{ success: boolean; error?: string }>;
     retry: (taskId: string) => Promise<{ success: boolean; task?: Task; error?: string }>;
     batchPause: () => Promise<{ success: boolean }>;
-    getCompletedOutputs: () => Promise<{ taskId: string; prompt: string; outputs: string[] }[]>;
+    getCompletedOutputs: () => Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: Task['mode'] }>>;
     selectImages: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
     selectAudio: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
     readFileAsBase64: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>;
     downloadOutputs: (
-      outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>,
+      outputs: Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: Task['mode'] }>,
       saveDir?: string
-    ) => Promise<{ success: boolean; count: number; error?: string }>;
+    ) => Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }>;
+    listDownloads: () => Promise<DownloadJob[]>;
+    exportDiagnostics: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
     selectSaveDir: () => Promise<{ success: boolean; dirPath?: string; error?: string }>;
   };
   settings: {

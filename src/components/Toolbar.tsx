@@ -18,12 +18,18 @@ import {
   DownloadOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  HistoryOutlined,
+  MoreOutlined,
 } from '@ant-design/icons';
-import { Tooltip, Badge, Dropdown, message } from 'antd';
+import { Descriptions, Dropdown, message, Modal, Progress, Tooltip } from 'antd';
 import type { MenuProps } from 'antd';
 import { useTaskStore } from '../store/useTaskStore';
 import { SettingsModal } from './SettingsModal';
 import { OutputPreviewModal } from './OutputPreviewModal';
+import type { OutputItem } from './OutputPreviewModal';
+import { DownloadQueueModal } from './DownloadQueueModal';
+import type { DownloadJob } from '../types';
+import { useAccountStore } from '../store/useAccountStore';
 
 interface ToolbarProps {
   sidebarCollapsed: boolean;
@@ -31,13 +37,24 @@ interface ToolbarProps {
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSidebar }) => {
-  const { tasks, batchPause, getCompletedOutputs } = useTaskStore();
-  const [isPaused, setIsPaused] = React.useState(false);
+  const { tasks, schedulerPaused, batchPause, resumeAll, getCompletedOutputs } = useTaskStore();
+  const accounts = useAccountStore((state) => state.accounts);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
-  const [completedOutputs, setCompletedOutputs] = React.useState<
-    Array<{ taskId: string; prompt: string; outputs: string[] }>
-  >([]);
+  const [completedOutputs, setCompletedOutputs] = React.useState<OutputItem[]>([]);
+  const [downloadQueueOpen, setDownloadQueueOpen] = React.useState(false);
+  const [downloadJobs, setDownloadJobs] = React.useState<DownloadJob[]>([]);
+  const [downloadJobsLoading, setDownloadJobsLoading] = React.useState(false);
+  const [metricsOpen, setMetricsOpen] = React.useState(false);
+
+  const loadDownloadJobs = React.useCallback(async () => {
+    setDownloadJobsLoading(true);
+    try {
+      setDownloadJobs(await window.electronAPI.tasks.listDownloads());
+    } finally {
+      setDownloadJobsLoading(false);
+    }
+  }, []);
 
   // 监听 TaskConsole 发来的批量下载事件
   React.useEffect(() => {
@@ -63,14 +80,24 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   const completedWithOutputs = tasks.filter(
     (t) => t.status === 'done' && t.outputs.length > 0
   ).length;
+  const terminalTasks = tasks.filter((task) => task.status === 'done' || task.status === 'fail');
+  const successRate = terminalTasks.length > 0
+    ? Math.round((tasks.filter((task) => task.status === 'done').length / terminalTasks.length) * 100)
+    : 0;
+  const completedDurations = tasks
+    .filter((task) => task.status === 'done' && task.runtime?.startedAt)
+    .map((task) => new Date(task.updatedAt).getTime() - new Date(task.runtime!.startedAt).getTime())
+    .filter((duration) => duration >= 0);
+  const averageMinutes = completedDurations.length
+    ? Math.round(completedDurations.reduce((sum, duration) => sum + duration, 0) / completedDurations.length / 60_000)
+    : 0;
 
   // 处理暂停/继续
   const handleTogglePause = async () => {
-    if (!isPaused) {
+    if (!schedulerPaused) {
       await batchPause();
-      setIsPaused(true);
     } else {
-      setIsPaused(false);
+      await resumeAll();
     }
   };
 
@@ -86,22 +113,54 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   };
 
   // 执行下载
-  const handleDoDownload = async (selectedOutputs: Array<{ taskId: string; prompt: string; outputs: string[] }>) => {
+  const handleDoDownload = async (selectedOutputs: OutputItem[]) => {
     // 获取下载目录设置
     const settings = await window.electronAPI.settings.get();
     const saveDir = settings.downloadDir || undefined;
 
     const result = await window.electronAPI.tasks.downloadOutputs(selectedOutputs, saveDir);
+    await loadDownloadJobs();
     if (result.success) {
-      message.success(`已下载 ${result.count} 个产物`);
-      setPreviewOpen(false);
+      if (result.failed > 0) {
+        message.warning(`已下载 ${result.count} 个，失败 ${result.failed} 个：${result.error || '地址不可用'}`);
+      } else {
+        message.success(`已下载 ${result.count} 个产物到 ${result.saveDir || '下载目录'}`);
+        setPreviewOpen(false);
+      }
     } else {
-      message.error('下载失败：' + result.error);
+      message.error(`下载失败：${result.error || '未能获取文件'}`);
     }
+  };
+
+  const handleRetryDownload = async (job: DownloadJob) => {
+    const result = await window.electronAPI.tasks.downloadOutputs([{
+      taskId: job.taskId,
+      prompt: '',
+      outputs: [job.url],
+      accountId: job.accountId,
+      mode: job.mode,
+    }], job.saveDir);
+    await loadDownloadJobs();
+    if (result.success) message.success('重新下载成功');
+    else message.error(`重新下载失败：${result.error || '地址不可用'}`);
   };
 
   // 更多操作菜单
   const moreMenuItems: MenuProps['items'] = [
+    {
+      key: 'metrics',
+      label: '运行统计',
+      onClick: () => setMetricsOpen(true),
+    },
+    {
+      key: 'diagnostics',
+      label: '导出诊断包',
+      onClick: async () => {
+        const result = await window.electronAPI.tasks.exportDiagnostics();
+        if (result.success) message.success(`诊断包已导出：${result.filePath}`);
+        else if (result.error) message.error(`导出失败：${result.error}`);
+      },
+    },
     {
       key: 'settings',
       label: '偏好设置',
@@ -161,9 +220,9 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       {/* 右侧：全局操作 + 窗口控制 */}
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
         {/* 暂停/继续 */}
-        <Tooltip title={isPaused ? '继续所有任务' : '暂停所有任务'}>
+        <Tooltip title={schedulerPaused ? '继续所有任务' : '暂停所有任务'}>
           <button className="btn-ghost" onClick={handleTogglePause}>
-            {isPaused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+            {schedulerPaused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
           </button>
         </Tooltip>
 
@@ -177,6 +236,24 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
             <DownloadOutlined />
           </button>
         </Tooltip>
+
+        <Tooltip title="下载记录">
+          <button
+            className="btn-ghost"
+            onClick={() => {
+              setDownloadQueueOpen(true);
+              void loadDownloadJobs();
+            }}
+          >
+            <HistoryOutlined />
+          </button>
+        </Tooltip>
+
+        <Dropdown menu={{ items: moreMenuItems }} trigger={['click']}>
+          <button className="btn-ghost" title="更多">
+            <MoreOutlined />
+          </button>
+        </Dropdown>
 
         {/* 分隔线 */}
         <div className="w-px h-5 bg-db-border mx-1" />
@@ -213,6 +290,31 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       onClose={() => setPreviewOpen(false)}
       onDownload={handleDoDownload}
     />
+    <DownloadQueueModal
+      open={downloadQueueOpen}
+      jobs={downloadJobs}
+      loading={downloadJobsLoading}
+      onClose={() => setDownloadQueueOpen(false)}
+      onRefresh={() => void loadDownloadJobs()}
+      onRetry={handleRetryDownload}
+    />
+    <Modal title="运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
+      <Progress percent={successRate} status={successRate >= 80 ? 'success' : 'normal'} />
+      <Descriptions column={2} size="small" style={{ marginTop: 18 }}>
+        <Descriptions.Item label="任务总数">{tasks.length}</Descriptions.Item>
+        <Descriptions.Item label="成功率">{successRate}%</Descriptions.Item>
+        <Descriptions.Item label="平均完成时间">{averageMinutes} 分钟</Descriptions.Item>
+        <Descriptions.Item label="等待人工处理">
+          {tasks.filter((task) => task.status === 'waiting_verification' || task.status === 'paused').length}
+        </Descriptions.Item>
+        <Descriptions.Item label="失败任务">{tasks.filter((task) => task.status === 'fail').length}</Descriptions.Item>
+        <Descriptions.Item label="下载失败">{downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>
+        <Descriptions.Item label="可用账号">
+          {accounts.filter((account) => !account.seedanceQuota?.exhausted && !account.health?.verificationRequired && account.health?.loginState !== 'expired').length}
+        </Descriptions.Item>
+        <Descriptions.Item label="额度耗尽账号">{accounts.filter((account) => account.seedanceQuota?.exhausted).length}</Descriptions.Item>
+      </Descriptions>
+    </Modal>
     </>
   );
 };

@@ -29,6 +29,14 @@ export function readJSON<T>(filename: string, fallback: T): T {
     }
   } catch (err) {
     console.error(`[Store] 读取 ${filename} 失败:`, err);
+    const backupPath = `${filePath}.bak`;
+    try {
+      if (fs.existsSync(backupPath)) {
+        return JSON.parse(fs.readFileSync(backupPath, 'utf-8')) as T;
+      }
+    } catch (backupError) {
+      console.error(`[Store] 读取 ${filename} 备份失败:`, backupError);
+    }
   }
   return fallback;
 }
@@ -36,11 +44,23 @@ export function readJSON<T>(filename: string, fallback: T): T {
 /** 通用写入 JSON 文件 */
 export function writeJSON<T>(filename: string, data: T): boolean {
   const filePath = path.join(getDataDir(), filename);
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  const backupPath = `${filePath}.bak`;
   try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf-8');
+    fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
+    if (fs.existsSync(filePath)) fs.copyFileSync(filePath, backupPath);
+    try {
+      fs.renameSync(tempPath, filePath);
+    } catch {
+      fs.copyFileSync(tempPath, filePath);
+      fs.unlinkSync(tempPath);
+    }
     return true;
   } catch (err) {
     console.error(`[Store] 写入 ${filename} 失败:`, err);
+    try {
+      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    } catch {}
     return false;
   }
 }

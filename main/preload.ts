@@ -15,6 +15,14 @@ export interface Account {
   partition: string;
   status: 'idle' | 'busy' | 'error';
   pinned: boolean;
+  seedanceQuota?: {
+    date: string;
+    usedUnits: number;
+    estimatedTotalUnits: number;
+    exhausted: boolean;
+    updatedAt: string;
+  };
+  health?: any;
   createdAt: string;
   updatedAt: string;
 }
@@ -25,10 +33,15 @@ export interface Task {
   id: string;
   prompt: string;
   assignedAccountId: string | null;
-  status: 'queued' | 'executing' | 'generating' | 'done' | 'fail';
+  status: 'queued' | 'executing' | 'generating' | 'waiting_verification' | 'paused' | 'done' | 'fail' | 'cancelled';
   mode: GenerationMode;
+  videoConfig?: any;
+  attachments?: string[];
+  audioAttachment?: string;
   result: string | null;
   outputs: string[];
+  runtime?: any;
+  errorInfo?: any;
   createdAt: string;
   updatedAt: string;
 }
@@ -51,6 +64,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:setStatus', { id, status }),
     setPinned: (id: string, pinned: boolean): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('accounts:setPinned', { id, pinned }),
+    updateSeedanceQuota: (id: string, action: 'consume' | 'exhausted', units?: number): Promise<{ success: boolean; account?: Account }> =>
+      ipcRenderer.invoke('accounts:updateSeedanceQuota', { id, action, units }),
+    updateHealth: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: string): Promise<{ success: boolean; account?: Account }> =>
+      ipcRenderer.invoke('accounts:updateHealth', { id, action, errorCode }),
     getPartition: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('accounts:getPartition', { id }),
   },
@@ -69,13 +86,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
       outputs?: string[]
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs }),
+    updateRuntime: (taskId: string, patch: {
+      status?: string;
+      runtime?: Record<string, any>;
+      errorInfo?: Record<string, any> | null;
+      result?: string;
+    }): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:updateRuntime', { taskId, ...patch }),
+    update: (taskId: string, updates: {
+      prompt: string;
+      videoConfig?: any;
+      attachments?: string[];
+      audioAttachment?: string;
+    }): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:update', { taskId, updates }),
     delete: (taskId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:delete', { taskId }),
     retry: (taskId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:retry', { taskId }),
     batchPause: (): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('tasks:batchPause'),
-    getCompletedOutputs: (): Promise<{ taskId: string; prompt: string; outputs: string[] }[]> =>
+    getCompletedOutputs: (): Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>> =>
       ipcRenderer.invoke('tasks:getCompletedOutputs'),
     selectImages: (): Promise<{ success: boolean; filePaths?: string[]; error?: string }> =>
       ipcRenderer.invoke('tasks:selectImages'),
@@ -84,10 +115,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     readFileAsBase64: (filePath: string): Promise<{ success: boolean; data?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:readFileAsBase64', filePath),
     downloadOutputs: (
-      outputs: Array<{ taskId: string; prompt: string; outputs: string[] }>,
+      outputs: Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>,
       saveDir?: string
-    ): Promise<{ success: boolean; count: number; error?: string }> =>
+    ): Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }> =>
       ipcRenderer.invoke('tasks:downloadOutputs', { outputs, saveDir }),
+    listDownloads: (): Promise<any[]> => ipcRenderer.invoke('tasks:listDownloads'),
+    exportDiagnostics: (): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke('tasks:exportDiagnostics'),
     selectSaveDir: (): Promise<{ success: boolean; dirPath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:selectSaveDir'),
   },
