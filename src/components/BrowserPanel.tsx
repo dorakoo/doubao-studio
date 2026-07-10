@@ -15,6 +15,8 @@ import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import type { AutomationState } from '../store/useTaskStore';
 import { classifyTaskError } from '../utils/taskRuntime';
+import { automationEngine } from '../automation/AutomationEngine';
+import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
 import {
   injectPrompt,
   submitPrompt,
@@ -297,8 +299,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         });
       }
       const controller = abortControllersRef.current.get(detail.taskId);
-      if (controller) {
-        controller.abort();
+      if (automationEngine.abort(detail.taskId) || controller) {
+        controller?.abort();
         message.info(detail.restartTask ? '正在停止旧任务并重新排队...' : '正在取消任务等待...');
       }
     };
@@ -355,6 +357,47 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return () => window.removeEventListener('manual-extract-video-output', handleManualExtract);
   }, []);
 
+  useEffect(() => {
+    const handleOpenConversation = async (event: Event) => {
+      const task = (event as CustomEvent<{ task: Task }>).detail?.task;
+      const accountId = task?.assignedAccountId;
+      const conversationUrl = task?.runtime?.conversationUrl || task?.artifacts?.find((artifact) => artifact.conversationUrl)?.conversationUrl;
+      const webview = accountId ? registryRef.current.get(accountId) : null;
+      if (!accountId || !conversationUrl || !webview) {
+        message.warning('该产物没有可用的原对话地址');
+        return;
+      }
+      useAccountStore.getState().selectAccount(accountId);
+      webview.loadURL(conversationUrl);
+      message.info('正在打开产物对应的豆包对话');
+    };
+    window.addEventListener('open-task-conversation', handleOpenConversation);
+    return () => window.removeEventListener('open-task-conversation', handleOpenConversation);
+  }, []);
+
+  useEffect(() => {
+    const handleAdapterSelfCheck = async () => {
+      if (!activeAccount) {
+        window.dispatchEvent(new CustomEvent('adapter-self-check-result', { detail: { error: '请先选择账号' } }));
+        return;
+      }
+      const webview = registryRef.current.get(activeAccount.id);
+      if (!webview) {
+        window.dispatchEvent(new CustomEvent('adapter-self-check-result', { detail: { error: '账号页面尚未就绪' } }));
+        return;
+      }
+      try {
+        const report = await runAdapterSelfCheck(webview);
+        await window.electronAPI.tasks.saveAdapterReport(activeAccount.id, report);
+        window.dispatchEvent(new CustomEvent('adapter-self-check-result', { detail: { report } }));
+      } catch (error: any) {
+        window.dispatchEvent(new CustomEvent('adapter-self-check-result', { detail: { error: error.message || String(error) } }));
+      }
+    };
+    window.addEventListener('adapter-self-check', handleAdapterSelfCheck);
+    return () => window.removeEventListener('adapter-self-check', handleAdapterSelfCheck);
+  }, [activeAccount]);
+
   // ---- V3 自动化：监听 per-account 执行状态 ----
   useEffect(() => {
     accounts.forEach((account) => {
@@ -385,7 +428,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   ) => {
     const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask } =
       useTaskStore.getState();
-    const controller = new AbortController();
+    const controller = automationEngine.createController(taskId, accountId);
     abortControllersRef.current.set(taskId, controller);
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
     try {
@@ -683,6 +726,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await set15sVideoPatchEnabled(webview, !!manual15sRef.current[accountId]);
       }
       runningRef.current.delete(accountId);
+      await automationEngine.release(taskId);
       setTimeout(() => useTaskStore.getState().processQueue(), 0);
     }
   };

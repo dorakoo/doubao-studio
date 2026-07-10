@@ -1,0 +1,4 @@
+prompt,mode,model,duration,aspect_ratio,attachments,audio,account,depends_on,dependency_policy
+"生成一张电影感产品主图，主体居中，柔和自然光",image,,,,"D:\素材\产品正面.jpg",,,,
+"让参考图片中的产品缓慢旋转，镜头轻微推进",video,seedance-2.0,10s,16:9,"D:\素材\产品正面.jpg",,"工作号-01",2,all_done
+"为产品视频编写简短发布文案",chat,,,,,,,3,all_finished

@@ -29,6 +29,7 @@ import {
   ReloadOutlined,
   EditOutlined,
   StopOutlined,
+  FileExcelOutlined,
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { getAccountSchedulingScore, useAccountStore } from '../store/useAccountStore';
@@ -115,6 +116,7 @@ const TaskConsole: React.FC = () => {
   const {
     tasks,
     addTasks,
+    importCsv,
     assignTask,
     deleteTask,
     batchPause,
@@ -250,6 +252,19 @@ const TaskConsole: React.FC = () => {
       setVariableRows('');
     }
   }, [inputText, variableRows, selectedMode, videoConfig, attachments, audioAttachment, addTasks, autoAssign, autoAssignTasks]);
+
+  const handleImportCsv = useCallback(async () => {
+    const result = await importCsv();
+    if (!result) {
+      if (useTaskStore.getState().error) message.error(useTaskStore.getState().error);
+      return;
+    }
+    if (result.errors.length > 0) {
+      message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
+    } else {
+      message.success(`已导入 ${result.imported} 条任务`);
+    }
+  }, [importCsv]);
 
   // ---- 选择参考图片 ----
   const handleSelectImages = useCallback(async () => {
@@ -486,6 +501,12 @@ const TaskConsole: React.FC = () => {
             </span>
           </div>
           <p className="task-item-prompt">{task.prompt}</p>
+          {(task.batchId || (task.dependsOnTaskIds?.length || 0) > 0) && (
+            <div className="text-2xs text-db-text-muted mb-1 truncate">
+              {task.batchId ? `批次 ${task.batchId.slice(-10)}` : ''}
+              {(task.dependsOnTaskIds?.length || 0) > 0 ? ` · 等待 ${task.dependsOnTaskIds!.length} 个前置任务` : ''}
+            </div>
+          )}
           <div className="task-item-bottom" onClick={(e) => e.stopPropagation()}>
             <Select
               size="small"
@@ -628,6 +649,9 @@ const TaskConsole: React.FC = () => {
           >
             添加任务
           </Button>
+          <Tooltip title="从 CSV 导入任务批次">
+            <Button size="small" icon={<FileExcelOutlined />} onClick={() => void handleImportCsv()} />
+          </Tooltip>
           {(runningCount > 0 || queuedCount > 0) && (
             <Button
               size="small"

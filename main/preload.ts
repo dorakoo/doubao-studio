@@ -93,6 +93,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       result?: string;
     }): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:updateRuntime', { taskId, ...patch }),
+    acquireLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:acquireLock', { taskId, ownerId }),
+    releaseLock: (taskId: string, ownerId?: string): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('tasks:releaseLock', { taskId, ownerId }),
+    importCsv: (): Promise<any> => ipcRenderer.invoke('tasks:importCsv'),
     update: (taskId: string, updates: {
       prompt: string;
       videoConfig?: any;
@@ -122,6 +127,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     listDownloads: (): Promise<any[]> => ipcRenderer.invoke('tasks:listDownloads'),
     exportDiagnostics: (): Promise<{ success: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:exportDiagnostics'),
+    validateArtifact: (taskId: string, artifactId: string): Promise<any> =>
+      ipcRenderer.invoke('tasks:validateArtifact', { taskId, artifactId }),
+    saveAdapterReport: (accountId: string, report: Record<string, any>): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke('tasks:saveAdapterReport', { accountId, report }),
+    selectAdapterRules: (): Promise<any> => ipcRenderer.invoke('tasks:selectAdapterRules'),
     selectSaveDir: (): Promise<{ success: boolean; dirPath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:selectSaveDir'),
   },

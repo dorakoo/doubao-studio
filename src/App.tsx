@@ -49,7 +49,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     loadAccounts();
-    loadTasks();
+    loadTasks(true);
   }, []);
 
   // ---- 面板折叠 ----

@@ -20,6 +20,7 @@ import type {
   TaskArtifact,
 } from '../types';
 import { useAccountStore } from './useAccountStore';
+import { automationEngine } from '../automation/AutomationEngine';
 
 // ==================== 类型 ====================
 
@@ -48,8 +49,9 @@ interface TaskState {
   automationState: AutomationState;
 
   // ---- Actions ----
-  loadTasks: () => Promise<void>;
+  loadTasks: (recoverInterrupted?: boolean) => Promise<void>;
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
+  importCsv: () => Promise<{ imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
@@ -61,7 +63,7 @@ interface TaskState {
   clearError: () => void;
 
   // V3 自动化方法
-  startAutomation: (taskId: string) => void;
+  startAutomation: (taskId: string) => Promise<boolean>;
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => void;
   updateTaskRuntime: (taskId: string, patch: {
     status?: TaskStatus;
@@ -120,11 +122,25 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   // ---- 基础操作 ----
 
-  loadTasks: async () => {
+  loadTasks: async (recoverInterrupted = false) => {
     set({ loading: true, error: null });
     try {
-      const tasks = await window.electronAPI.tasks.list();
-      set({ tasks, loading: false });
+      let tasks = await window.electronAPI.tasks.list();
+      if (recoverInterrupted) {
+        const activeTasks = tasks.filter((task) => ['executing', 'generating', 'waiting_verification'].includes(task.status));
+        for (const task of activeTasks) {
+          const now = new Date().toISOString();
+          await window.electronAPI.tasks.updateRuntime(task.id, {
+            status: 'paused',
+            result: '应用界面重新载入，任务已安全暂停',
+            errorInfo: { code: 'cancelled', message: '应用界面重新载入，任务已安全暂停', recoverable: true, detectedAt: now },
+            runtime: task.runtime ? { stage: 'paused', message: '应用界面重新载入，任务已安全暂停', stageStartedAt: now, lastHeartbeatAt: now } : undefined,
+          });
+          await window.electronAPI.tasks.releaseLock(task.id);
+        }
+        if (activeTasks.length > 0) tasks = await window.electronAPI.tasks.list();
+      }
+      set({ tasks, loading: false, executingTasks: {}, accountBusy: {} });
     } catch (err: any) {
       set({ error: err.message, loading: false });
     }
@@ -202,6 +218,17 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         : t
     );
     set({ tasks });
+  },
+
+  importCsv: async () => {
+    const result = await window.electronAPI.tasks.importCsv();
+    if (!result.success || !result.tasks) {
+      if (result.error) set({ error: result.error });
+      return null;
+    }
+    set({ tasks: [...get().tasks, ...result.tasks] });
+    setTimeout(() => get().processQueue(), 0);
+    return { imported: result.imported || result.tasks.length, skipped: result.skipped || 0, errors: result.errors || [] };
   },
 
   updateTask: async (taskId: string, updates: TaskUpdateInput) => {
@@ -329,25 +356,32 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
   // ---- V3 自动化方法 ----
 
-  startAutomation: (taskId: string) => {
-    if (get().schedulerPaused) return;
+  startAutomation: async (taskId: string) => {
+    if (get().schedulerPaused) return false;
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
-      return;
+      return false;
     }
 
     const accountId = task.assignedAccountId;
     const assignedAccount = useAccountStore.getState().accounts.find((account) => account.id === accountId);
     if (task.mode === 'video' && assignedAccount?.seedanceQuota?.exhausted) {
       console.warn('[TaskStore] 账号 Seedance 今日额度已用尽，跳过视频任务', accountId);
-      return;
+      return false;
     }
 
     // 检查账号是否忙碌
     if (get().accountBusy[accountId]) {
       console.log('[TaskStore] 账号', accountId, '忙碌，任务排队');
-      return;
+      return false;
+    }
+
+    const runId = `${taskId}-${Date.now()}`;
+    const reservation = await automationEngine.reserve(taskId, accountId, runId);
+    if (!reservation.ok) {
+      set({ error: reservation.error || '任务锁定失败' });
+      return false;
     }
 
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
@@ -361,7 +395,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             result: null,
             errorInfo: undefined,
             runtime: {
-              runId: `${taskId}-${Date.now()}`,
+              runId,
               attempt: (t.runtime?.attempt || 0) + 1,
               stage: 'preparing_account' as TaskStage,
               message: '准备执行',
@@ -394,12 +428,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       automationState: 'injecting',
     });
 
-    void window.electronAPI.tasks.updateRuntime(taskId, {
+    await window.electronAPI.tasks.updateRuntime(taskId, {
       status: 'executing',
       runtime: startedTask.runtime,
       errorInfo: null,
       result: '',
     });
+    return true;
   },
 
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => {
@@ -650,6 +685,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
     for (const task of queuedTasks) {
+      const dependencies = (task.dependsOnTaskIds || [])
+        .map((dependencyId) => state.tasks.find((item) => item.id === dependencyId))
+        .filter((item): item is Task => !!item);
+      const dependencyReady = task.dependencyPolicy === 'all_finished'
+        ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
+        : dependencies.every((item) => item.status === 'done');
+      if (dependencies.length !== (task.dependsOnTaskIds || []).length || !dependencyReady) continue;
       const accountId = task.assignedAccountId!;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
       if (task.mode === 'video' && account?.seedanceQuota?.exhausted) continue;

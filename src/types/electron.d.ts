@@ -3,7 +3,7 @@
  * Electron API 全局类型声明
  */
 
-import type { Account, DownloadJob, Task, TaskErrorInfo, TaskRunSnapshot, TaskStatus } from './index';
+import type { Account, CsvImportResult, DownloadJob, Task, TaskErrorInfo, TaskRunSnapshot, TaskStatus } from './index';
 
 // 扩展 HTMLElement 以支持 webview 标签
 declare global {
@@ -89,6 +89,9 @@ export interface ElectronAPI {
       errorInfo?: TaskErrorInfo | null;
       result?: string;
     }) => Promise<{ success: boolean; task?: Task; error?: string }>;
+    acquireLock: (taskId: string, ownerId: string) => Promise<{ success: boolean; task?: Task; error?: string }>;
+    releaseLock: (taskId: string, ownerId?: string) => Promise<{ success: boolean }>;
+    importCsv: () => Promise<CsvImportResult>;
     update: (taskId: string, updates: {
       prompt: string;
       videoConfig?: Task['videoConfig'];
@@ -108,6 +111,9 @@ export interface ElectronAPI {
     ) => Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }>;
     listDownloads: () => Promise<DownloadJob[]>;
     exportDiagnostics: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    validateArtifact: (taskId: string, artifactId: string) => Promise<{ success: boolean; artifact?: import('./index').TaskArtifact; error?: string }>;
+    saveAdapterReport: (accountId: string, report: import('./index').AdapterSelfCheckReport) => Promise<{ success: boolean }>;
+    selectAdapterRules: () => Promise<{ success: boolean; bundle?: import('./index').AdapterRuleBundle; error?: string }>;
     selectSaveDir: () => Promise<{ success: boolean; dirPath?: string; error?: string }>;
   };
   settings: {

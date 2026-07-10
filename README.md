@@ -1,6 +1,6 @@
 # 豆包工作室 Doubao Studio
 
-[![Version](https://img.shields.io/badge/version-1.1.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
+[![Version](https://img.shields.io/badge/version-1.5.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-149eca?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript)](https://www.typescriptlang.org/)
@@ -70,6 +70,8 @@ flowchart LR
 - 程序意外退出后，未完成任务会恢复为“已暂停”，可重新执行。
 - 人工验证完成后会重新创建对话、上传素材并再次提交。
 - 对额度、会员、人脸素材、审核、网络、页面变化和产物缺失进行分类记录。
+- 主进程使用原子任务锁，阻止重复点击、热更新和竞态造成重复执行。
+- 最近 20 次运行记录保留结果、错误类型和实际耗时。
 
 ### 视频生成与 15 秒模式
 
@@ -88,6 +90,34 @@ flowchart LR
 - 下载任务保留完成状态、文件大小、失败原因和保存位置。
 - 下载失败项可以在“下载记录”中重试。
 - 视频原始地址提取采用多通道候选检测，但不保证任何时候都能获得无水印版本。
+
+### 产物中心
+
+- 汇总所有任务历次运行产生的图片、视频和文件。
+- 按提示词、任务 ID、类型和地址有效性筛选。
+- 对远程地址执行轻量有效性检测，区分有效、过期和不可用。
+- 显示产物是否已经下载到本地。
+- 支持预览、重新下载和返回产物对应的豆包对话。
+
+### CSV 批次与基础工作流
+
+- 从 CSV 批量导入提示词、模式、视频模型、时长、比例、素材和账号。
+- 使用 `depends_on` 指定前置 CSV 行号，多个行号使用 `|` 分隔。
+- `all_done` 要求所有前置任务成功；`all_finished` 允许前置任务失败后继续。
+- 任务批次页面汇总总数、进度、运行、排队和失败数量。
+- 可对整个批次中的失败任务一键重新排队。
+
+CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
+
+### 页面适配系统
+
+- 当前适配器和规则包具有独立版本号。
+- 兼容性自检检查输入框、提交控件、视频入口、模型、时长、比例、上传和产物识别。
+- 自检报告脱敏保存在本地，最多保留最近 50 份。
+- 支持导入受限 JSON 规则包，不执行规则包中的脚本。
+- 新规则安装前保存旧版本，可通过工具栏一键回退。
+
+适配规则示例见 [`examples/adapter-rules.json`](examples/adapter-rules.json)。
 
 ## 界面结构
 
@@ -125,6 +155,8 @@ pnpm run dev
 6. 开启“自动指派”，或手动为任务选择账号。
 7. 启动任务后，可在任务条目和详情页查看实时阶段。
 8. 完成后预览或提取产物，通过顶部下载按钮批量保存。
+9. 大批量任务可点击任务区的 CSV 按钮，导入模板格式的任务文件。
+10. 豆包页面更新后，从“更多”运行兼容性自检并查看具体异常控件。
 
 ## 常用命令
 
@@ -171,6 +203,7 @@ pnpm run dev
 ```text
 main/                       Electron 主进程、IPC 与本地数据
 src/components/             账号、任务、浏览器、下载和设置界面
+src/automation/             执行协调器、任务锁客户端和页面适配规则
 src/store/                  Zustand 账号与任务调度状态
 src/types/                  任务、账号、产物和 Electron API 类型
 src/utils/doubaoBridge.ts   豆包网页交互与产物提取适配层
@@ -187,11 +220,11 @@ scripts/dev.mjs             动态端口开发启动器
 
 ## 路线图
 
-- CSV/Excel 批量任务导入
-- 图片生成到视频生成的任务依赖工作流
-- 更完整的产物中心与筛选
+- Excel 批量任务导入与可视化字段映射
+- 将网页执行生命周期进一步迁移到持久化后台服务
+- 图片生成到视频生成的自动素材传递
 - 敏感数据本地加密
-- 页面适配规则版本化
+- 远程适配规则签名与自动更新
 - 应用自动更新与失败回滚
 
 完整版本变化见 [CHANGELOG.md](CHANGELOG.md)。

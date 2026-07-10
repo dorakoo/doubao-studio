@@ -86,6 +86,7 @@ logs/
 *.pptx
 *.xlsx
 *.csv
+!examples/*.csv
 
 # Preview files
 .preview

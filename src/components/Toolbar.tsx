@@ -20,6 +20,7 @@ import {
   MenuUnfoldOutlined,
   HistoryOutlined,
   MoreOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import { Descriptions, Dropdown, message, Modal, Progress, Tooltip } from 'antd';
 import type { MenuProps } from 'antd';
@@ -28,8 +29,11 @@ import { SettingsModal } from './SettingsModal';
 import { OutputPreviewModal } from './OutputPreviewModal';
 import type { OutputItem } from './OutputPreviewModal';
 import { DownloadQueueModal } from './DownloadQueueModal';
-import type { DownloadJob } from '../types';
+import type { AdapterSelfCheckReport, DownloadJob } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
+import { ArtifactCenterModal } from './ArtifactCenterModal';
+import { BatchManagerModal } from './BatchManagerModal';
+import { installAdapterBundle, rollbackAdapterBundle } from '../automation/doubaoAdapter';
 
 interface ToolbarProps {
   sidebarCollapsed: boolean;
@@ -46,6 +50,21 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   const [downloadJobs, setDownloadJobs] = React.useState<DownloadJob[]>([]);
   const [downloadJobsLoading, setDownloadJobsLoading] = React.useState(false);
   const [metricsOpen, setMetricsOpen] = React.useState(false);
+  const [artifactCenterOpen, setArtifactCenterOpen] = React.useState(false);
+  const [adapterReport, setAdapterReport] = React.useState<AdapterSelfCheckReport | null>(null);
+  const [adapterChecking, setAdapterChecking] = React.useState(false);
+  const [batchManagerOpen, setBatchManagerOpen] = React.useState(false);
+
+  React.useEffect(() => {
+    const handleResult = (event: Event) => {
+      const detail = (event as CustomEvent<{ report?: AdapterSelfCheckReport; error?: string }>).detail;
+      setAdapterChecking(false);
+      if (detail.error) message.error(`兼容性自检失败：${detail.error}`);
+      else if (detail.report) setAdapterReport(detail.report);
+    };
+    window.addEventListener('adapter-self-check-result', handleResult);
+    return () => window.removeEventListener('adapter-self-check-result', handleResult);
+  }, []);
 
   const loadDownloadJobs = React.useCallback(async () => {
     setDownloadJobsLoading(true);
@@ -148,6 +167,43 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   // 更多操作菜单
   const moreMenuItems: MenuProps['items'] = [
     {
+      key: 'batches',
+      label: '任务批次',
+      onClick: () => setBatchManagerOpen(true),
+    },
+    {
+      key: 'adapter-check',
+      label: adapterChecking ? '兼容性自检中...' : '豆包页面兼容性自检',
+      disabled: adapterChecking,
+      onClick: () => {
+        setAdapterChecking(true);
+        window.dispatchEvent(new CustomEvent('adapter-self-check'));
+      },
+    },
+    {
+      key: 'adapter-import',
+      label: '导入页面适配规则',
+      onClick: async () => {
+        const selected = await window.electronAPI.tasks.selectAdapterRules();
+        if (!selected.success || !selected.bundle) {
+          if (selected.error) message.error(selected.error);
+          return;
+        }
+        const result = await installAdapterBundle(selected.bundle);
+        if (result.ok) message.success(`适配规则 ${selected.bundle.version} 已安装`);
+        else message.error(result.error);
+      },
+    },
+    {
+      key: 'adapter-rollback',
+      label: '回退页面适配规则',
+      onClick: async () => {
+        const result = await rollbackAdapterBundle();
+        if (result.ok) message.success(`已回退到适配规则 ${result.version}`);
+        else message.warning(result.error);
+      },
+    },
+    {
       key: 'metrics',
       label: '运行统计',
       onClick: () => setMetricsOpen(true),
@@ -193,7 +249,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
             豆包工作室
           </span>
           <span className="text-2xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded">
-            MVP
+            v1.5
           </span>
         </div>
 
@@ -223,6 +279,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         <Tooltip title={schedulerPaused ? '继续所有任务' : '暂停所有任务'}>
           <button className="btn-ghost" onClick={handleTogglePause}>
             {schedulerPaused ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+          </button>
+        </Tooltip>
+
+        {/* 批量下载 */}
+        <Tooltip title="产物中心">
+          <button className="btn-ghost" onClick={() => setArtifactCenterOpen(true)}>
+            <AppstoreOutlined />
           </button>
         </Tooltip>
 
@@ -298,6 +361,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       onRefresh={() => void loadDownloadJobs()}
       onRetry={handleRetryDownload}
     />
+    <ArtifactCenterModal open={artifactCenterOpen} onClose={() => setArtifactCenterOpen(false)} />
+    <BatchManagerModal open={batchManagerOpen} onClose={() => setBatchManagerOpen(false)} />
     <Modal title="运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
       <Progress percent={successRate} status={successRate >= 80 ? 'success' : 'normal'} />
       <Descriptions column={2} size="small" style={{ marginTop: 18 }}>
@@ -314,6 +379,29 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         </Descriptions.Item>
         <Descriptions.Item label="额度耗尽账号">{accounts.filter((account) => account.seedanceQuota?.exhausted).length}</Descriptions.Item>
       </Descriptions>
+    </Modal>
+    <Modal
+      title={`豆包页面兼容性 · ${adapterReport?.score ?? 0} 分`}
+      open={!!adapterReport}
+      onCancel={() => setAdapterReport(null)}
+      footer={null}
+      width={680}
+    >
+      {adapterReport && (
+        <>
+          <Progress percent={adapterReport.score} status={adapterReport.score >= 80 ? 'success' : 'exception'} />
+          <Descriptions column={1} size="small" style={{ marginTop: 16 }}>
+            <Descriptions.Item label="适配器版本">{adapterReport.adapterVersion}</Descriptions.Item>
+            <Descriptions.Item label="页面地址">{adapterReport.pageUrl}</Descriptions.Item>
+            {adapterReport.items.map((item) => (
+              <Descriptions.Item key={item.key} label={item.label}>
+                <span style={{ color: item.ok ? '#34d399' : '#fb7185' }}>{item.ok ? '正常' : '异常'}</span>
+                <span style={{ marginLeft: 8, color: '#888' }}>{item.detail}</span>
+              </Descriptions.Item>
+            ))}
+          </Descriptions>
+        </>
+      )}
     </Modal>
     </>
   );

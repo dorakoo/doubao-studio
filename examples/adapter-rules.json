@@ -1,0 +1,25 @@
+{
+  "version": "custom-1.0.0",
+  "createdAt": "2026-07-11T00:00:00.000Z",
+  "rules": {
+    "input": [
+      "textarea",
+      "[contenteditable=\"true\"]"
+    ],
+    "submit": [
+      "button[aria-label*=\"发送\"]",
+      "button[type=\"submit\"]"
+    ],
+    "dialogs": [
+      "[role=\"dialog\"]",
+      "[role=\"listbox\"]"
+    ],
+    "uploads": [
+      "input[type=\"file\"]"
+    ],
+    "media": [
+      "video",
+      "img[src^=\"http\"]"
+    ]
+  }
+}

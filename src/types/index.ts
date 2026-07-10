@@ -182,6 +182,23 @@ export interface TaskRunSnapshot {
   };
 }
 
+export interface TaskRunRecord {
+  runId: string;
+  attempt: number;
+  startedAt: string;
+  finishedAt?: string;
+  finalStage?: TaskStage;
+  outcome?: 'done' | 'failed' | 'paused' | 'cancelled';
+  errorCode?: TaskErrorCode;
+  durationMs?: number;
+}
+
+export interface TaskLock {
+  ownerId: string;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
 export interface TaskArtifact {
   id: string;
   url: string;
@@ -190,6 +207,14 @@ export interface TaskArtifact {
   runId?: string;
   conversationUrl?: string;
   discoveredAt: string;
+  validation?: {
+    state: 'unknown' | 'valid' | 'expired' | 'invalid';
+    checkedAt: string;
+    contentType?: string;
+    contentLength?: number;
+    statusCode?: number;
+    error?: string;
+  };
 }
 
 export interface DownloadJob {
@@ -234,6 +259,12 @@ export interface Task {
   runtime?: TaskRunSnapshot;
   /** 结构化失败原因，供恢复、筛选和统计使用。 */
   errorInfo?: TaskErrorInfo;
+  runHistory?: TaskRunRecord[];
+  lock?: TaskLock;
+  batchId?: string;
+  source?: 'manual' | 'csv' | 'workflow';
+  dependsOnTaskIds?: string[];
+  dependencyPolicy?: 'all_done' | 'all_finished';
   createdAt: string;
   updatedAt: string;
 }
@@ -244,6 +275,43 @@ export interface TaskUpdateInput {
   videoConfig?: Task['videoConfig'];
   attachments?: string[];
   audioAttachment?: string;
+}
+
+export interface CsvImportResult {
+  success: boolean;
+  tasks?: Task[];
+  batchId?: string;
+  imported?: number;
+  skipped?: number;
+  errors?: string[];
+  error?: string;
+}
+
+export interface AdapterSelfCheckItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface AdapterSelfCheckReport {
+  adapterVersion: string;
+  pageUrl: string;
+  checkedAt: string;
+  score: number;
+  items: AdapterSelfCheckItem[];
+}
+
+export interface AdapterRuleBundle {
+  version: string;
+  createdAt: string;
+  rules: {
+    input: string[];
+    submit: string[];
+    dialogs: string[];
+    uploads: string[];
+    media: string[];
+  };
 }
 
 /** 任务状态标签配置 */

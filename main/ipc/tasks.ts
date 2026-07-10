@@ -64,6 +64,23 @@ export interface TaskRunSnapshot {
   };
 }
 
+export interface TaskRunRecord {
+  runId: string;
+  attempt: number;
+  startedAt: string;
+  finishedAt?: string;
+  finalStage?: TaskStage;
+  outcome?: 'done' | 'failed' | 'paused' | 'cancelled';
+  errorCode?: string;
+  durationMs?: number;
+}
+
+export interface TaskLock {
+  ownerId: string;
+  acquiredAt: string;
+  expiresAt: string;
+}
+
 export interface TaskArtifact {
   id: string;
   url: string;
@@ -72,6 +89,14 @@ export interface TaskArtifact {
   runId?: string;
   conversationUrl?: string;
   discoveredAt: string;
+  validation?: {
+    state: 'unknown' | 'valid' | 'expired' | 'invalid';
+    checkedAt: string;
+    contentType?: string;
+    contentLength?: number;
+    statusCode?: number;
+    error?: string;
+  };
 }
 
 export interface DownloadJob {
@@ -118,6 +143,12 @@ export interface Task {
   artifacts?: TaskArtifact[];
   runtime?: TaskRunSnapshot;
   errorInfo?: TaskErrorInfo;
+  runHistory?: TaskRunRecord[];
+  lock?: TaskLock;
+  batchId?: string;
+  source?: 'manual' | 'csv' | 'workflow';
+  dependsOnTaskIds?: string[];
+  dependencyPolicy?: 'all_done' | 'all_finished';
   createdAt: string;
   updatedAt: string;
 }
@@ -134,6 +165,9 @@ function loadTasks(): Task[] {
     mode: task.mode || 'chat',
     outputs: Array.isArray(task.outputs) ? task.outputs : [],
     artifacts: Array.isArray(task.artifacts) ? task.artifacts : [],
+    runHistory: Array.isArray(task.runHistory) ? task.runHistory : [],
+    source: task.source || 'manual',
+    dependsOnTaskIds: Array.isArray(task.dependsOnTaskIds) ? task.dependsOnTaskIds : [],
   }));
 }
 
@@ -159,6 +193,46 @@ function appendArtifacts(task: Task, outputs: string[], source: TaskArtifact['so
     existing.set(url, artifact);
   }
   task.artifacts = [...existing.values()];
+}
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === '"') {
+      if (quoted && text[index + 1] === '"') {
+        field += '"';
+        index++;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === ',' && !quoted) {
+      row.push(field.trim());
+      field = '';
+    } else if ((char === '\n' || char === '\r') && !quoted) {
+      if (char === '\r' && text[index + 1] === '\n') index++;
+      row.push(field.trim());
+      field = '';
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+    } else {
+      field += char;
+    }
+  }
+  row.push(field.trim());
+  if (row.some(Boolean)) rows.push(row);
+  return rows;
+}
+
+function normalizeCsvMode(value: string): GenerationMode {
+  const normalized = value.trim().toLowerCase();
+  if (['image', '图片'].includes(normalized)) return 'image';
+  if (['video', '视频'].includes(normalized)) return 'video';
+  if (['music', '音乐'].includes(normalized)) return 'music';
+  return 'chat';
 }
 
 function saveTasks(tasks: Task[]): boolean {
@@ -209,7 +283,14 @@ function recoverInterruptedTasks(): void {
   let changed = false;
   const now = new Date().toISOString();
   for (const task of tasks) {
-    if (task.status !== 'executing' && task.status !== 'generating' && task.status !== 'waiting_verification') continue;
+    const wasActive = task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification';
+    if (!wasActive) {
+      if (task.lock) {
+        task.lock = undefined;
+        changed = true;
+      }
+      continue;
+    }
     task.status = 'paused';
     task.result = '程序上次退出时任务仍在运行，可重新执行';
     task.errorInfo = {
@@ -228,6 +309,15 @@ function recoverInterruptedTasks(): void {
       };
     }
     task.updatedAt = now;
+    task.lock = undefined;
+    const activeRun = task.runtime && task.runHistory?.find((run) => run.runId === task.runtime!.runId && !run.finishedAt);
+    if (activeRun) {
+      activeRun.finishedAt = now;
+      activeRun.finalStage = 'paused';
+      activeRun.outcome = 'paused';
+      activeRun.errorCode = 'cancelled';
+      activeRun.durationMs = Math.max(0, new Date(now).getTime() - new Date(activeRun.startedAt).getTime());
+    }
     changed = true;
   }
   if (changed) saveTasks(tasks);
@@ -237,6 +327,7 @@ function recoverInterruptedTasks(): void {
 
 export function registerTaskIPC(): void {
   recoverInterruptedTasks();
+  writeJSON('schema.json', { version: 5, appVersion: '1.5.0', updatedAt: new Date().toISOString() });
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
     const tasks = loadTasks();
@@ -274,6 +365,9 @@ export function registerTaskIPC(): void {
             result: null,
             outputs: [],
             artifacts: [],
+            runHistory: [],
+            source: 'manual',
+            dependsOnTaskIds: [],
             errorInfo: undefined,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -455,10 +549,152 @@ export function registerTaskIPC(): void {
           return { success: false, error: '运行快照尚未初始化' };
         }
         task.runtime = { ...(task.runtime || {}), ...params.runtime } as TaskRunSnapshot;
+        const runtime = task.runtime;
+        task.runHistory = task.runHistory || [];
+        let record = task.runHistory.find((item) => item.runId === runtime.runId);
+        if (!record && runtime.runId && runtime.startedAt) {
+          record = { runId: runtime.runId, attempt: runtime.attempt, startedAt: runtime.startedAt };
+          task.runHistory.push(record);
+          task.runHistory = task.runHistory.slice(-20);
+        }
+        if (record && params.status && ['done', 'fail', 'paused', 'cancelled'].includes(params.status)) {
+          const finishedAt = new Date().toISOString();
+          record.finishedAt = finishedAt;
+          record.finalStage = runtime.stage;
+          record.outcome = params.status === 'fail' ? 'failed' : params.status as TaskRunRecord['outcome'];
+          record.errorCode = task.errorInfo?.code;
+          record.durationMs = Math.max(0, new Date(finishedAt).getTime() - new Date(record.startedAt).getTime());
+        }
       }
       task.updatedAt = new Date().toISOString();
       saveTasks(tasks);
       return { success: true, task };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:acquireLock',
+    async (_event, params: { taskId: string; ownerId: string }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((item) => item.id === params.taskId);
+      if (!task) return { success: false, error: '任务不存在' };
+      const now = Date.now();
+      const accountConflict = task.assignedAccountId && tasks.some((item) =>
+        item.id !== task.id &&
+        item.assignedAccountId === task.assignedAccountId &&
+        item.lock &&
+        new Date(item.lock.expiresAt).getTime() > now
+      );
+      if (accountConflict) return { success: false, error: '该账号已经被其他任务锁定' };
+      if (task.lock && task.lock.ownerId !== params.ownerId && new Date(task.lock.expiresAt).getTime() > now) {
+        return { success: false, error: '任务已经被其他执行器锁定' };
+      }
+      task.lock = {
+        ownerId: params.ownerId,
+        acquiredAt: new Date(now).toISOString(),
+        expiresAt: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
+      };
+      task.updatedAt = new Date().toISOString();
+      saveTasks(tasks);
+      return { success: true, task };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:importCsv',
+    async (): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
+      try {
+        const selected = await dialog.showOpenDialog({
+          title: '导入 CSV 任务',
+          properties: ['openFile'],
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+        });
+        if (selected.canceled || !selected.filePaths[0]) return { success: false };
+        const fs = require('fs');
+        const raw = fs.readFileSync(selected.filePaths[0], 'utf-8').replace(/^\uFEFF/, '');
+        const rows = parseCsv(raw);
+        if (rows.length < 2) return { success: false, error: 'CSV 没有可导入的数据行' };
+        const headers = rows[0].map((header) => header.trim().toLowerCase());
+        const indexOf = (...names: string[]) => names.map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
+        const promptIndex = indexOf('prompt', '提示词');
+        if (promptIndex < 0) return { success: false, error: 'CSV 必须包含 prompt 或 提示词 列' };
+
+        const modeIndex = indexOf('mode', '模式');
+        const modelIndex = indexOf('model', '模型');
+        const durationIndex = indexOf('duration', '时长');
+        const ratioIndex = indexOf('aspectratio', 'aspect_ratio', '比例');
+        const attachmentsIndex = indexOf('attachments', '参考图片');
+        const audioIndex = indexOf('audio', '参考音频');
+        const accountIndex = indexOf('account', '账号');
+        const dependsIndex = indexOf('depends_on', '依赖行');
+        const policyIndex = indexOf('dependency_policy', '依赖策略');
+        const accounts = readJSON<Array<{ id: string; name: string }>>('accounts.json', []);
+        const existingTasks = loadTasks();
+        const batchId = `batch-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${uuidv4().slice(0, 6)}`;
+        const imported: Task[] = [];
+        const errors: string[] = [];
+        const sourceRows: number[] = [];
+
+        for (let dataIndex = 1; dataIndex < rows.length; dataIndex++) {
+          const row = rows[dataIndex];
+          const prompt = (row[promptIndex] || '').trim();
+          if (!prompt) {
+            errors.push(`第 ${dataIndex + 1} 行：提示词为空`);
+            continue;
+          }
+          const mode = modeIndex >= 0 ? normalizeCsvMode(row[modeIndex] || '') : 'chat';
+          const model = row[modelIndex] as VideoModel;
+          const duration = row[durationIndex] as VideoDuration;
+          const aspectRatio = row[ratioIndex] as VideoAspectRatio;
+          const now = new Date().toISOString();
+          const accountName = accountIndex >= 0 ? (row[accountIndex] || '').trim() : '';
+          const account = accountName ? accounts.find((item) => item.name === accountName) : undefined;
+          if (accountName && !account) errors.push(`第 ${dataIndex + 1} 行：未找到账号「${accountName}」，任务保持未指派`);
+          imported.push({
+            id: uuidv4(), prompt, assignedAccountId: account?.id || null, status: 'queued', mode,
+            videoConfig: mode === 'video' ? {
+              model: ['seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(model) ? model : 'seedance-2.0',
+              duration: ['5s', '10s', '15s'].includes(duration) ? duration : '10s',
+              aspectRatio: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(aspectRatio) ? aspectRatio : '16:9',
+            } : undefined,
+            attachments: attachmentsIndex >= 0 ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean) : undefined,
+            audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
+            result: null, outputs: [], artifacts: [], runHistory: [], batchId, source: 'csv', dependsOnTaskIds: [],
+            dependencyPolicy: policyIndex >= 0 && row[policyIndex] === 'all_finished' ? 'all_finished' : 'all_done',
+            createdAt: now, updatedAt: now,
+          });
+          sourceRows.push(dataIndex + 1);
+        }
+
+        const taskByCsvRow = new Map(sourceRows.map((rowNumber, index) => [rowNumber, imported[index]]));
+        imported.forEach((task, index) => {
+          if (dependsIndex < 0) return;
+          const rawDependencies = rows[sourceRows[index] - 1]?.[dependsIndex] || '';
+          task.dependsOnTaskIds = rawDependencies.split('|')
+            .map((item) => Number(item.trim()))
+            .map((rowNumber) => taskByCsvRow.get(rowNumber)?.id)
+            .filter((id): id is string => !!id);
+        });
+        existingTasks.push(...imported);
+        saveTasks(existingTasks);
+        return { success: true, tasks: imported, batchId, imported: imported.length, skipped: rows.length - 1 - imported.length, errors: errors.slice(0, 20) };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:releaseLock',
+    async (_event, params: { taskId: string; ownerId?: string }): Promise<{ success: boolean }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((item) => item.id === params.taskId);
+      if (task?.lock && (!params.ownerId || task.lock.ownerId === params.ownerId)) {
+        task.lock = undefined;
+        task.updatedAt = new Date().toISOString();
+        saveTasks(tasks);
+      }
+      return { success: true };
     }
   );
 
@@ -735,6 +971,76 @@ export function registerTaskIPC(): void {
         };
         fs.writeFileSync(result.filePath, JSON.stringify(payload, null, 2), 'utf-8');
         return { success: true, filePath: result.filePath };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:validateArtifact',
+    async (_event, params: { taskId: string; artifactId: string }): Promise<{ success: boolean; artifact?: TaskArtifact; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((item) => item.id === params.taskId);
+      const artifact = task?.artifacts?.find((item) => item.id === params.artifactId);
+      if (!task || !artifact) return { success: false, error: '产物不存在' };
+      const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
+      const account = accounts.find((item) => item.id === task.assignedAccountId);
+      const accountSession = account ? session.fromPartition(`persist:doubao_${account.partition}`) : session.defaultSession;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await accountSession.fetch(artifact.url, {
+          method: 'GET',
+          headers: { Referer: 'https://www.doubao.com/', Range: 'bytes=0-0' },
+          signal: controller.signal,
+        });
+        await response.body?.cancel();
+        const statusCode = response.status;
+        artifact.validation = {
+          state: response.ok || statusCode === 206 ? 'valid' : [401, 403, 404, 410].includes(statusCode) ? 'expired' : 'invalid',
+          checkedAt: new Date().toISOString(),
+          contentType: response.headers.get('content-type') || undefined,
+          contentLength: Number(response.headers.get('content-length') || 0) || undefined,
+          statusCode,
+        };
+      } catch (err: any) {
+        artifact.validation = {
+          state: err.name === 'AbortError' ? 'unknown' : 'invalid',
+          checkedAt: new Date().toISOString(),
+          error: err.name === 'AbortError' ? '验证超时' : err.message,
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+      task.updatedAt = new Date().toISOString();
+      saveTasks(tasks);
+      return { success: artifact.validation.state === 'valid', artifact, error: artifact.validation.error };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:saveAdapterReport',
+    async (_event, params: { accountId: string; report: Record<string, any> }): Promise<{ success: boolean }> => {
+      const reports = readJSON<Array<Record<string, any>>>('adapter-diagnostics.json', []);
+      reports.push({ ...params.report, accountId: params.accountId, savedAt: new Date().toISOString() });
+      writeJSON('adapter-diagnostics.json', reports.slice(-50));
+      return { success: true };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:selectAdapterRules',
+    async (): Promise<{ success: boolean; bundle?: Record<string, any>; error?: string }> => {
+      try {
+        const selected = await dialog.showOpenDialog({
+          title: '导入豆包页面适配规则', properties: ['openFile'],
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        if (selected.canceled || !selected.filePaths[0]) return { success: false };
+        const fs = require('fs');
+        const bundle = JSON.parse(fs.readFileSync(selected.filePaths[0], 'utf-8'));
+        return { success: true, bundle };
       } catch (err: any) {
         return { success: false, error: err.message };
       }

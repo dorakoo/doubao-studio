@@ -325,7 +325,35 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               </Descriptions.Item>
             </>
           )}
+          {task.batchId && <Descriptions.Item label="任务批次">{task.batchId}</Descriptions.Item>}
+          {(task.dependsOnTaskIds?.length || 0) > 0 && (
+            <Descriptions.Item label="前置依赖">{task.dependsOnTaskIds!.length} 个任务</Descriptions.Item>
+          )}
+          {task.lock && <Descriptions.Item label="执行锁">有效至 {new Date(task.lock.expiresAt).toLocaleTimeString('zh-CN')}</Descriptions.Item>}
         </Descriptions>
+
+        {(task.runHistory?.length || 0) > 0 && (
+          <div style={{ marginBottom: 16 }}>
+            <Divider orientation="left" plain>最近运行记录</Divider>
+            <List
+              size="small"
+              dataSource={[...(task.runHistory || [])].reverse().slice(0, 8)}
+              renderItem={(run) => (
+                <List.Item>
+                  <Space size={8} wrap>
+                    <Tag color={run.outcome === 'done' ? 'success' : run.outcome === 'failed' ? 'error' : 'default'}>
+                      {run.outcome === 'done' ? '完成' : run.outcome === 'failed' ? '失败' : run.outcome === 'paused' ? '暂停' : '运行中'}
+                    </Tag>
+                    <span>第 {run.attempt} 次</span>
+                    <span style={{ color: '#888' }}>{new Date(run.startedAt).toLocaleString('zh-CN')}</span>
+                    {run.durationMs !== undefined && <span style={{ color: '#888' }}>耗时 {Math.max(1, Math.round(run.durationMs / 1000))} 秒</span>}
+                    {run.errorCode && <Tag>{run.errorCode}</Tag>}
+                  </Space>
+                </List.Item>
+              )}
+            />
+          </div>
+        )}
 
         {/* 视频配置 */}
         {task.mode === 'video' && task.videoConfig && (
