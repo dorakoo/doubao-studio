@@ -10,6 +10,7 @@
 
 import { create } from 'zustand';
 import type {
+  Account,
   Task,
   TaskStatus,
   GenerationMode,
@@ -106,6 +107,40 @@ function mergeArtifacts(task: Task, outputs: string[], source: TaskArtifact['sou
     });
   }
   return [...artifacts.values()];
+}
+
+type DependencyEvaluation = {
+  state: 'ready' | 'waiting' | 'missing' | 'failed';
+  message?: string;
+};
+
+function evaluateDependencies(task: Task, tasks: Task[]): DependencyEvaluation {
+  const dependencyIds = task.dependsOnTaskIds || [];
+  const dependencies = dependencyIds
+    .map((dependencyId) => tasks.find((item) => item.id === dependencyId))
+    .filter((item): item is Task => !!item);
+  if (dependencies.length !== dependencyIds.length) {
+    return { state: 'missing', message: '任务依赖不存在，请检查工作流或 CSV' };
+  }
+  if (task.dependencyPolicy !== 'all_finished' && dependencies.some((item) => ['fail', 'cancelled'].includes(item.status))) {
+    return { state: 'failed', message: '前置任务未成功，当前任务已停止' };
+  }
+  const ready = task.dependencyPolicy === 'all_finished'
+    ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
+    : dependencies.every((item) => item.status === 'done');
+  return ready ? { state: 'ready' } : { state: 'waiting', message: '前置任务尚未满足执行条件' };
+}
+
+function getAccountBlockReason(account: Account | undefined, task: Task): string | null {
+  if (!account) return '指派账号不存在';
+  if (account.status === 'error') return '指派账号当前异常';
+  if (task.mode === 'video' && account.seedanceQuota?.exhausted) return '指派账号今日 Seedance 额度已用尽';
+  if (account.health?.verificationRequired) return '指派账号正在等待人工验证';
+  if (account.health?.loginState === 'expired') return '指派账号登录已失效';
+  if (account.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) return '指派账号处于自动冷却期';
+  if (account.scheduling?.enabled === false) return '指派账号已暂停调度';
+  if (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) return '指派账号处于手动冷却期';
+  return null;
 }
 
 // ==================== Store ====================
@@ -348,17 +383,35 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // ---- V3 自动化方法 ----
 
   startAutomation: async (taskId: string) => {
-    if (get().schedulerPaused) return false;
+    if (get().schedulerPaused) {
+      set({ error: '任务调度已暂停' });
+      return false;
+    }
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
+      set({ error: task ? '任务尚未指派账号' : '任务不存在' });
+      return false;
+    }
+    if (task.status !== 'queued') {
+      set({ error: '只有排队中的任务可以启动' });
+      return false;
+    }
+
+    const dependency = evaluateDependencies(task, get().tasks);
+    if (dependency.state !== 'ready') {
+      set({ error: dependency.message || '任务依赖尚未就绪' });
+      setTimeout(() => get().processQueue(), 0);
       return false;
     }
 
     const accountId = task.assignedAccountId;
     const assignedAccount = useAccountStore.getState().accounts.find((account) => account.id === accountId);
-    if (task.mode === 'video' && assignedAccount?.seedanceQuota?.exhausted) {
-      console.warn('[TaskStore] 账号 Seedance 今日额度已用尽，跳过视频任务', accountId);
+    const accountBlockReason = getAccountBlockReason(assignedAccount, task);
+    if (accountBlockReason) {
+      console.warn('[TaskStore] 账号不可调度:', accountBlockReason, accountId);
+      set({ error: accountBlockReason });
+      setTimeout(() => get().processQueue(), 0);
       return false;
     }
 
@@ -375,42 +428,48 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return false;
     }
 
+    const now = new Date().toISOString();
+    const startedTask: Task = {
+      ...task,
+      status: 'executing',
+      result: null,
+      errorInfo: undefined,
+      runtime: {
+        runId,
+        attempt: (task.runtime?.attempt || 0) + 1,
+        stage: 'preparing_account',
+        message: '准备执行',
+        startedAt: now,
+        stageStartedAt: now,
+        lastHeartbeatAt: now,
+        input: {
+          prompt: task.prompt,
+          mode: task.mode,
+          videoConfig: task.videoConfig,
+          attachments: [...(task.attachments || [])],
+          audioAttachment: task.audioAttachment,
+        },
+      },
+      updatedAt: now,
+    };
+
+    const persisted = await window.electronAPI.tasks.updateRuntime(taskId, {
+      status: 'executing',
+      runtime: startedTask.runtime,
+      errorInfo: null,
+      result: '',
+    });
+    if (!persisted.success) {
+      await automationEngine.release(taskId);
+      set({ error: persisted.error || '任务运行状态写入失败' });
+      return false;
+    }
+
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
     void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: '任务开始执行', taskId, accountId });
 
-    // 更新任务状态
-    const tasks = get().tasks.map((t) =>
-      t.id === taskId
-        ? {
-            ...t,
-            status: 'executing' as TaskStatus,
-            result: null,
-            errorInfo: undefined,
-            runtime: {
-              runId,
-              attempt: (t.runtime?.attempt || 0) + 1,
-              stage: 'preparing_account' as TaskStage,
-              message: '准备执行',
-              startedAt: new Date().toISOString(),
-              stageStartedAt: new Date().toISOString(),
-              lastHeartbeatAt: new Date().toISOString(),
-              input: {
-                prompt: t.prompt,
-                mode: t.mode,
-                videoConfig: t.videoConfig,
-                attachments: [...(t.attachments || [])],
-                audioAttachment: t.audioAttachment,
-              },
-            },
-            updatedAt: new Date().toISOString(),
-          }
-        : t
-    );
-
-    const startedTask = tasks.find((item) => item.id === taskId)!;
-
     set({
-      tasks,
+      tasks: get().tasks.map((item) => item.id === taskId ? (persisted.task || startedTask) : item),
       executingTasks: { ...get().executingTasks, [accountId]: taskId },
       accountBusy: { ...get().accountBusy, [accountId]: true },
       accountAutomationState: { ...get().accountAutomationState, [accountId]: 'injecting' },
@@ -420,12 +479,6 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       automationState: 'injecting',
     });
 
-    await window.electronAPI.tasks.updateRuntime(taskId, {
-      status: 'executing',
-      runtime: startedTask.runtime,
-      errorInfo: null,
-      result: '',
-    });
     return true;
   },
 
@@ -685,18 +738,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
     for (const task of queuedTasks) {
-      const dependencyIds = task.dependsOnTaskIds || [];
-      const dependencies = (task.dependsOnTaskIds || [])
-        .map((dependencyId) => state.tasks.find((item) => item.id === dependencyId))
-        .filter((item): item is Task => !!item);
-      const dependencyReady = task.dependencyPolicy === 'all_finished'
-        ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
-        : dependencies.every((item) => item.status === 'done');
-      const missingDependency = dependencies.length !== dependencyIds.length;
-      const failedRequiredDependency = task.dependencyPolicy !== 'all_finished' &&
-        dependencies.some((item) => ['fail', 'cancelled'].includes(item.status));
-      if (missingDependency || failedRequiredDependency) {
-        const message = missingDependency ? '任务依赖不存在，请检查工作流或 CSV' : '前置任务未成功，当前任务已停止';
+      const dependency = evaluateDependencies(task, state.tasks);
+      if (dependency.state === 'missing' || dependency.state === 'failed') {
+        const message = dependency.message!;
         const now = new Date().toISOString();
         set((current) => ({
           tasks: current.tasks.map((item) => item.id === task.id ? {
@@ -714,16 +758,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         });
         continue;
       }
-      if (!dependencyReady) continue;
+      if (dependency.state !== 'ready') continue;
       const accountId = task.assignedAccountId!;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-      const unavailable = !account ||
-        (task.mode === 'video' && account.seedanceQuota?.exhausted) ||
-        account.health?.verificationRequired || account.health?.loginState === 'expired' ||
-        (account.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) ||
-        account.scheduling?.enabled === false ||
-        (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now());
-      if (unavailable) {
+      if (getAccountBlockReason(account, task)) {
         const candidates = useAccountStore.getState().accounts
           .filter((candidate) => candidate.id !== accountId)
             .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating', 'waiting_verification'].includes(item.status)).length, task.mode) }))

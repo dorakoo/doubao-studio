@@ -120,10 +120,14 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
     });
   };
 
-  const handleStart = () => {
-    startAutomation(task.id);
-    message.info('任务已启动');
-    onClose();
+  const handleStart = async () => {
+    const started = await startAutomation(task.id);
+    if (started) {
+      message.info('任务已启动');
+      onClose();
+    } else {
+      message.warning('任务暂未启动，请检查依赖和账号状态');
+    }
   };
 
   const handleAssign = async (accountId: string) => {

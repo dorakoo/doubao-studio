@@ -92,7 +92,7 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       const result = await window.electronAPI.accounts.update(id, name);
       if (result.success) {
         const accounts = get().accounts.map((a) =>
-          a.id === id ? { ...a, name, updatedAt: new Date().toISOString() } : a
+          a.id === id ? { ...a, name: name.trim(), updatedAt: new Date().toISOString() } : a
         );
         set({ accounts });
         return true;
@@ -155,7 +155,11 @@ export const useAccountStore = create<AccountState>((set, get) => ({
 
   // 更新账号状态
   updateAccountStatus: async (id: string, status: AccountStatus) => {
-    await window.electronAPI.accounts.setStatus(id, status);
+    const result = await window.electronAPI.accounts.setStatus(id, status);
+    if (!result.success) {
+      set({ error: '账号状态保存失败' });
+      return;
+    }
     const accounts = get().accounts.map((a) =>
       a.id === id ? { ...a, status } : a
     );
@@ -167,7 +171,11 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     const account = get().accounts.find(a => a.id === id);
     if (!account) return;
     const newPinned = !account.pinned;
-    await window.electronAPI.accounts.setPinned(id, newPinned);
+    const result = await window.electronAPI.accounts.setPinned(id, newPinned);
+    if (!result.success) {
+      set({ error: '账号置顶状态保存失败' });
+      return;
+    }
     const accounts = get().accounts.map((a) =>
       a.id === id ? { ...a, pinned: newPinned, updatedAt: new Date().toISOString() } : a
     );

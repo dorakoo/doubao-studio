@@ -148,7 +148,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
     const container = poolRef.current;
-    if (!container || !activeAccount) return;
+    if (!container) return;
 
     const accountIds = new Set(accounts.map(a => a.id));
 
@@ -194,10 +194,21 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     webview.style.visibility = 'hidden';
     webview.style.pointerEvents = 'none';
 
+    let pollInterval: ReturnType<typeof setInterval> | undefined;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
     // 统一加载完成处理
     const markLoaded = (evt: string) => {
       if (!loadingMapRef.current.get(accId)) return; // 已标记完成，不重复处理
       loadingMapRef.current.set(accId, false);
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        timersRef.current.get(accId)?.delete(pollInterval);
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timersRef.current.get(accId)?.delete(timeoutId);
+      }
       console.log(`[BrowserPanel] markLoaded: ${accId} via ${evt}`);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
@@ -227,6 +238,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     });
     webview.addEventListener('did-fail-load', () => {
       loadingMapRef.current.set(accId, false);
+      clearAccountTimers(accId);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
         setActiveLoading(false);
@@ -240,9 +252,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
     // 解决 Electron webview 事件不触发的问题
-    const pollInterval = setInterval(() => {
+    pollInterval = setInterval(() => {
       const wv = registryRef.current.get(accId);
-      if (!wv) { clearInterval(pollInterval); return; }
+      if (!wv) {
+        clearAccountTimers(accId);
+        return;
+      }
       
       const url = wv.getURL?.() || '';
       const isLoaded = loadingMapRef.current.get(accId);
@@ -250,20 +265,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (isLoaded && url.startsWith('http') && url.includes('doubao.com')) {
         console.log(`[BrowserPanel] 轮询检测到 webview 已加载: ${accId}, url=${url}`);
         markLoaded('poll');
-        clearInterval(pollInterval);
-        timersRef.current.get(accId)?.delete(pollInterval);
       }
     }, 2000);
 
     // 60s 后停止轮询
-    const timeoutId = setTimeout(() => {
-      clearInterval(pollInterval);
+    timeoutId = setTimeout(() => {
+      if (pollInterval) clearInterval(pollInterval);
       if (loadingMapRef.current.get(accId)) {
         console.warn(`[BrowserPanel] 60s 超时，强制清除加载状态: ${accId}`);
         markLoaded('timeout');
       }
-      timersRef.current.get(accId)?.delete(timeoutId);
-      timersRef.current.get(accId)?.delete(pollInterval);
+      if (timeoutId) timersRef.current.get(accId)?.delete(timeoutId);
+      if (pollInterval) timersRef.current.get(accId)?.delete(pollInterval);
     }, 60000);
 
     // 注册定时器，用于账号删除或组件卸载时统一清理

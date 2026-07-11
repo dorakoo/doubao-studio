@@ -177,7 +177,7 @@ export function registerAccountIPC(): void {
     'accounts:add',
     async (_event, params: { name: string }): Promise<{ success: boolean; account?: Account; error?: string }> => {
       try {
-        const trimmedName = params.name.trim();
+        const trimmedName = params.name?.trim();
         if (!trimmedName) {
           return { success: false, error: '账号名称不能为空' };
         }
@@ -234,7 +234,7 @@ export function registerAccountIPC(): void {
   ipcMain.handle(
     'accounts:update',
     async (_event, params: { id: string; name: string }): Promise<{ success: boolean; error?: string }> => {
-      const trimmedName = params.name.trim();
+      const trimmedName = params.name?.trim();
       if (!trimmedName) {
         return { success: false, error: '账号名称不能为空' };
       }
@@ -278,13 +278,12 @@ export function registerAccountIPC(): void {
       }
 
       const removed = accounts.splice(idx, 1)[0];
-
-      // 清除该账号的 Session 数据
-      await clearAccountSession(removed.partition);
-
       if (!saveAccounts(accounts)) {
         return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
       }
+
+      // 先持久化删除，再清理不可回滚的登录数据，避免写盘失败却把现有账号登出。
+      await clearAccountSession(removed.partition);
       return { success: true };
     }
   );
@@ -318,12 +317,11 @@ export function registerAccountIPC(): void {
     async (_event, params: { id: string; status: AccountStatus }): Promise<{ success: boolean }> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
-      if (account) {
-        account.status = params.status;
-        account.updatedAt = new Date().toISOString();
-        if (!saveAccounts(accounts)) {
-          return { success: false };
-        }
+      if (!account) return { success: false };
+      account.status = params.status;
+      account.updatedAt = new Date().toISOString();
+      if (!saveAccounts(accounts)) {
+        return { success: false };
       }
       return { success: true };
     }
@@ -335,12 +333,11 @@ export function registerAccountIPC(): void {
     async (_event, params: { id: string; pinned: boolean }): Promise<{ success: boolean }> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
-      if (account) {
-        account.pinned = params.pinned;
-        account.updatedAt = new Date().toISOString();
-        if (!saveAccounts(accounts)) {
-          return { success: false };
-        }
+      if (!account) return { success: false };
+      account.pinned = params.pinned;
+      account.updatedAt = new Date().toISOString();
+      if (!saveAccounts(accounts)) {
+        return { success: false };
       }
       return { success: true };
     }

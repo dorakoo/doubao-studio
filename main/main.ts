@@ -78,6 +78,10 @@ function createMainWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
+  win.on('closed', () => {
+    if (mainWindow === win) mainWindow = null;
+  });
+
   return win;
 }
 
@@ -131,7 +135,7 @@ if (!gotLock) {
   // 第二实例启动时，聚焦并恢复已有主窗口
   app.on('second-instance', () => {
     if (isQuitting) return;
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       // 窗口最小化时恢复
       if (mainWindow.isMinimized()) {
         mainWindow.restore();
@@ -186,6 +190,10 @@ if (!gotLock) {
         mainWindow = createMainWindow();
       }
     });
+  }).catch((reason: unknown) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    writeCrashLog('startupFailure', error.message, error.stack);
+    app.exit(1);
   });
 
   // 所有窗口关闭时退出应用（macOS 除外）

@@ -306,7 +306,7 @@ const TaskConsole: React.FC = () => {
   const handleStartTask = useCallback(
     async (taskId: string) => {
       await clearError();
-      startAutomation(taskId);
+      await startAutomation(taskId);
     },
     [startAutomation, clearError]
   );
