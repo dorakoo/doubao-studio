@@ -25,10 +25,19 @@ jobs:
       - run: pnpm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/*.exe
-            release/*.blockmap
-            release/latest.yml
-          generate_release_notes: false
+      - name: Upload release assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "豆包工作室 $tag" --generate-notes
+          }
+          Get-ChildItem release -File | Where-Object {
+            $_.Extension -in '.exe', '.blockmap' -or $_.Name -eq 'latest.yml'
+          } | ForEach-Object {
+            gh release upload $tag $_.FullName --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
