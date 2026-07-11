@@ -19,7 +19,10 @@
     "lint": "eslint .",
     "ts-check": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json",
     "check:project": "node scripts/check-project.mjs",
-    "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run build"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run test && pnpm run build"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.0",
@@ -35,6 +38,7 @@
     "@types/react-dom": "^18.3.1",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "@vitest/coverage-v8": "^3.2.7",
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
@@ -47,6 +51,7 @@
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.63.0",
     "vite": "^6.0.3",
+    "vitest": "^3.2.7",
     "wait-on": "^8.0.1"
   },
   "build": {
