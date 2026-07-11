@@ -57,6 +57,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
   const manual15sRef = useRef<Record<string, boolean>>({});
+  /** 每个账号的定时器集合，用于组件卸载或账号删除时统一清理 */
+  const timersRef = useRef<Map<string, Set<ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>>>(new Map());
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
@@ -128,6 +130,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     : undefined;
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
+  // ---- 组件卸载时清理所有定时器，防止泄漏 ----
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach((timers, accountId) => {
+        timers.forEach((t) => {
+          clearInterval(t);
+          clearTimeout(t);
+        });
+        console.log(`[BrowserPanel] 组件卸载，清理账号 ${accountId} 的定时器`);
+      });
+      timersRef.current.clear();
+    };
+  }, []);
+
   // ---- webview 池动态管理（账号增删同步） ----
   const accountsKey = accounts.map(a => a.id).join(',');
   useEffect(() => {
@@ -136,9 +152,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     const accountIds = new Set(accounts.map(a => a.id));
 
-    // 清理已删除账号的 webview
+    // 清理已删除账号的 webview 和定时器
     registryRef.current.forEach((webview, accountId) => {
       if (!accountIds.has(accountId)) {
+        clearAccountTimers(accountId);
         container.removeChild(webview);
         registryRef.current.delete(accountId);
         loadingMapRef.current.delete(accountId);
@@ -234,17 +251,40 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         console.log(`[BrowserPanel] 轮询检测到 webview 已加载: ${accId}, url=${url}`);
         markLoaded('poll');
         clearInterval(pollInterval);
+        timersRef.current.get(accId)?.delete(pollInterval);
       }
     }, 2000);
 
     // 60s 后停止轮询
-    setTimeout(() => {
+    const timeoutId = setTimeout(() => {
       clearInterval(pollInterval);
       if (loadingMapRef.current.get(accId)) {
         console.warn(`[BrowserPanel] 60s 超时，强制清除加载状态: ${accId}`);
         markLoaded('timeout');
       }
+      timersRef.current.get(accId)?.delete(timeoutId);
+      timersRef.current.get(accId)?.delete(pollInterval);
     }, 60000);
+
+    // 注册定时器，用于账号删除或组件卸载时统一清理
+    if (!timersRef.current.has(accId)) {
+      timersRef.current.set(accId, new Set());
+    }
+    timersRef.current.get(accId)!.add(pollInterval);
+    timersRef.current.get(accId)!.add(timeoutId);
+  };
+
+  /** 清理指定账号的所有定时器 */
+  const clearAccountTimers = (accountId: string) => {
+    const timers = timersRef.current.get(accountId);
+    if (timers) {
+      timers.forEach((t) => {
+        clearInterval(t);
+        clearTimeout(t);
+      });
+      timers.clear();
+      timersRef.current.delete(accountId);
+    }
   };
 
   // ---- 切换可见性 ----
