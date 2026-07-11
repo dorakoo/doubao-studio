@@ -15,6 +15,7 @@ import { registerAccountIPC } from './ipc/accounts';
 import { registerTaskIPC } from './ipc/tasks';
 import { registerProjectIPC } from './ipc/projects';
 import { registerSystemIPC } from './ipc/system';
+import { writeCrashLog } from './utils/logger';
 
 // ==================== 常量 ====================
 
@@ -27,6 +28,8 @@ const DOUBAO_URL = 'https://www.doubao.com';
 // ==================== 全局状态 ====================
 
 let mainWindow: BrowserWindow | null = null;
+/** 应用是否正在退出，防止退出过程中创建新窗口或重新调度任务 */
+let isQuitting = false;
 
 // ==================== 窗口创建 ====================
 
@@ -114,31 +117,87 @@ function registerIPC(): void {
   console.log('[Main] IPC 模块全部注册完成');
 }
 
-// ==================== 应用生命周期 ====================
+// ==================== 单实例锁 ====================
 
-app.whenReady().then(() => {
-  // 注册 IPC
-  registerIPC();
-
-  // 创建主窗口
-  mainWindow = createMainWindow();
-
-  // macOS: 点击 Dock 图标时重新创建窗口
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      mainWindow = createMainWindow();
+/**
+ * 防止两个实例同时写数据。
+ * requestSingleInstanceLock 返回 false 时说明已有实例在运行，当前进程应立即退出。
+ */
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  // 已有实例运行，直接退出当前进程
+  app.quit();
+} else {
+  // 第二实例启动时，聚焦并恢复已有主窗口
+  app.on('second-instance', () => {
+    if (isQuitting) return;
+    if (mainWindow) {
+      // 窗口最小化时恢复
+      if (mainWindow.isMinimized()) {
+        mainWindow.restore();
+      }
+      if (!mainWindow.isVisible()) {
+        mainWindow.show();
+      }
+      mainWindow.focus();
     }
   });
-});
 
-// 所有窗口关闭时退出应用（macOS 除外）
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
+  // ==================== 全局异常兜底 ====================
 
-// 应用退出前清理
-app.on('before-quit', () => {
-  mainWindow = null;
-});
+  /**
+   * 未捕获的同步异常。
+   * 记录日志后退出，避免进程处于不确定状态。
+   * 不吞掉致命错误——记录后以非零码退出。
+   */
+  process.on('uncaughtException', (err: Error) => {
+    writeCrashLog('uncaughtException', err.message, err.stack);
+    // 给日志写入一点时间后退出
+    setImmediate(() => {
+      process.exit(1);
+    });
+  });
+
+  /**
+   * 未处理的 Promise 拒绝。
+   * 记录日志但不自动退出，因为某些拒绝可能是非致命的（如网络超时）。
+   * 开发者可通过日志定位并决定是否需要修复。
+   */
+  process.on('unhandledRejection', (reason: unknown) => {
+    const message = reason instanceof Error ? reason.message : String(reason);
+    const stack = reason instanceof Error ? reason.stack : undefined;
+    writeCrashLog('unhandledRejection', message, stack);
+  });
+
+  // ==================== 应用生命周期 ====================
+
+  app.whenReady().then(() => {
+    // 注册 IPC
+    registerIPC();
+
+    // 创建主窗口
+    mainWindow = createMainWindow();
+
+    // macOS: 点击 Dock 图标时重新创建窗口
+    // 退出过程中不创建新窗口
+    app.on('activate', () => {
+      if (isQuitting) return;
+      if (BrowserWindow.getAllWindows().length === 0) {
+        mainWindow = createMainWindow();
+      }
+    });
+  });
+
+  // 所有窗口关闭时退出应用（macOS 除外）
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') {
+      app.quit();
+    }
+  });
+
+  // 应用退出前清理：标记退出状态，防止退出过程中创建新窗口
+  app.on('before-quit', () => {
+    isQuitting = true;
+    mainWindow = null;
+  });
+}
