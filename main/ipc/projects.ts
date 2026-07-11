@@ -34,6 +34,7 @@ export function registerProjectIPC(): void {
   loadProjects();
   ipcMain.handle('projects:list', async () => loadProjects());
   ipcMain.handle('projects:add', async (_event, params: { name: string; description?: string; color?: string }) => {
+    if (!params.name?.trim()) return { success: false, error: '项目名称不能为空' };
     const projects = loadProjects();
     const now = new Date().toISOString();
     const project: Project = { id: uuidv4(), name: params.name.trim(), description: params.description?.trim() || '', color: params.color || '#6d5dfc', archived: false, createdAt: now, updatedAt: now };
@@ -54,6 +55,9 @@ export function registerProjectIPC(): void {
     const projects = loadProjects();
     const next = projects.filter((project) => project.id !== params.id);
     if (next.length === projects.length) return { success: false, error: '项目不存在' };
+    const tasks = readJSON<Array<{ projectId?: string }>>('tasks.json', []);
+    const taskCount = tasks.filter((task) => task.projectId === params.id).length;
+    if (taskCount > 0) return { success: false, error: `项目仍包含 ${taskCount} 个任务，请先迁移或删除任务` };
     writeJSON(STORE_FILE, next);
     return { success: true };
   });

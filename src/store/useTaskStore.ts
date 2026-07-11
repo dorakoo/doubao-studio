@@ -83,6 +83,7 @@ interface TaskState {
 }
 
 const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number }>();
+let queueProcessing = false;
 
 function artifactId(url: string): string {
   let hash = 5381;
@@ -186,13 +187,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         );
         set({ tasks });
 
-        // 不再强制切换账号页面
-        // 如果目标账号空闲，自动启动；否则排入队列等待
-        if (!get().accountBusy[accountId]) {
-          get().startAutomation(taskId);
-        } else {
-          console.log('[TaskStore] 账号', accountId, '忙碌中，任务', taskId, '排队等待');
-        }
+        // 指派后由统一队列调度器启动，避免在这里和定时调度同时抢占账号。
+        setTimeout(() => get().processQueue(), 0);
         return true;
       } else {
         set({ error: result.error || '指派失败' });
@@ -679,8 +675,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   // ---- 队列调度 ----
 
   processQueue: () => {
+    if (queueProcessing) return;
+    queueProcessing = true;
     const state = get();
-    if (state.schedulerPaused) return;
+    if (state.schedulerPaused) {
+      queueProcessing = false;
+      return;
+    }
     // 找出所有已指派但还在 queued 状态的任务
     const queuedTasks = state.tasks.filter(
       (t) => t.status === 'queued' && t.assignedAccountId
@@ -690,13 +691,36 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
     for (const task of queuedTasks) {
+      const dependencyIds = task.dependsOnTaskIds || [];
       const dependencies = (task.dependsOnTaskIds || [])
         .map((dependencyId) => state.tasks.find((item) => item.id === dependencyId))
         .filter((item): item is Task => !!item);
       const dependencyReady = task.dependencyPolicy === 'all_finished'
         ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
         : dependencies.every((item) => item.status === 'done');
-      if (dependencies.length !== (task.dependsOnTaskIds || []).length || !dependencyReady) continue;
+      const missingDependency = dependencies.length !== dependencyIds.length;
+      const failedRequiredDependency = task.dependencyPolicy !== 'all_finished' &&
+        dependencies.some((item) => ['fail', 'cancelled'].includes(item.status));
+      if (missingDependency || failedRequiredDependency) {
+        const message = missingDependency ? '任务依赖不存在，请检查工作流或 CSV' : '前置任务未成功，当前任务已停止';
+        const now = new Date().toISOString();
+        set((current) => ({
+          tasks: current.tasks.map((item) => item.id === task.id ? {
+            ...item,
+            status: 'fail' as TaskStatus,
+            result: message,
+            errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
+            updatedAt: now,
+          } : item),
+        }));
+        void window.electronAPI.tasks.updateRuntime(task.id, {
+          status: 'fail',
+          result: message,
+          errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
+        });
+        continue;
+      }
+      if (!dependencyReady) continue;
       const accountId = task.assignedAccountId!;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
       const unavailable = !account ||
@@ -708,22 +732,29 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       if (unavailable) {
         const candidates = useAccountStore.getState().accounts
           .filter((candidate) => candidate.id !== accountId)
-          .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating'].includes(item.status)).length, task.mode) }))
+            .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating', 'waiting_verification'].includes(item.status)).length, task.mode) }))
           .filter((item) => Number.isFinite(item.score))
           .sort((a, b) => a.score - b.score);
         if (candidates[0]) {
-          void state.assignTask(task.id, candidates[0].candidate.id);
-          break;
+          void state.assignTask(task.id, candidates[0].candidate.id).finally(() => {
+            queueProcessing = false;
+            get().processQueue();
+          });
+          return;
         }
         continue;
       }
       if (!state.accountBusy[accountId]) {
         console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
-        state.startAutomation(task.id);
+        void state.startAutomation(task.id).finally(() => {
+          queueProcessing = false;
+          get().processQueue();
+        });
         // 重新获取 state（startAutomation 已经 set 了）
-        break; // 每次只启动一个，启动后状态已变，等下次 processQueue
+        return; // 每次只启动一个，完成锁定后继续调度其他空闲账号
       }
     }
+    queueProcessing = false;
   },
 
   getNextTaskForAccount: (accountId: string) => {

@@ -428,7 +428,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   ) => {
     const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask } =
       useTaskStore.getState();
-    const controller = automationEngine.createController(taskId, accountId);
+    let controller: AbortController;
+    try {
+      controller = automationEngine.createController(taskId, accountId);
+    } catch (error: any) {
+      const messageText = error?.message || '任务控制器初始化失败';
+      await failAutomation(taskId, accountId, messageText, classifyTaskError(messageText));
+      await automationEngine.release(taskId);
+      return;
+    }
     abortControllersRef.current.set(taskId, controller);
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
     try {
@@ -587,10 +595,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       } catch {}
 
       let generating = true;
+      let imageUrls: string[] = [];
+      const generationWaitStartedAt = Date.now();
+      const generationWaitBudgetMs = mode === 'video' ? 60 * 60 * 1000 : 10 * 60 * 1000;
       let unknownCount = 0;
       const maxUnknown = 10; // 连续 10 次无法确定（约 30 秒）触发兜底
 
-      for (let i = 0; i < 200; i++) {
+      while (Date.now() - generationWaitStartedAt < generationWaitBudgetMs) {
         await pause(3000);
         try {
           const detail = await Promise.race([
@@ -621,28 +632,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           }
         }
         if (mode === 'video') {
+          imageUrls = await extractVideoOutputs(webview);
+          if (imageUrls.length > 0) {
+            generating = false;
+            break;
+          }
           const blocker = await detectVideoGenerationBlocker(webview);
           if (blocker) throw new Error(`豆包已停止生成：${blocker}`);
         }
         if (!generating) break;
-        setAccountAutomationState(accountId, 'generating', `等待回复... (${(i + 1) * 3}s)`, 'generating');
+        const elapsedSec = Math.round((Date.now() - generationWaitStartedAt) / 1000);
+        setAccountAutomationState(accountId, 'generating', `等待回复... (${elapsedSec}s)`, 'generating');
       }
       if (generating) throw new Error('生成超时');
 
       setAccountAutomationState(accountId, 'generating', '正在识别并绑定任务产物...', 'extracting_outputs');
 
       // 生成完成后获取产物
-      let imageUrls: string[] = [];
-
       if (mode === 'video') {
         // 视频生成耗时经常远超普通回复结束时间；以拿到视频地址为准。
-        const maxVideoWaitMs = 60 * 60 * 1000;
+        const maxVideoWaitMs = generationWaitBudgetMs;
         const pollIntervalMs = 10000;
-        const startWait = Date.now();
+        const startWait = generationWaitStartedAt;
         let pollCount = 0;
         let lastLogBucket = -1;
 
-        while (Date.now() - startWait < maxVideoWaitMs) {
+        while (imageUrls.length === 0 && Date.now() - startWait < maxVideoWaitMs) {
           pollCount++;
 
           imageUrls = await extractVideoOutputs(webview);
@@ -682,6 +697,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           if (imageUrls.length > 0) break;
           console.log(`[Automation:${accountId}] 产物尚未加载，等待 2s 后重试 (${retry + 1}/5)`);
           await pause(2000);
+        }
+        if (mode === 'image' && imageUrls.length === 0) {
+          throw new Error('图片生成已结束，但未识别到可用产物');
         }
       }
       console.log(`[Automation:${accountId}] 完成, 产物:`, imageUrls);

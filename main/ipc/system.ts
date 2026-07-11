@@ -6,6 +6,7 @@ import { getDataDir, readJSON, writeJSON } from '../utils/store';
 interface LogEntry { id: string; level: 'info' | 'warn' | 'error'; scope: string; message: string; taskId?: string; accountId?: string; createdAt: string; }
 
 const DATA_FILES = ['schema.json', 'projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json'];
+const ARRAY_DATA_FILES = new Set(['projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json', 'logs.json']);
 
 function compareVersions(left: string, right: string): number {
   const a = left.split('.').map((part) => Number(part) || 0);
@@ -35,8 +36,36 @@ export function registerSystemIPC(): void {
     }
     const tasks = readJSON<any[]>('tasks.json', []);
     const projects = readJSON<any[]>('projects.json', []);
+    const accounts = readJSON<any[]>('accounts.json', []);
     const projectIds = new Set(projects.map((item) => item.id));
-    for (const task of tasks) if (task.projectId && !projectIds.has(task.projectId)) issues.push(`任务 ${task.id} 引用了不存在的项目`);
+    const accountIds = new Set(accounts.map((item) => item.id));
+    const taskIds = new Set<string>();
+    for (const task of tasks) {
+      if (!task.id) issues.push('存在缺少 ID 的任务');
+      else if (taskIds.has(task.id)) issues.push(`任务 ID 重复：${task.id}`);
+      else taskIds.add(task.id);
+      if (task.projectId && !projectIds.has(task.projectId)) issues.push(`任务 ${task.id} 引用了不存在的项目`);
+      if (task.assignedAccountId && !accountIds.has(task.assignedAccountId)) issues.push(`任务 ${task.id} 引用了不存在的账号`);
+    }
+    for (const task of tasks) {
+      for (const dependencyId of task.dependsOnTaskIds || []) {
+        if (!taskIds.has(dependencyId)) issues.push(`任务 ${task.id} 引用了不存在的依赖任务 ${dependencyId}`);
+        if (dependencyId === task.id) issues.push(`任务 ${task.id} 不能依赖自身`);
+      }
+    }
+    const dependenciesByTask = new Map(tasks.map((task) => [task.id, task.dependsOnTaskIds || []]));
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const hasCycle = (taskId: string): boolean => {
+      if (visiting.has(taskId)) return true;
+      if (visited.has(taskId)) return false;
+      visiting.add(taskId);
+      const cyclic = (dependenciesByTask.get(taskId) || []).some((dependencyId: string) => hasCycle(dependencyId));
+      visiting.delete(taskId);
+      visited.add(taskId);
+      return cyclic;
+    };
+    if (tasks.some((task) => task.id && hasCycle(task.id))) issues.push('任务依赖关系中存在循环，相关工作流无法执行');
     return { success: issues.length === 0, issues, checkedAt: new Date().toISOString() };
   });
 
@@ -57,8 +86,36 @@ export function registerSystemIPC(): void {
     try {
       const backup = JSON.parse(fs.readFileSync(selected.filePaths[0], 'utf-8'));
       if (backup.format !== 'doubao-studio-backup' || !backup.data) return { success: false, error: '不是有效的豆包工作室备份' };
-      for (const file of [...DATA_FILES, 'logs.json']) if (backup.data[file] !== undefined) writeJSON(file, backup.data[file]);
-      if (backup.data['settings.json']) fs.writeFileSync(path.join(app.getPath('userData'), 'settings.json'), JSON.stringify(backup.data['settings.json'], null, 2), 'utf-8');
+      const filesToRestore = [...DATA_FILES, 'logs.json'].filter((file) => backup.data[file] !== undefined);
+      for (const file of filesToRestore) {
+        if (ARRAY_DATA_FILES.has(file) && !Array.isArray(backup.data[file])) {
+          return { success: false, error: `备份中的 ${file} 数据格式无效` };
+        }
+      }
+      const originals = new Map(filesToRestore.map((file) => [file, readJSON(file, undefined)]));
+      const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+      const originalSettings = fs.existsSync(settingsPath) ? fs.readFileSync(settingsPath, 'utf-8') : undefined;
+      try {
+        for (const file of filesToRestore) {
+          if (!writeJSON(file, backup.data[file])) throw new Error(`写入 ${file} 失败`);
+        }
+        if (backup.data['settings.json'] !== undefined) {
+          const temporaryPath = `${settingsPath}.restore.tmp`;
+          fs.writeFileSync(temporaryPath, JSON.stringify(backup.data['settings.json'], null, 2), 'utf-8');
+          fs.renameSync(temporaryPath, settingsPath);
+        }
+      } catch (restoreError) {
+        for (const [file, data] of originals) {
+          if (data !== undefined) writeJSON(file, data);
+          else {
+            const restoredPath = path.join(getDataDir(), file);
+            if (fs.existsSync(restoredPath)) fs.unlinkSync(restoredPath);
+          }
+        }
+        if (originalSettings !== undefined) fs.writeFileSync(settingsPath, originalSettings, 'utf-8');
+        else if (fs.existsSync(settingsPath)) fs.unlinkSync(settingsPath);
+        throw restoreError;
+      }
       return { success: true, requiresRestart: true };
     } catch (error: any) { return { success: false, error: error.message }; }
   });
@@ -67,7 +124,13 @@ export function registerSystemIPC(): void {
     const projects = readJSON<any[]>('projects.json', []);
     const project = projects.find((item) => item.id === projectId);
     if (!project) return { success: false, error: '项目不存在' };
-    const tasks = readJSON<any[]>('tasks.json', []).filter((task) => task.projectId === projectId).map((task) => ({ ...task, outputs: [], artifacts: (task.artifacts || []).map((artifact: any) => ({ ...artifact, url: '[未导出远程地址]' })) }));
+    const tasks = readJSON<any[]>('tasks.json', []).filter((task) => task.projectId === projectId).map((task) => ({
+      ...task,
+      result: task.result ? '[未导出任务结果]' : task.result,
+      outputs: [],
+      runtime: task.runtime ? { ...task.runtime, conversationUrl: undefined } : undefined,
+      artifacts: (task.artifacts || []).map((artifact: any) => ({ ...artifact, url: '[未导出远程地址]', conversationUrl: undefined })),
+    }));
     const selected = await dialog.showSaveDialog({ title: '导出项目包', defaultPath: `${project.name}.doubao-project.json`, filters: [{ name: '豆包项目包', extensions: ['json'] }] });
     if (selected.canceled || !selected.filePath) return { success: false };
     fs.writeFileSync(selected.filePath, JSON.stringify({ format: 'doubao-studio-project', version: 1, project, tasks, exportedAt: new Date().toISOString() }, null, 2), 'utf-8');

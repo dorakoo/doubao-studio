@@ -48,7 +48,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
     for (const task of tasks) {
       if ((task.projectId || 'default-project') !== activeProjectId) continue;
       for (const artifact of task.artifacts || []) {
-        const localJob = [...downloads].reverse().find((job) => job.url === artifact.url && job.status === 'done');
+        const localJob = [...downloads].reverse().find((job) => job.taskId === task.id && job.url === artifact.url && job.status === 'done');
         result.push({ key: `${task.id}:${artifact.id}`, task, artifact, localJob });
       }
     }

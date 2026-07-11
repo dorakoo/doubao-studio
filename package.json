@@ -18,8 +18,8 @@
     "dist:win": "pnpm run build && electron-builder --win",
     "lint": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json",
     "ts-check": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json",
-    "lint:build": "eslint . --quiet",
-    "validate": "pnpm run --parallel '/^(ts-check|lint:build)$/'"
+    "check:project": "node scripts/check-project.mjs",
+    "validate": "pnpm run ts-check && pnpm run check:project && pnpm run build"
   },
   "dependencies": {
     "antd": "^5.22.0",

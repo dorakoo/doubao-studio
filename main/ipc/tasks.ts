@@ -250,6 +250,12 @@ function saveTasks(tasks: Task[]): boolean {
   return writeJSON(STORE_FILE, tasks);
 }
 
+function saveTasksOrError(tasks: Task[]): { success: true } | { success: false; error: string } {
+  return saveTasks(tasks)
+    ? { success: true }
+    : { success: false, error: '任务数据写入失败，请检查磁盘空间和数据目录权限' };
+}
+
 function loadDownloadJobs(): DownloadJob[] {
   const jobs = readJSON<DownloadJob[]>(DOWNLOAD_STORE_FILE, []);
   if (!downloadRecoveryApplied) {
@@ -269,6 +275,15 @@ function loadDownloadJobs(): DownloadJob[] {
 
 function saveDownloadJobs(jobs: DownloadJob[]): boolean {
   return writeJSON(DOWNLOAD_STORE_FILE, jobs.slice(-1000));
+}
+
+function getAvailableDownloadPath(fs: typeof import('fs'), path: typeof import('path'), saveDir: string, fileName: string): string {
+  const parsed = path.parse(fileName);
+  let candidate = path.join(saveDir, fileName);
+  for (let suffix = 2; fs.existsSync(candidate); suffix++) {
+    candidate = path.join(saveDir, `${parsed.name}-${suffix}${parsed.ext}`);
+  }
+  return candidate;
 }
 
 function resetTaskForQueue(task: Task): void {
@@ -338,6 +353,8 @@ function recoverInterruptedTasks(): void {
 
 export function registerTaskIPC(): void {
   recoverInterruptedTasks();
+  // 在任何新下载开始前，仅恢复上次进程遗留的下载状态。
+  loadDownloadJobs();
   writeJSON('schema.json', { version: 6, appVersion: '2.0.0', updatedAt: new Date().toISOString() });
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
@@ -387,7 +404,8 @@ export function registerTaskIPC(): void {
           }));
 
         tasks.push(...newTasks);
-        saveTasks(tasks);
+        const saved = saveTasksOrError(tasks);
+        if (!saved.success) return saved;
 
         return { success: true, tasks: newTasks };
       } catch (err: any) {
@@ -411,7 +429,8 @@ export function registerTaskIPC(): void {
 
       task.assignedAccountId = params.accountId;
       resetTaskForQueue(task);
-      saveTasks(tasks);
+      const saved = saveTasksOrError(tasks);
+      if (!saved.success) return saved;
 
       return { success: true };
     }
@@ -475,7 +494,8 @@ export function registerTaskIPC(): void {
       task.attachments = params.updates.attachments?.length ? params.updates.attachments : undefined;
       task.audioAttachment = params.updates.audioAttachment || undefined;
       resetTaskForQueue(task);
-      saveTasks(tasks);
+      const saved = saveTasksOrError(tasks);
+      if (!saved.success) return saved;
 
       return { success: true, task };
     }
@@ -490,9 +510,18 @@ export function registerTaskIPC(): void {
       if (idx === -1) {
         return { success: false, error: '任务不存在' };
       }
+      const task = tasks[idx];
+      if (['executing', 'generating', 'waiting_verification'].includes(task.status)) {
+        return { success: false, error: '任务正在执行，请先暂停后再删除' };
+      }
+      const dependentCount = tasks.filter((item) => item.dependsOnTaskIds?.includes(task.id)).length;
+      if (dependentCount > 0) {
+        return { success: false, error: `仍有 ${dependentCount} 个任务依赖此任务，请先调整依赖关系` };
+      }
 
       tasks.splice(idx, 1);
-      saveTasks(tasks);
+      const saved = saveTasksOrError(tasks);
+      if (!saved.success) return saved;
       return { success: true };
     }
   );
@@ -511,7 +540,8 @@ export function registerTaskIPC(): void {
       }
 
       resetTaskForQueue(task);
-      saveTasks(tasks);
+      const saved = saveTasksOrError(tasks);
+      if (!saved.success) return saved;
 
       return { success: true, task };
     }
@@ -844,6 +874,14 @@ export function registerTaskIPC(): void {
             : session.defaultSession;
           for (let outputIndex = 0; outputIndex < task.outputs.length; outputIndex++) {
             const url = task.outputs[outputIndex];
+            let parsedUrl: URL;
+            try {
+              parsedUrl = new URL(url);
+              if (!['http:', 'https:'].includes(parsedUrl.protocol)) throw new Error('不支持的地址协议');
+            } catch {
+              failures.push(`${task.taskId.slice(0, 8)}: 产物地址无效`);
+              continue;
+            }
             const now = new Date().toISOString();
             const job: DownloadJob = {
               id: uuidv4(),
@@ -890,7 +928,7 @@ export function registerTaskIPC(): void {
                 continue;
               }
               const contentType = response.headers.get('content-type') || '';
-              let ext = path.extname(new URL(url).pathname).toLowerCase();
+              let ext = path.extname(parsedUrl.pathname).toLowerCase();
               if (!ext || ext.length > 6) {
                 if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
                 else if (contentType.includes('webp')) ext = '.webp';
@@ -898,8 +936,10 @@ export function registerTaskIPC(): void {
                 else ext = '.png';
               }
               const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
-              const filePath = path.join(saveDir, fileName);
-              fs.writeFileSync(filePath, buffer);
+              const filePath = getAvailableDownloadPath(fs, path, saveDir, fileName);
+              const temporaryPath = `${filePath}.${job.id}.part`;
+              fs.writeFileSync(temporaryPath, buffer);
+              fs.renameSync(temporaryPath, filePath);
               job.status = 'done';
               job.filePath = filePath;
               job.bytes = buffer.length;
@@ -907,6 +947,11 @@ export function registerTaskIPC(): void {
               saveDownloadJobs(jobs);
               downloadedCount++;
             } catch (e: any) {
+              try {
+                for (const entry of fs.readdirSync(saveDir)) {
+                  if (entry.endsWith(`.${job.id}.part`)) fs.unlinkSync(path.join(saveDir, entry));
+                }
+              } catch {}
               const failure = e.name === 'AbortError' ? '下载超时' : e.message;
               failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
               job.status = 'failed';
