@@ -803,9 +803,6 @@ export function registerTaskIPC(): void {
     }
   );
 
-  console.log('[IPC] 任务调度模块已注册');
-}
-
   // ---- 读取文件为 base64（用于缩略图显示） ----
   ipcMain.handle(
     'tasks:readFileAsBase64',
@@ -1163,3 +1160,6 @@ export function registerTaskIPC(): void {
       }
     }
   );
+
+  console.log('[IPC] 任务调度模块已注册');
+}
