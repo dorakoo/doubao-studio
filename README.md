@@ -149,7 +149,7 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 ## 环境要求
 
 - Windows 10/11 x64
-- Node.js 20 或更高版本
+- Node.js 24（使用 pnpm 11 时推荐）
 - pnpm 9 或更高版本
 - 可正常访问豆包网页的网络环境
 - 每个账号需在独立网页工作区中自行完成登录
