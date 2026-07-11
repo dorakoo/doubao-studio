@@ -206,45 +206,7 @@ function appendArtifacts(task: Task, outputs: string[], source: TaskArtifact['so
   task.artifacts = [...existing.values()];
 }
 
-function parseCsv(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let quoted = false;
-  for (let index = 0; index < text.length; index++) {
-    const char = text[index];
-    if (char === '"') {
-      if (quoted && text[index + 1] === '"') {
-        field += '"';
-        index++;
-      } else {
-        quoted = !quoted;
-      }
-    } else if (char === ',' && !quoted) {
-      row.push(field.trim());
-      field = '';
-    } else if ((char === '\n' || char === '\r') && !quoted) {
-      if (char === '\r' && text[index + 1] === '\n') index++;
-      row.push(field.trim());
-      field = '';
-      if (row.some(Boolean)) rows.push(row);
-      row = [];
-    } else {
-      field += char;
-    }
-  }
-  row.push(field.trim());
-  if (row.some(Boolean)) rows.push(row);
-  return rows;
-}
-
-function normalizeCsvMode(value: string): GenerationMode {
-  const normalized = value.trim().toLowerCase();
-  if (['image', '图片'].includes(normalized)) return 'image';
-  if (['video', '视频'].includes(normalized)) return 'video';
-  if (['music', '音乐'].includes(normalized)) return 'music';
-  return 'chat';
-}
+import { parseCsv, normalizeCsvMode } from '../utils/csv';
 
 function saveTasks(tasks: Task[]): boolean {
   return writeJSON(STORE_FILE, tasks);

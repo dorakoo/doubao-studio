@@ -20,7 +20,9 @@ import type {
   TaskStage,
   TaskArtifact,
 } from '../types';
-import { getAccountSchedulingScore, useAccountStore } from './useAccountStore';
+import { getAccountSchedulingScore } from '../utils/schedulingScore';
+import { evaluateDependencies, type DependencyEvaluation } from '../utils/dependencyEval';
+import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
 
@@ -109,27 +111,7 @@ function mergeArtifacts(task: Task, outputs: string[], source: TaskArtifact['sou
   return [...artifacts.values()];
 }
 
-type DependencyEvaluation = {
-  state: 'ready' | 'waiting' | 'missing' | 'failed';
-  message?: string;
-};
-
-function evaluateDependencies(task: Task, tasks: Task[]): DependencyEvaluation {
-  const dependencyIds = task.dependsOnTaskIds || [];
-  const dependencies = dependencyIds
-    .map((dependencyId) => tasks.find((item) => item.id === dependencyId))
-    .filter((item): item is Task => !!item);
-  if (dependencies.length !== dependencyIds.length) {
-    return { state: 'missing', message: '任务依赖不存在，请检查工作流或 CSV' };
-  }
-  if (task.dependencyPolicy !== 'all_finished' && dependencies.some((item) => ['fail', 'cancelled'].includes(item.status))) {
-    return { state: 'failed', message: '前置任务未成功，当前任务已停止' };
-  }
-  const ready = task.dependencyPolicy === 'all_finished'
-    ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
-    : dependencies.every((item) => item.status === 'done');
-  return ready ? { state: 'ready' } : { state: 'waiting', message: '前置任务尚未满足执行条件' };
-}
+// evaluateDependencies 和 DependencyEvaluation 已抽取到 src/utils/dependencyEval.ts
 
 function getAccountBlockReason(account: Account | undefined, task: Task): string | null {
   if (!account) return '指派账号不存在';

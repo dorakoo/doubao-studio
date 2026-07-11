@@ -8,14 +8,7 @@ interface LogEntry { id: string; level: 'info' | 'warn' | 'error'; scope: string
 const DATA_FILES = ['schema.json', 'projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json'];
 const ARRAY_DATA_FILES = new Set(['projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json', 'logs.json']);
 
-function compareVersions(left: string, right: string): number {
-  const a = left.split('.').map((part) => Number(part) || 0);
-  const b = right.split('.').map((part) => Number(part) || 0);
-  for (let index = 0; index < Math.max(a.length, b.length); index++) {
-    if ((a[index] || 0) !== (b[index] || 0)) return (a[index] || 0) - (b[index] || 0);
-  }
-  return 0;
-}
+import { compareVersions } from '../utils/version';
 
 export function registerSystemIPC(): void {
   ipcMain.handle('logs:list', async () => readJSON<LogEntry[]>('logs.json', []));

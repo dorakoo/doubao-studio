@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand';
-import type { Account, AccountStatus, GenerationMode, TaskErrorCode } from '../types';
+import type { Account, AccountStatus, TaskErrorCode } from '../types';
 
 // ==================== 类型 ====================
 
@@ -212,21 +212,5 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   clearError: () => set({ error: null }),
 }));
 
-export function getAccountSchedulingScore(account: Account, load: number, mode: GenerationMode): number {
-  const health = account.health;
-  if (account.status === 'error' || health?.loginState === 'expired') return Number.POSITIVE_INFINITY;
-  if (health?.cooldownUntil && new Date(health.cooldownUntil).getTime() > Date.now()) return Number.POSITIVE_INFINITY;
-  if (health?.verificationRequired) return Number.POSITIVE_INFINITY;
-  if (mode === 'video' && account.seedanceQuota?.exhausted) return Number.POSITIVE_INFINITY;
-  if (account.scheduling?.enabled === false) return Number.POSITIVE_INFINITY;
-  if (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) return Number.POSITIVE_INFINITY;
-
-  const quotaRemaining = account.seedanceQuota
-    ? Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)
-    : 0;
-  const failurePenalty = (health?.consecutiveFailures || 0) * 4;
-  const quotaBonus = mode === 'video' ? Math.min(quotaRemaining, 10) * 0.25 : 0;
-  const preferenceBonus = account.scheduling?.preferredModes.includes(mode) ? 2 : 0;
-  const weight = account.scheduling?.weight || 1;
-  return (load * 10 + failurePenalty - quotaBonus - preferenceBonus - (account.pinned ? 0.5 : 0)) / weight;
-}
+// getAccountSchedulingScore 已抽取到 src/utils/schedulingScore.ts
+export { getAccountSchedulingScore } from '../utils/schedulingScore';
