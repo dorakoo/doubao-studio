@@ -102,7 +102,7 @@ function isTopLevel(node) {
  * 支持普通字符串和模板字面量（无插值时）。
  * @returns {string|null} 通道名，无法确定时返回 null
  */
-function extractStringLiteral(arg, sourceFile) {
+function extractStringLiteral(arg) {
   if (!arg) return null;
   if (ts.isStringLiteral(arg)) {
     return arg.text;
@@ -164,7 +164,7 @@ export function scanMainFiles(rootDir) {
           objectExpr.text === 'ipcMain' &&
           (methodName === 'handle' || methodName === 'on')
         ) {
-          const channel = extractStringLiteral(node.arguments[0], sourceFile) ?? '<dynamic>';
+          const channel = extractStringLiteral(node.arguments[0]) ?? '<dynamic>';
           const callInfo = {
             file: relativeFile,
             line: getLine(node, sourceFile),
@@ -256,7 +256,7 @@ export function scanPreloadFile(rootDir) {
         objectExpr.text === 'ipcRenderer' &&
         (methodName === 'invoke' || methodName === 'send')
       ) {
-        const channel = extractStringLiteral(node.arguments[0], sourceFile) ?? '<dynamic>';
+        const channel = extractStringLiteral(node.arguments[0]) ?? '<dynamic>';
         const callInfo = {
           file: relativeFile,
           line: getLine(node, sourceFile),

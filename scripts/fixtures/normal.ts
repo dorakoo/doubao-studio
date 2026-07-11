@@ -5,7 +5,7 @@
  * 预期：扫描后 2 个 handle、1 个 on、2 个 invoke、1 个 send，无错误。
  */
 
-import { ipcMain, app } from 'electron';
+import { ipcMain } from 'electron';
 
 export function registerNormalIPC(): void {
   ipcMain.handle('fixture:normal:hello', async () => {
