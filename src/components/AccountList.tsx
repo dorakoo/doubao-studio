@@ -40,6 +40,7 @@ export const AccountList: React.FC = () => {
     refreshAccount,
     selectAccount,
     togglePinned,
+    updateScheduling,
     clearError,
   } = useAccountStore();
 
@@ -81,6 +82,12 @@ export const AccountList: React.FC = () => {
       }
       if (account?.health?.loginState === 'expired') {
         return { label: '登录已失效', color: '#fb7185', animated: false, detail: '请重新登录' };
+      }
+      if (account?.scheduling?.enabled === false) {
+        return { label: '已停用', color: '#94a3b8', animated: false, detail: '不参与自动调度' };
+      }
+      if (account?.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) {
+        return { label: '手动冷却', color: '#94a3b8', animated: false, detail: `至 ${new Date(account.scheduling.manualCooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}` };
       }
       if (account?.health?.verificationRequired) {
         return { label: '需要验证', color: '#fb923c', animated: false, detail: '完成验证后恢复' };
@@ -211,6 +218,16 @@ export const AccountList: React.FC = () => {
         onClick: () => handleTogglePinned(account),
       },
       {
+        key: 'scheduling-toggle',
+        label: account.scheduling?.enabled === false ? '恢复自动调度' : '暂停自动调度',
+        onClick: () => updateScheduling(account.id, { enabled: account.scheduling?.enabled === false }),
+      },
+      {
+        key: 'cooldown',
+        label: '冷却 30 分钟',
+        onClick: () => updateScheduling(account.id, { manualCooldownUntil: new Date(Date.now() + 30 * 60 * 1000).toISOString() }),
+      },
+      {
         key: 'edit',
         label: '编辑',
         icon: <EditOutlined />,
@@ -235,7 +252,7 @@ export const AccountList: React.FC = () => {
         onClick: () => handleDeleteAccount(account),
       },
     ],
-    [handleDeleteAccount, handleRefreshAccount, handleTogglePinned]
+    [handleDeleteAccount, handleRefreshAccount, handleTogglePinned, updateScheduling]
   );
 
   return (

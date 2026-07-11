@@ -42,6 +42,12 @@ export interface Account {
     lastErrorCode?: string;
     cooldownUntil?: string;
   };
+  scheduling?: {
+    enabled: boolean;
+    weight: number;
+    preferredModes: GenerationMode[];
+    manualCooldownUntil?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -56,6 +62,8 @@ function localDateKey(): string {
   const offset = now.getTimezoneOffset() * 60000;
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
+
+type GenerationMode = 'chat' | 'image' | 'video' | 'music';
 
 function normalizeQuota(account: Account): void {
   const today = localDateKey();
@@ -85,6 +93,18 @@ function normalizeHealth(account: Account): void {
   if (account.health.cooldownUntil && new Date(account.health.cooldownUntil).getTime() <= Date.now()) {
     account.health.cooldownUntil = undefined;
     account.health.verificationRequired = false;
+  }
+}
+
+function normalizeScheduling(account: Account): void {
+  account.scheduling = {
+    enabled: account.scheduling?.enabled ?? true,
+    weight: Math.max(0.1, Math.min(10, account.scheduling?.weight || 1)),
+    preferredModes: account.scheduling?.preferredModes || [],
+    manualCooldownUntil: account.scheduling?.manualCooldownUntil,
+  };
+  if (account.scheduling.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() <= Date.now()) {
+    account.scheduling.manualCooldownUntil = undefined;
   }
 }
 
@@ -142,6 +162,7 @@ export function registerAccountIPC(): void {
     const accounts = loadAccounts();
     accounts.forEach(normalizeQuota);
     accounts.forEach(normalizeHealth);
+    accounts.forEach(normalizeScheduling);
     saveAccounts(accounts);
     return accounts;
   });
@@ -179,6 +200,7 @@ export function registerAccountIPC(): void {
             successCount: 0,
             failureCount: 0,
           },
+          scheduling: { enabled: true, weight: 1, preferredModes: [] },
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
@@ -284,6 +306,18 @@ export function registerAccountIPC(): void {
       return { success: true };
     }
   );
+
+  ipcMain.handle('accounts:updateScheduling', async (_event, params: { id: string; updates: Partial<Account['scheduling']> }) => {
+    const accounts = loadAccounts();
+    const account = accounts.find((item) => item.id === params.id);
+    if (!account) return { success: false };
+    normalizeScheduling(account);
+    account.scheduling = { ...account.scheduling!, ...params.updates };
+    normalizeScheduling(account);
+    account.updatedAt = new Date().toISOString();
+    saveAccounts(accounts);
+    return { success: true, account };
+  });
 
   ipcMain.handle(
     'accounts:updateHealth',

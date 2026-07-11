@@ -1,6 +1,6 @@
 # 豆包工作室 Doubao Studio
 
-[![Version](https://img.shields.io/badge/version-1.5.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
+[![Version](https://img.shields.io/badge/version-2.0.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-149eca?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript)](https://www.typescriptlang.org/)
@@ -10,9 +10,19 @@
 
 项目重点不是替代豆包网页，而是在保留原始网页操作能力的同时，为重复生产工作增加任务队列、多账号隔离、状态记录和产物管理。
 
+从 v2.0 开始，工作台以“项目”为一级组织单位。每个项目拥有独立的任务、CSV 批次、运行历史和产物视图，适合同时管理多个内容主题或客户交付。
+
 > 本项目是社区开发的非官方工具，与字节跳动或豆包官方无隶属关系。使用时请遵守豆包服务条款、内容规范和所在地法律法规。
 
 ## 核心能力
+
+### 项目化工作空间
+
+- 顶部项目切换器用于创建和切换项目。
+- 旧版本任务自动迁移到“默认项目”。
+- 任务列表、CSV 批次和产物中心按当前项目隔离。
+- 项目概览显示完成率、任务数、批次数和历史产物。
+- 支持导出不含网页登录信息和远程产物地址的项目包。
 
 ### 多账号工作区
 
@@ -20,6 +30,8 @@
 - 支持账号置顶、搜索、刷新、运行状态和健康状态展示。
 - 根据任务负载、连续失败、冷却状态和 Seedance 预测额度智能分配账号。
 - 检测额度耗尽、人工验证和登录异常后自动降低账号调度优先级。
+- 支持暂停账号调度和手动冷却 30 分钟。
+- 不可用账号上的排队任务可迁移到其他健康账号。
 
 ### 多模式任务生产
 
@@ -119,6 +131,14 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 
 适配规则示例见 [`examples/adapter-rules.json`](examples/adapter-rules.json)。
 
+### 日志、备份与发布
+
+- 运行日志按信息、警告和错误分级，支持任务和错误关键词搜索。
+- 完整备份包含项目、账号配置、任务、下载、诊断、日志和应用设置，不包含 Cookie。
+- 支持备份恢复与 JSON 数据完整性检查。
+- 应用内可查询 GitHub 最新 Release。
+- GitHub Actions 自动执行类型检查、构建和 Windows 标签发布。
+
 ## 界面结构
 
 - **顶部工具栏**：全部暂停/继续、批量下载、下载记录、运行统计、诊断导出和设置。
@@ -157,6 +177,7 @@ pnpm run dev
 8. 完成后预览或提取产物，通过顶部下载按钮批量保存。
 9. 大批量任务可点击任务区的 CSV 按钮，导入模板格式的任务文件。
 10. 豆包页面更新后，从“更多”运行兼容性自检并查看具体异常控件。
+11. 从顶部“更多”进入项目概览、运行日志、完整备份和更新检查。
 
 ## 常用命令
 
@@ -202,6 +223,8 @@ pnpm run dev
 
 ```text
 main/                       Electron 主进程、IPC 与本地数据
+main/ipc/projects.ts         项目管理与默认项目迁移
+main/ipc/system.ts           日志、备份、完整性与更新检查
 src/components/             账号、任务、浏览器、下载和设置界面
 src/automation/             执行协调器、任务锁客户端和页面适配规则
 src/store/                  Zustand 账号与任务调度状态
@@ -221,11 +244,12 @@ scripts/dev.mjs             动态端口开发启动器
 ## 路线图
 
 - Excel 批量任务导入与可视化字段映射
-- 将网页执行生命周期进一步迁移到持久化后台服务
+- 项目包导入与跨设备同步
+- 将 Webview 执行生命周期进一步迁移到主进程服务
 - 图片生成到视频生成的自动素材传递
 - 敏感数据本地加密
 - 远程适配规则签名与自动更新
-- 应用自动更新与失败回滚
+- 安装包签名、差分更新与失败回滚
 
 完整版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 

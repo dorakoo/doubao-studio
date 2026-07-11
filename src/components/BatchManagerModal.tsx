@@ -4,6 +4,7 @@ import { ReloadOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { Task } from '../types';
 import { useTaskStore } from '../store/useTaskStore';
+import { useProjectStore } from '../store/useProjectStore';
 
 interface BatchManagerModalProps {
   open: boolean;
@@ -24,9 +25,11 @@ interface BatchRow {
 export const BatchManagerModal: React.FC<BatchManagerModalProps> = ({ open, onClose }) => {
   const tasks = useTaskStore((state) => state.tasks);
   const retryTask = useTaskStore((state) => state.retryTask);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const rows = useMemo(() => {
     const groups = new Map<string, Task[]>();
     for (const task of tasks) {
+      if ((task.projectId || 'default-project') !== activeProjectId) continue;
       if (!task.batchId) continue;
       groups.set(task.batchId, [...(groups.get(task.batchId) || []), task]);
     }
@@ -37,7 +40,7 @@ export const BatchManagerModal: React.FC<BatchManagerModalProps> = ({ open, onCl
       running: batchTasks.filter((task) => ['executing', 'generating', 'waiting_verification'].includes(task.status)).length,
       queued: batchTasks.filter((task) => task.status === 'queued').length,
     })).sort((a, b) => b.batchId.localeCompare(a.batchId));
-  }, [tasks]);
+  }, [activeProjectId, tasks]);
 
   const retryFailed = async (row: BatchRow) => {
     const failedTasks = row.tasks.filter((task) => task.status === 'fail');

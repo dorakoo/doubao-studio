@@ -3,7 +3,7 @@
  * Electron API 全局类型声明
  */
 
-import type { Account, CsvImportResult, DownloadJob, Task, TaskErrorInfo, TaskRunSnapshot, TaskStatus } from './index';
+import type { Account, CsvImportResult, DownloadJob, Project, Task, TaskErrorInfo, TaskRunSnapshot, TaskStatus } from './index';
 
 // 扩展 HTMLElement 以支持 webview 标签
 declare global {
@@ -57,6 +57,12 @@ declare global {
 }
 
 export interface ElectronAPI {
+  projects: {
+    list: () => Promise<Project[]>;
+    add: (name: string, description?: string, color?: string) => Promise<{ success: boolean; project?: Project; error?: string }>;
+    update: (id: string, updates: Partial<Pick<Project, 'name' | 'description' | 'color' | 'archived'>>) => Promise<{ success: boolean; project?: Project; error?: string }>;
+    delete: (id: string) => Promise<{ success: boolean; error?: string }>;
+  };
   accounts: {
     list: () => Promise<Account[]>;
     add: (name: string) => Promise<{ success: boolean; account?: Account; error?: string }>;
@@ -71,11 +77,12 @@ export interface ElectronAPI {
       action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear',
       errorCode?: string
     ) => Promise<{ success: boolean; account?: Account }>;
+    updateScheduling: (id: string, updates: Partial<NonNullable<Account['scheduling']>>) => Promise<{ success: boolean; account?: Account }>;
     getPartition: (id: string) => Promise<string | null>;
   };
   tasks: {
     list: () => Promise<Task[]>;
-    add: (prompts: string[], mode?: string, videoConfig?: any, attachments?: string[], audioAttachment?: string) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
+    add: (prompts: string[], mode?: string, videoConfig?: any, attachments?: string[], audioAttachment?: string, projectId?: string) => Promise<{ success: boolean; tasks?: Task[]; error?: string }>;
     assign: (taskId: string, accountId: string) => Promise<{ success: boolean; error?: string }>;
     updateStatus: (
       taskId: string,
@@ -91,7 +98,7 @@ export interface ElectronAPI {
     }) => Promise<{ success: boolean; task?: Task; error?: string }>;
     acquireLock: (taskId: string, ownerId: string) => Promise<{ success: boolean; task?: Task; error?: string }>;
     releaseLock: (taskId: string, ownerId?: string) => Promise<{ success: boolean }>;
-    importCsv: () => Promise<CsvImportResult>;
+    importCsv: (projectId?: string) => Promise<CsvImportResult>;
     update: (taskId: string, updates: {
       prompt: string;
       videoConfig?: Task['videoConfig'];
@@ -120,8 +127,18 @@ export interface ElectronAPI {
     get: () => Promise<Record<string, any>>;
     save: (settings: Record<string, any>) => Promise<{ success: boolean; error?: string }>;
   };
+  logs: {
+    list: () => Promise<Array<{ id: string; level: 'info' | 'warn' | 'error'; scope: string; message: string; taskId?: string; accountId?: string; createdAt: string }>>;
+    append: (entry: { level: 'info' | 'warn' | 'error'; scope: string; message: string; taskId?: string; accountId?: string }) => Promise<{ success: boolean }>;
+    clear: () => Promise<{ success: boolean }>;
+  };
   system: {
     getVersion: () => Promise<string>;
+    checkIntegrity: () => Promise<{ success: boolean; issues: string[]; checkedAt: string }>;
+    exportBackup: () => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    restoreBackup: () => Promise<{ success: boolean; requiresRestart?: boolean; error?: string }>;
+    exportProject: (projectId: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    checkUpdate: () => Promise<{ success: boolean; currentVersion?: string; latestVersion?: string; hasUpdate?: boolean; url?: string; name?: string; error?: string }>;
     minimize: () => void;
     toggleMaximize: () => void;
     close: () => void;

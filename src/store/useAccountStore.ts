@@ -40,6 +40,7 @@ interface AccountState {
   recordSeedanceUsage: (id: string, units: number) => Promise<void>;
   markSeedanceExhausted: (id: string) => Promise<void>;
   recordAccountOutcome: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: TaskErrorCode) => Promise<void>;
+  updateScheduling: (id: string, updates: Partial<NonNullable<Account['scheduling']>>) => Promise<void>;
   /** 清除错误 */
   clearError: () => void;
 }
@@ -194,6 +195,11 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     }
   },
 
+  updateScheduling: async (id, updates) => {
+    const result = await window.electronAPI.accounts.updateScheduling(id, updates);
+    if (result.success && result.account) set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
+  },
+
   // 清除错误
   clearError: () => set({ error: null }),
 }));
@@ -204,11 +210,15 @@ export function getAccountSchedulingScore(account: Account, load: number, mode: 
   if (health?.cooldownUntil && new Date(health.cooldownUntil).getTime() > Date.now()) return Number.POSITIVE_INFINITY;
   if (health?.verificationRequired) return Number.POSITIVE_INFINITY;
   if (mode === 'video' && account.seedanceQuota?.exhausted) return Number.POSITIVE_INFINITY;
+  if (account.scheduling?.enabled === false) return Number.POSITIVE_INFINITY;
+  if (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) return Number.POSITIVE_INFINITY;
 
   const quotaRemaining = account.seedanceQuota
     ? Math.max(0, account.seedanceQuota.estimatedTotalUnits - account.seedanceQuota.usedUnits)
     : 0;
   const failurePenalty = (health?.consecutiveFailures || 0) * 4;
   const quotaBonus = mode === 'video' ? Math.min(quotaRemaining, 10) * 0.25 : 0;
-  return load * 10 + failurePenalty - quotaBonus - (account.pinned ? 0.5 : 0);
+  const preferenceBonus = account.scheduling?.preferredModes.includes(mode) ? 2 : 0;
+  const weight = account.scheduling?.weight || 1;
+  return (load * 10 + failurePenalty - quotaBonus - preferenceBonus - (account.pinned ? 0.5 : 0)) / weight;
 }

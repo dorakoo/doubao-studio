@@ -13,6 +13,8 @@ import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import * as path from 'path';
 import { registerAccountIPC } from './ipc/accounts';
 import { registerTaskIPC } from './ipc/tasks';
+import { registerProjectIPC } from './ipc/projects';
+import { registerSystemIPC } from './ipc/system';
 
 // ==================== 常量 ====================
 
@@ -81,7 +83,9 @@ function createMainWindow(): BrowserWindow {
 function registerIPC(): void {
   // 注册业务模块 IPC
   registerAccountIPC();
+  registerProjectIPC();
   registerTaskIPC();
+  registerSystemIPC();
 
   // ---- 系统级 IPC ----
 

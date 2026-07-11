@@ -9,7 +9,7 @@ import * as path from 'path';
 import { app } from 'electron';
 
 /** 获取用户数据目录路径 */
-function getDataDir(): string {
+export function getDataDir(): string {
   const userDataPath = app.getPath('userData');
   const dataDir = path.join(userDataPath, 'DoubaoStudioData');
   // 确保目录存在

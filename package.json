@@ -1,6 +1,6 @@
 {
   "name": "doubao-studio-desktop",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "豆包工作室 - AI 内容创作者多账号管理与自动化生产工作台",
   "main": "dist/main/main.js",
   "author": "Doubao Studio Team",
@@ -54,12 +54,6 @@
       "dist/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "data",
-        "to": "data"
-      }
-    ],
     "win": {
       "target": [
         {
@@ -68,8 +62,7 @@
             "x64"
           ]
         }
-      ],
-      "icon": "public/icon.png"
+      ]
     },
     "nsis": {
       "oneClick": false,

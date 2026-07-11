@@ -34,6 +34,9 @@ import { useAccountStore } from '../store/useAccountStore';
 import { ArtifactCenterModal } from './ArtifactCenterModal';
 import { BatchManagerModal } from './BatchManagerModal';
 import { installAdapterBundle, rollbackAdapterBundle } from '../automation/doubaoAdapter';
+import { ProjectSwitcher } from './ProjectSwitcher';
+import { LogCenterModal } from './LogCenterModal';
+import { ProjectOverviewModal } from './ProjectOverviewModal';
 
 interface ToolbarProps {
   sidebarCollapsed: boolean;
@@ -54,6 +57,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   const [adapterReport, setAdapterReport] = React.useState<AdapterSelfCheckReport | null>(null);
   const [adapterChecking, setAdapterChecking] = React.useState(false);
   const [batchManagerOpen, setBatchManagerOpen] = React.useState(false);
+  const [logsOpen, setLogsOpen] = React.useState(false);
+  const [projectOverviewOpen, setProjectOverviewOpen] = React.useState(false);
 
   React.useEffect(() => {
     const handleResult = (event: Event) => {
@@ -167,9 +172,56 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   // 更多操作菜单
   const moreMenuItems: MenuProps['items'] = [
     {
+      key: 'project-overview',
+      label: '项目概览',
+      onClick: () => setProjectOverviewOpen(true),
+    },
+    {
       key: 'batches',
       label: '任务批次',
       onClick: () => setBatchManagerOpen(true),
+    },
+    {
+      key: 'logs',
+      label: '运行日志',
+      onClick: () => setLogsOpen(true),
+    },
+    {
+      key: 'integrity',
+      label: '检查数据完整性',
+      onClick: async () => {
+        const result = await window.electronAPI.system.checkIntegrity();
+        if (result.success) message.success('数据完整性检查通过');
+        else message.error(result.issues.join('；'));
+      },
+    },
+    {
+      key: 'backup',
+      label: '导出完整备份',
+      onClick: async () => {
+        const result = await window.electronAPI.system.exportBackup();
+        if (result.success) message.success(`备份已导出：${result.filePath}`);
+        else if (result.error) message.error(result.error);
+      },
+    },
+    {
+      key: 'restore',
+      label: '恢复完整备份',
+      onClick: async () => {
+        const result = await window.electronAPI.system.restoreBackup();
+        if (result.success) message.success('备份已恢复，请重新启动应用');
+        else if (result.error) message.error(result.error);
+      },
+    },
+    {
+      key: 'updates',
+      label: '检查应用更新',
+      onClick: async () => {
+        const result = await window.electronAPI.system.checkUpdate();
+        if (!result.success) message.error(result.error);
+        else if (result.hasUpdate) Modal.info({ title: `发现新版本 ${result.latestVersion}`, content: result.name, okText: '打开发布页面', onOk: () => result.url && window.open(result.url, '_blank') });
+        else message.success(`当前已是最新版本 ${result.currentVersion}`);
+      },
     },
     {
       key: 'adapter-check',
@@ -249,9 +301,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
             豆包工作室
           </span>
           <span className="text-2xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded">
-            v1.5
+            v2.0
           </span>
         </div>
+        <ProjectSwitcher />
 
         {/* 任务状态指示 */}
         <div className="flex items-center gap-3 ml-4 text-xs text-db-text-secondary">
@@ -363,6 +416,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     />
     <ArtifactCenterModal open={artifactCenterOpen} onClose={() => setArtifactCenterOpen(false)} />
     <BatchManagerModal open={batchManagerOpen} onClose={() => setBatchManagerOpen(false)} />
+    <LogCenterModal open={logsOpen} onClose={() => setLogsOpen(false)} />
+    <ProjectOverviewModal open={projectOverviewOpen} onClose={() => setProjectOverviewOpen(false)} />
     <Modal title="运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
       <Progress percent={successRate} status={successRate >= 80 ? 'success' : 'normal'} />
       <Descriptions column={2} size="small" style={{ marginTop: 18 }}>

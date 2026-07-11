@@ -5,6 +5,7 @@ import type { ColumnsType } from 'antd/es/table';
 import type { DownloadJob, GenerationMode, Task, TaskArtifact } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
+import { useProjectStore } from '../store/useProjectStore';
 
 interface ArtifactRecord {
   key: string;
@@ -27,6 +28,7 @@ const VALIDATION_LABELS = {
 
 export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, onClose }) => {
   const tasks = useTaskStore((state) => state.tasks);
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const loadTasks = useTaskStore((state) => state.loadTasks);
   const accounts = useAccountStore((state) => state.accounts);
   const [downloads, setDownloads] = useState<DownloadJob[]>([]);
@@ -44,6 +46,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
   const records = useMemo(() => {
     const result: ArtifactRecord[] = [];
     for (const task of tasks) {
+      if ((task.projectId || 'default-project') !== activeProjectId) continue;
       for (const artifact of task.artifacts || []) {
         const localJob = [...downloads].reverse().find((job) => job.url === artifact.url && job.status === 'done');
         result.push({ key: `${task.id}:${artifact.id}`, task, artifact, localJob });
@@ -55,7 +58,7 @@ export const ArtifactCenterModal: React.FC<ArtifactCenterModalProps> = ({ open, 
       .filter((record) => validity === 'all' || (record.artifact.validation?.state || 'unknown') === validity)
       .filter((record) => !normalizedQuery || record.task.prompt.toLowerCase().includes(normalizedQuery) || record.task.id.includes(normalizedQuery))
       .sort((a, b) => b.artifact.discoveredAt.localeCompare(a.artifact.discoveredAt));
-  }, [downloads, mode, query, tasks, validity]);
+  }, [activeProjectId, downloads, mode, query, tasks, validity]);
 
   const validate = async (record: ArtifactRecord) => {
     setCheckingId(record.artifact.id);

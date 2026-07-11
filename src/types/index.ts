@@ -38,6 +38,12 @@ export interface Account {
   /** Seedance 每日额度的本地预测记录。 */
   seedanceQuota?: SeedanceQuota;
   health?: AccountHealth;
+  scheduling?: {
+    enabled: boolean;
+    weight: number;
+    preferredModes: GenerationMode[];
+    manualCooldownUntil?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -163,6 +169,16 @@ export interface TaskErrorInfo {
   detectedAt: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  color: string;
+  archived: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TaskRunSnapshot {
   runId: string;
   attempt: number;
@@ -265,6 +281,7 @@ export interface Task {
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
   dependencyPolicy?: 'all_done' | 'all_finished';
+  projectId?: string;
   createdAt: string;
   updatedAt: string;
 }

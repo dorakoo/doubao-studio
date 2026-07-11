@@ -7,6 +7,7 @@
 import { ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
+import { getDefaultProjectId } from './projects';
 
 // ==================== 类型定义 ====================
 
@@ -149,6 +150,7 @@ export interface Task {
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
   dependencyPolicy?: 'all_done' | 'all_finished';
+  projectId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -160,7 +162,12 @@ const DOWNLOAD_STORE_FILE = 'downloads.json';
 let downloadRecoveryApplied = false;
 
 function loadTasks(): Task[] {
-  return readJSON<Task[]>(STORE_FILE, []).map((task) => ({
+  const defaultProjectId = getDefaultProjectId();
+  const rawTasks = readJSON<Task[]>(STORE_FILE, []);
+  let migrated = false;
+  const tasks = rawTasks.map((task) => {
+    if (!task.projectId) migrated = true;
+    return ({
     ...task,
     mode: task.mode || 'chat',
     outputs: Array.isArray(task.outputs) ? task.outputs : [],
@@ -168,7 +175,11 @@ function loadTasks(): Task[] {
     runHistory: Array.isArray(task.runHistory) ? task.runHistory : [],
     source: task.source || 'manual',
     dependsOnTaskIds: Array.isArray(task.dependsOnTaskIds) ? task.dependsOnTaskIds : [],
-  }));
+    projectId: task.projectId || defaultProjectId,
+  });
+  });
+  if (migrated) writeJSON(STORE_FILE, tasks);
+  return tasks;
 }
 
 function artifactId(url: string): string {
@@ -327,7 +338,7 @@ function recoverInterruptedTasks(): void {
 
 export function registerTaskIPC(): void {
   recoverInterruptedTasks();
-  writeJSON('schema.json', { version: 5, appVersion: '1.5.0', updatedAt: new Date().toISOString() });
+  writeJSON('schema.json', { version: 6, appVersion: '2.0.0', updatedAt: new Date().toISOString() });
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
     const tasks = loadTasks();
@@ -343,6 +354,7 @@ export function registerTaskIPC(): void {
       videoConfig?: Task['videoConfig'];
       attachments?: string[];
       audioAttachment?: string;
+      projectId?: string;
     }): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
       try {
         if (!params.prompts || params.prompts.length === 0) {
@@ -368,6 +380,7 @@ export function registerTaskIPC(): void {
             runHistory: [],
             source: 'manual',
             dependsOnTaskIds: [],
+            projectId: params.projectId || getDefaultProjectId(),
             errorInfo: undefined,
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString(),
@@ -602,7 +615,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:importCsv',
-    async (): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
+    async (_event, params?: { projectId?: string }): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
       try {
         const selected = await dialog.showOpenDialog({
           title: '导入 CSV 任务',
@@ -661,6 +674,7 @@ export function registerTaskIPC(): void {
             audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
             result: null, outputs: [], artifacts: [], runHistory: [], batchId, source: 'csv', dependsOnTaskIds: [],
             dependencyPolicy: policyIndex >= 0 && row[policyIndex] === 'all_finished' ? 'all_finished' : 'all_done',
+            projectId: params?.projectId || getDefaultProjectId(),
             createdAt: now, updatedAt: now,
           });
           sourceRows.push(dataIndex + 1);

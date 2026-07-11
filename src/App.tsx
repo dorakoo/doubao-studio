@@ -13,6 +13,7 @@ import BrowserPanel from './components/BrowserPanel';
 import { Toolbar } from './components/Toolbar';
 import { useAccountStore } from './store/useAccountStore';
 import { useTaskStore } from './store/useTaskStore';
+import { useProjectStore } from './store/useProjectStore';
 import './styles/global.css';
 
 // ==================== 常量 ====================
@@ -39,6 +40,7 @@ const App: React.FC = () => {
   const tasks = useTaskStore((s) => s.tasks);
   const loadAccounts = useAccountStore((s) => s.loadAccounts);
   const loadTasks = useTaskStore((s) => s.loadTasks);
+  const loadProjects = useProjectStore((s) => s.loadProjects);
 
   /** 当前活跃账号对象 */
   const activeAccount = accounts.find((a) => a.id === activeAccountId) || null;
@@ -49,6 +51,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     loadAccounts();
+    loadProjects();
     loadTasks(true);
   }, []);
 

@@ -33,6 +33,7 @@ import {
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
 import { getAccountSchedulingScore, useAccountStore } from '../store/useAccountStore';
+import { useProjectStore } from '../store/useProjectStore';
 import TaskDetailModal from './TaskDetailModal';
 import type { Task, TaskUpdateInput } from '../types';
 import {
@@ -114,7 +115,7 @@ const ModeSelector: React.FC<{
 
 const TaskConsole: React.FC = () => {
   const {
-    tasks,
+    tasks: allTasks,
     addTasks,
     importCsv,
     assignTask,
@@ -128,6 +129,8 @@ const TaskConsole: React.FC = () => {
     updateTask,
     processQueue,
   } = useTaskStore();
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const tasks = allTasks.filter((task) => (task.projectId || 'default-project') === activeProjectId);
 
   const accounts = useAccountStore((s) => s.accounts);
   const selectAccount = useAccountStore((s) => s.selectAccount);
@@ -205,7 +208,7 @@ const TaskConsole: React.FC = () => {
     // 计算每个账号当前的负载（排队中+执行中的任务数）
     const accountLoad: Record<string, number> = {};
     accounts.filter((a) => a.status !== 'error').forEach((a) => {
-      accountLoad[a.id] = tasks.filter(
+      accountLoad[a.id] = allTasks.filter(
         (t) => t.assignedAccountId === a.id && (t.status === 'queued' || t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification')
       ).length;
     });
@@ -228,7 +231,7 @@ const TaskConsole: React.FC = () => {
       accountLoad[targetAccount.id]++;
       await assignTask(task.id, targetAccount.id);
     }
-  }, [accounts, tasks, assignTask]);
+  }, [accounts, allTasks, assignTask]);
 
   // ---- 添加任务 ----
 

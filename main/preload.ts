@@ -49,6 +49,12 @@ export interface Task {
 // ==================== 暴露 API ====================
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  projects: {
+    list: (): Promise<any[]> => ipcRenderer.invoke('projects:list'),
+    add: (name: string, description?: string, color?: string): Promise<any> => ipcRenderer.invoke('projects:add', { name, description, color }),
+    update: (id: string, updates: Record<string, any>): Promise<any> => ipcRenderer.invoke('projects:update', { id, updates }),
+    delete: (id: string): Promise<any> => ipcRenderer.invoke('projects:delete', { id }),
+  },
   // ---- 账号管理 ----
   accounts: {
     list: (): Promise<Account[]> => ipcRenderer.invoke('accounts:list'),
@@ -68,6 +74,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('accounts:updateSeedanceQuota', { id, action, units }),
     updateHealth: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: string): Promise<{ success: boolean; account?: Account }> =>
       ipcRenderer.invoke('accounts:updateHealth', { id, action, errorCode }),
+    updateScheduling: (id: string, updates: Record<string, any>): Promise<any> => ipcRenderer.invoke('accounts:updateScheduling', { id, updates }),
     getPartition: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('accounts:getPartition', { id }),
   },
@@ -75,8 +82,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ---- 任务调度 ----
   tasks: {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
-    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
-      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment }),
+    add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string, projectId?: string): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
+      ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment, projectId }),
     assign: (taskId: string, accountId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:assign', { taskId, accountId }),
     updateStatus: (
@@ -97,7 +104,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('tasks:acquireLock', { taskId, ownerId }),
     releaseLock: (taskId: string, ownerId?: string): Promise<{ success: boolean }> =>
       ipcRenderer.invoke('tasks:releaseLock', { taskId, ownerId }),
-    importCsv: (): Promise<any> => ipcRenderer.invoke('tasks:importCsv'),
+    importCsv: (projectId?: string): Promise<any> => ipcRenderer.invoke('tasks:importCsv', { projectId }),
     update: (taskId: string, updates: {
       prompt: string;
       videoConfig?: any;
@@ -142,10 +149,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
     save: (settings: Record<string, any>): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('settings:save', settings),
   },
+  logs: {
+    list: (): Promise<any[]> => ipcRenderer.invoke('logs:list'),
+    append: (entry: Record<string, any>): Promise<any> => ipcRenderer.invoke('logs:append', entry),
+    clear: (): Promise<any> => ipcRenderer.invoke('logs:clear'),
+  },
 
   // ---- 系统操作 ----
   system: {
     getVersion: (): Promise<string> => ipcRenderer.invoke('system:getVersion'),
+    checkIntegrity: (): Promise<any> => ipcRenderer.invoke('system:checkIntegrity'),
+    exportBackup: (): Promise<any> => ipcRenderer.invoke('system:exportBackup'),
+    restoreBackup: (): Promise<any> => ipcRenderer.invoke('system:restoreBackup'),
+    exportProject: (projectId: string): Promise<any> => ipcRenderer.invoke('system:exportProject', projectId),
+    checkUpdate: (): Promise<any> => ipcRenderer.invoke('system:checkUpdate'),
     minimize: (): void => ipcRenderer.send('window:minimize'),
     toggleMaximize: (): void => ipcRenderer.send('window:toggleMaximize'),
     close: (): void => ipcRenderer.send('window:close'),

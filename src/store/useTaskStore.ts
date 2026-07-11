@@ -19,8 +19,9 @@ import type {
   TaskStage,
   TaskArtifact,
 } from '../types';
-import { useAccountStore } from './useAccountStore';
+import { getAccountSchedulingScore, useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
+import { useProjectStore } from './useProjectStore';
 
 // ==================== 类型 ====================
 
@@ -159,7 +160,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     try {
-      const result = await window.electronAPI.tasks.add(prompts, mode, videoConfig, attachments, audioAttachment);
+      const result = await window.electronAPI.tasks.add(prompts, mode, videoConfig, attachments, audioAttachment, useProjectStore.getState().activeProjectId);
       if (result.success && result.tasks) {
         set({ tasks: [...get().tasks, ...result.tasks] });
         return result.tasks;
@@ -221,7 +222,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   importCsv: async () => {
-    const result = await window.electronAPI.tasks.importCsv();
+    const result = await window.electronAPI.tasks.importCsv(useProjectStore.getState().activeProjectId);
     if (!result.success || !result.tasks) {
       if (result.error) set({ error: result.error });
       return null;
@@ -385,6 +386,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
+    void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: '任务开始执行', taskId, accountId });
 
     // 更新任务状态
     const tasks = get().tasks.map((t) =>
@@ -498,6 +500,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
+    void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: `任务完成，发现 ${outputs?.length || 1} 个产物`, taskId, accountId });
     const finalOutputs = outputs && outputs.length > 0 ? outputs : [resultUrl];
     await window.electronAPI.tasks.updateStatus(taskId, 'done', resultUrl, finalOutputs);
     await window.electronAPI.tasks.updateRuntime(taskId, {
@@ -571,6 +574,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   pauseAutomation: async (taskId: string, accountId: string, pauseMessage = '用户已暂停') => {
+    void window.electronAPI.logs.append({ level: 'warn', scope: 'automation', message: pauseMessage, taskId, accountId });
     const now = new Date().toISOString();
     const errorInfo: TaskErrorInfo = {
       code: 'cancelled',
@@ -609,6 +613,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   failAutomation: async (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => {
+    void window.electronAPI.logs.append({ level: 'error', scope: errorInfo?.code || 'automation', message: errorMsg, taskId, accountId });
     const now = new Date().toISOString();
     await window.electronAPI.tasks.updateStatus(taskId, 'fail', errorMsg);
     await window.electronAPI.tasks.updateRuntime(taskId, {
@@ -694,9 +699,24 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       if (dependencies.length !== (task.dependsOnTaskIds || []).length || !dependencyReady) continue;
       const accountId = task.assignedAccountId!;
       const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-      if (task.mode === 'video' && account?.seedanceQuota?.exhausted) continue;
-      if (account?.health?.verificationRequired || account?.health?.loginState === 'expired') continue;
-      if (account?.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) continue;
+      const unavailable = !account ||
+        (task.mode === 'video' && account.seedanceQuota?.exhausted) ||
+        account.health?.verificationRequired || account.health?.loginState === 'expired' ||
+        (account.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) ||
+        account.scheduling?.enabled === false ||
+        (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now());
+      if (unavailable) {
+        const candidates = useAccountStore.getState().accounts
+          .filter((candidate) => candidate.id !== accountId)
+          .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating'].includes(item.status)).length, task.mode) }))
+          .filter((item) => Number.isFinite(item.score))
+          .sort((a, b) => a.score - b.score);
+        if (candidates[0]) {
+          void state.assignTask(task.id, candidates[0].candidate.id);
+          break;
+        }
+        continue;
+      }
       if (!state.accountBusy[accountId]) {
         console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
         state.startAutomation(task.id);
