@@ -274,14 +274,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         );
         set({ tasks });
 
-        // 如果已指派账号且账号空闲，自动启动
-        const task = result.task;
-        if (task.assignedAccountId && !get().accountBusy[task.assignedAccountId]) {
-          setTimeout(() => get().startAutomation(taskId), 100);
-        } else if (task.assignedAccountId) {
-          // 账号忙，触发队列调度
-          setTimeout(() => get().processQueue(), 100);
-        }
+        // 重试后统一由调度器决定是否启动，避免绕过依赖检查、账号健康/额度检查和防重复处理
+        setTimeout(() => get().processQueue(), 0);
 
         return true;
       } else {
