@@ -21,7 +21,7 @@ import type {
   TaskArtifact,
 } from '../types';
 import { getAccountSchedulingScore } from '../utils/schedulingScore';
-import { evaluateDependencies, type DependencyEvaluation } from '../utils/dependencyEval';
+import { evaluateDependencies } from '../utils/dependencyEval';
 import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
@@ -111,7 +111,7 @@ function mergeArtifacts(task: Task, outputs: string[], source: TaskArtifact['sou
   return [...artifacts.values()];
 }
 
-// evaluateDependencies 和 DependencyEvaluation 已抽取到 src/utils/dependencyEval.ts
+// evaluateDependencies 已抽取到 src/utils/dependencyEval.ts
 
 function getAccountBlockReason(account: Account | undefined, task: Task): string | null {
   if (!account) return '指派账号不存在';
@@ -721,7 +721,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     for (const task of queuedTasks) {
       const dependency = evaluateDependencies(task, state.tasks);
-      if (dependency.state === 'missing' || dependency.state === 'failed') {
+      if (dependency.state === 'missing' || dependency.state === 'failed' || dependency.state === 'invalid') {
         const message = dependency.message!;
         const now = new Date().toISOString();
         set((current) => ({

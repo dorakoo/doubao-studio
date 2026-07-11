@@ -6,7 +6,7 @@
 import type { Task } from '../types';
 
 export type DependencyEvaluation = {
-  state: 'ready' | 'waiting' | 'missing' | 'failed';
+  state: 'ready' | 'waiting' | 'missing' | 'failed' | 'invalid';
   message?: string;
 };
 
@@ -22,6 +22,21 @@ export function evaluateDependencies(task: Task, tasks: Task[]): DependencyEvalu
     .filter((item): item is Task => !!item);
   if (dependencies.length !== dependencyIds.length) {
     return { state: 'missing', message: '任务依赖不存在，请检查工作流或 CSV' };
+  }
+  const tasksById = new Map(tasks.map((item) => [item.id, item]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const hasCycle = (taskId: string): boolean => {
+    if (visiting.has(taskId)) return true;
+    if (visited.has(taskId)) return false;
+    visiting.add(taskId);
+    const cyclic = (tasksById.get(taskId)?.dependsOnTaskIds || []).some((dependencyId) => hasCycle(dependencyId));
+    visiting.delete(taskId);
+    visited.add(taskId);
+    return cyclic;
+  };
+  if (hasCycle(task.id)) {
+    return { state: 'invalid', message: '任务依赖存在自依赖或循环，当前任务已停止' };
   }
   if (task.dependencyPolicy !== 'all_finished' && dependencies.some((item) => ['fail', 'cancelled'].includes(item.status))) {
     return { state: 'failed', message: '前置任务未成功，当前任务已停止' };

@@ -5,7 +5,7 @@
  * 预期：E001 错误 — 同一 channel 注册了两次。
  */
 
-import { ipcMain } from 'electron';
+import { ipcMain, ipcRenderer } from 'electron';
 
 export function registerDuplicateIPC(): void {
   ipcMain.handle('fixture:dup:channel', async () => {
@@ -16,3 +16,7 @@ export function registerDuplicateIPC(): void {
     return 'second';
   });
 }
+
+export const duplicateAPI = {
+  invoke: () => ipcRenderer.invoke('fixture:dup:channel'),
+};

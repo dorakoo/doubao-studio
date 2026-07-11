@@ -3,7 +3,7 @@
  * CSV 解析纯函数 — 不依赖 Electron/Node 运行时
  */
 
-import type { GenerationMode } from '../ipc/tasks';
+export type CsvGenerationMode = 'chat' | 'image' | 'video' | 'music';
 
 /**
  * 解析 CSV 文本为二维数组。
@@ -37,6 +37,7 @@ export function parseCsv(text: string): string[][] {
       field += char;
     }
   }
+  if (quoted) throw new Error('CSV 格式错误：存在未闭合的引号');
   row.push(field.trim());
   if (row.some(Boolean)) rows.push(row);
   return rows;
@@ -46,7 +47,7 @@ export function parseCsv(text: string): string[][] {
  * 将 CSV 中的模式字段值标准化为 GenerationMode。
  * 支持 image/图片、video/视频、music/音乐，其余归为 chat。
  */
-export function normalizeCsvMode(value: string): GenerationMode {
+export function normalizeCsvMode(value: string): CsvGenerationMode {
   const normalized = value.trim().toLowerCase();
   if (['image', '图片'].includes(normalized)) return 'image';
   if (['video', '视频'].includes(normalized)) return 'video';

@@ -13,6 +13,7 @@ import * as os from 'os';
 
 // 创建临时目录作为 userData
 let tempDir: string;
+let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
 vi.mock('electron', () => ({
   app: {
@@ -26,10 +27,12 @@ const { readJSON, writeJSON, getDataDir } = await import('../../main/utils/store
 describe('JSON 存储工具', () => {
   beforeEach(() => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'doubao-test-'));
+    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
+    consoleErrorSpy.mockRestore();
   });
 
   describe('readJSON', () => {
@@ -134,6 +137,13 @@ describe('JSON 存储工具', () => {
 
       expect(JSON.parse(fs.readFileSync(filePath, 'utf-8'))).toEqual({ v: 3 });
       expect(JSON.parse(fs.readFileSync(bakPath, 'utf-8'))).toEqual({ v: 2 });
+    });
+
+    it('数据目录无法创建时返回 false 而不是抛异常', () => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+      fs.writeFileSync(tempDir, 'not-a-directory', 'utf-8');
+      expect(() => writeJSON('blocked.json', { value: 1 })).not.toThrow();
+      expect(writeJSON('blocked.json', { value: 1 })).toBe(false);
     });
   });
 

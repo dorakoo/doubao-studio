@@ -6,7 +6,7 @@
  *       E006 错误 — app.getPath 在模块顶层调用。
  */
 
-import { ipcMain, app } from 'electron';
+import { ipcMain, ipcRenderer, app } from 'electron';
 import * as path from 'path';
 
 // E005: 模块顶层注册 IPC handler
@@ -21,5 +21,10 @@ ipcMain.on('fixture:toplevel:on', () => {
 
 // E006: 模块顶层调用 app.getPath()
 const badPath = path.join(app.getPath('userData'), 'bad.json');
+
+export const topLevelAPI = {
+  invoke: () => ipcRenderer.invoke('fixture:toplevel:handle'),
+  send: () => ipcRenderer.send('fixture:toplevel:on'),
+};
 
 export { badPath };

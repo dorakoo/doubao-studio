@@ -66,6 +66,10 @@ describe('parseCsv', () => {
     expect(result).toHaveLength(2);
     expect(result[1]).toEqual(['c', 'd']);
   });
+
+  it('未闭合引号会明确拒绝', () => {
+    expect(() => parseCsv('a,"broken')).toThrow('未闭合的引号');
+  });
 });
 
 describe('normalizeCsvMode', () => {

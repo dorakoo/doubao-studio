@@ -21,16 +21,17 @@ export function getDataDir(): string {
 
 /** 通用读取 JSON 文件 */
 export function readJSON<T>(filename: string, fallback: T): T {
-  const filePath = path.join(getDataDir(), filename);
   try {
+    const filePath = path.join(getDataDir(), filename);
     if (fs.existsSync(filePath)) {
       const raw = fs.readFileSync(filePath, 'utf-8');
       return JSON.parse(raw) as T;
     }
   } catch (err) {
     console.error(`[Store] 读取 ${filename} 失败:`, err);
-    const backupPath = `${filePath}.bak`;
+    let backupPath: string;
     try {
+      backupPath = `${path.join(getDataDir(), filename)}.bak`;
       if (fs.existsSync(backupPath)) {
         return JSON.parse(fs.readFileSync(backupPath, 'utf-8')) as T;
       }
@@ -43,10 +44,11 @@ export function readJSON<T>(filename: string, fallback: T): T {
 
 /** 通用写入 JSON 文件 */
 export function writeJSON<T>(filename: string, data: T): boolean {
-  const filePath = path.join(getDataDir(), filename);
-  const tempPath = `${filePath}.${process.pid}.tmp`;
-  const backupPath = `${filePath}.bak`;
+  let tempPath: string | undefined;
   try {
+    const filePath = path.join(getDataDir(), filename);
+    tempPath = `${filePath}.${process.pid}.tmp`;
+    const backupPath = `${filePath}.bak`;
     fs.writeFileSync(tempPath, JSON.stringify(data, null, 2), 'utf-8');
     if (fs.existsSync(filePath)) fs.copyFileSync(filePath, backupPath);
     try {
@@ -59,7 +61,7 @@ export function writeJSON<T>(filename: string, data: T): boolean {
   } catch (err) {
     console.error(`[Store] 写入 ${filename} 失败:`, err);
     try {
-      if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+      if (tempPath && fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
     } catch {}
     return false;
   }
@@ -67,8 +69,8 @@ export function writeJSON<T>(filename: string, data: T): boolean {
 
 /** 删除 JSON 文件 */
 export function deleteJSON(filename: string): boolean {
-  const filePath = path.join(getDataDir(), filename);
   try {
+    const filePath = path.join(getDataDir(), filename);
     if (fs.existsSync(filePath)) {
       fs.unlinkSync(filePath);
     }

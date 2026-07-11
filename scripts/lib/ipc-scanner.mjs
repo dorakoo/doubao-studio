@@ -115,56 +115,55 @@ function extractStringLiteral(arg) {
   return null;
 }
 
-// ==================== 主进程扫描 ====================
+// ==================== AST 扫描 ====================
+
+function collectTypeScriptFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  const files = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...collectTypeScriptFiles(entryPath));
+    else if (entry.isFile() && entry.name.endsWith('.ts')) files.push(entryPath);
+  }
+  return files;
+}
 
 /**
- * 扫描主进程源文件，提取 ipcMain.handle/on 和 app.getPath 调用。
- *
- * @param {string} rootDir — 项目根目录
- * @returns {MainScanResult}
+ * 使用同一套生产扫描逻辑解析任意源文件，供项目检查和 Fixture 自测试复用。
+ * @param {string[]} filePaths
+ * @param {string} rootDir
+ * @returns {{ mainResult: MainScanResult, preloadResult: PreloadScanResult }}
  */
-export function scanMainFiles(rootDir) {
+export function scanSourceFiles(filePaths, rootDir) {
   /** @type {IpcCall[]} */
   const handles = [];
   /** @type {IpcCall[]} */
   const onListeners = [];
   /** @type {GetPathCall[]} */
   const getPathCalls = [];
+  /** @type {InvokeCall[]} */
+  const invokes = [];
+  /** @type {InvokeCall[]} */
+  const sends = [];
 
-  // 待扫描的主进程文件列表
-  const mainFiles = [
-    path.join(rootDir, 'main', 'main.ts'),
-    ...fs.readdirSync(path.join(rootDir, 'main', 'ipc'))
-      .filter((f) => f.endsWith('.ts'))
-      .map((f) => path.join(rootDir, 'main', 'ipc', f)),
-  ];
-
-  for (const filePath of mainFiles) {
+  for (const filePath of filePaths) {
     if (!fs.existsSync(filePath)) continue;
     const relativeFile = relPath(filePath, rootDir);
-    const content = fs.readFileSync(filePath, 'utf-8');
     const sourceFile = ts.createSourceFile(
       relativeFile,
-      content,
+      fs.readFileSync(filePath, 'utf-8'),
       ts.ScriptTarget.Latest,
       true,
-      ts.ScriptKind.TS
+      ts.ScriptKind.TS,
     );
 
     function visit(node) {
-      // 检测 ipcMain.handle('channel', ...) 和 ipcMain.on('channel', ...)
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-        const propAccess = node.expression;
-        const objectExpr = propAccess.expression;
-        const methodName = propAccess.name.text;
+        const objectExpr = node.expression.expression;
+        const methodName = node.expression.name.text;
+        const channel = extractStringLiteral(node.arguments[0]) ?? '<dynamic>';
 
-        // ipcMain.handle / ipcMain.on
-        if (
-          ts.isIdentifier(objectExpr) &&
-          objectExpr.text === 'ipcMain' &&
-          (methodName === 'handle' || methodName === 'on')
-        ) {
-          const channel = extractStringLiteral(node.arguments[0]) ?? '<dynamic>';
+        if (ts.isIdentifier(objectExpr) && objectExpr.text === 'ipcMain' && (methodName === 'handle' || methodName === 'on')) {
           const callInfo = {
             file: relativeFile,
             line: getLine(node, sourceFile),
@@ -172,33 +171,24 @@ export function scanMainFiles(rootDir) {
             channel,
             topLevel: isTopLevel(node),
           };
-          if (methodName === 'handle') {
-            handles.push(callInfo);
-          } else {
-            onListeners.push(callInfo);
-          }
+          if (methodName === 'handle') handles.push(callInfo);
+          else onListeners.push(callInfo);
         }
 
-        // app.getPath('...') — 直接调用
-        if (
-          methodName === 'getPath' &&
-          ts.isIdentifier(objectExpr) &&
-          objectExpr.text === 'app'
-        ) {
-          getPathCalls.push({
+        if (ts.isIdentifier(objectExpr) && objectExpr.text === 'ipcRenderer' && (methodName === 'invoke' || methodName === 'send')) {
+          const callInfo = {
             file: relativeFile,
             line: getLine(node, sourceFile),
-            topLevel: isTopLevel(node),
-          });
+            method: methodName,
+            channel,
+          };
+          if (methodName === 'invoke') invokes.push(callInfo);
+          else sends.push(callInfo);
         }
 
-        // require('electron').app.getPath('...') — 通过 require 调用
-        // 模式: PropertyAccessExpression( PropertyAccessExpression( require('electron'), 'app' ), 'getPath' )
-        if (
-          methodName === 'getPath' &&
-          ts.isPropertyAccessExpression(objectExpr) &&
-          objectExpr.name.text === 'app'
-        ) {
+        const directAppCall = methodName === 'getPath' && ts.isIdentifier(objectExpr) && objectExpr.text === 'app';
+        const propertyAppCall = methodName === 'getPath' && ts.isPropertyAccessExpression(objectExpr) && objectExpr.name.text === 'app';
+        if (directAppCall || propertyAppCall) {
           getPathCalls.push({
             file: relativeFile,
             line: getLine(node, sourceFile),
@@ -206,77 +196,30 @@ export function scanMainFiles(rootDir) {
           });
         }
       }
-
       ts.forEachChild(node, visit);
     }
 
     visit(sourceFile);
   }
 
-  return { handles, onListeners, getPathCalls };
+  return {
+    mainResult: { handles, onListeners, getPathCalls },
+    preloadResult: { invokes, sends },
+  };
 }
 
-// ==================== Preload 扫描 ====================
+/** 扫描主进程源文件。 */
+export function scanMainFiles(rootDir) {
+  const mainFiles = [
+    path.join(rootDir, 'main', 'main.ts'),
+    ...collectTypeScriptFiles(path.join(rootDir, 'main', 'ipc')),
+  ];
+  return scanSourceFiles(mainFiles, rootDir).mainResult;
+}
 
-/**
- * 扫描 preload.ts，提取 ipcRenderer.invoke/send 调用。
- *
- * @param {string} rootDir — 项目根目录
- * @returns {PreloadScanResult}
- */
+/** 扫描 preload.ts。 */
 export function scanPreloadFile(rootDir) {
-  /** @type {InvokeCall[]} */
-  const invokes = [];
-  /** @type {InvokeCall[]} */
-  const sends = [];
-
-  const filePath = path.join(rootDir, 'main', 'preload.ts');
-  if (!fs.existsSync(filePath)) {
-    return { invokes, sends };
-  }
-
-  const relativeFile = relPath(filePath, rootDir);
-  const content = fs.readFileSync(filePath, 'utf-8');
-  const sourceFile = ts.createSourceFile(
-    relativeFile,
-    content,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
-
-  function visit(node) {
-    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-      const propAccess = node.expression;
-      const objectExpr = propAccess.expression;
-      const methodName = propAccess.name.text;
-
-      if (
-        ts.isIdentifier(objectExpr) &&
-        objectExpr.text === 'ipcRenderer' &&
-        (methodName === 'invoke' || methodName === 'send')
-      ) {
-        const channel = extractStringLiteral(node.arguments[0]) ?? '<dynamic>';
-        const callInfo = {
-          file: relativeFile,
-          line: getLine(node, sourceFile),
-          method: methodName,
-          channel,
-        };
-        if (methodName === 'invoke') {
-          invokes.push(callInfo);
-        } else {
-          sends.push(callInfo);
-        }
-      }
-    }
-
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sourceFile);
-
-  return { invokes, sends };
+  return scanSourceFiles([path.join(rootDir, 'main', 'preload.ts')], rootDir).preloadResult;
 }
 
 // ==================== 交叉校验 ====================
@@ -304,33 +247,16 @@ export function crossCheck(mainResult, preloadResult) {
   const { handles, onListeners, getPathCalls } = mainResult;
   const { invokes, sends } = preloadResult;
 
-  // ---- E001: 重复注册 ----
-  // handle 重复
-  const handleChannels = handles.map((h) => h.channel);
-  const handleDupes = handleChannels.filter((ch, i) => handleChannels.indexOf(ch) !== i);
-  for (const ch of [...new Set(handleDupes)]) {
-    const dupeCalls = handles.filter((h) => h.channel === ch);
-    // 报告第二个及之后的重复注册
+  // ---- E001: 重复注册（包括同一 channel 混用 handle/on） ----
+  const registrations = [...handles, ...onListeners];
+  for (const ch of [...new Set(registrations.map((call) => call.channel))]) {
+    const dupeCalls = registrations.filter((call) => call.channel === ch);
     for (let i = 1; i < dupeCalls.length; i++) {
       errors.push({
         rule: 'E001',
         file: dupeCalls[i].file,
         line: dupeCalls[i].line,
-        message: `重复注册 ipcMain.handle('${ch}')，首次注册在 ${dupeCalls[0].file}:${dupeCalls[0].line}`,
-      });
-    }
-  }
-  // on 重复
-  const onChannels = onListeners.map((o) => o.channel);
-  const onDupes = onChannels.filter((ch, i) => onChannels.indexOf(ch) !== i);
-  for (const ch of [...new Set(onDupes)]) {
-    const dupeCalls = onListeners.filter((o) => o.channel === ch);
-    for (let i = 1; i < dupeCalls.length; i++) {
-      errors.push({
-        rule: 'E001',
-        file: dupeCalls[i].file,
-        line: dupeCalls[i].line,
-        message: `重复注册 ipcMain.on('${ch}')，首次注册在 ${dupeCalls[0].file}:${dupeCalls[0].line}`,
+        message: `重复注册 IPC 通道 '${ch}'，首次注册在 ${dupeCalls[0].file}:${dupeCalls[0].line}`,
       });
     }
   }
@@ -389,7 +315,7 @@ export function crossCheck(mainResult, preloadResult) {
 
   // ---- E002: handle 缺少 invoke ----
   for (const ch of handleSet) {
-    if (!invokeSet.has(ch)) {
+    if (!invokeSet.has(ch) && !sendSet.has(ch)) {
       // 找到第一个注册位置
       const h = handles.find((x) => x.channel === ch);
       errors.push({
@@ -403,7 +329,7 @@ export function crossCheck(mainResult, preloadResult) {
 
   // ---- E003: invoke 缺少 handle ----
   for (const ch of invokeSet) {
-    if (!handleSet.has(ch)) {
+    if (!handleSet.has(ch) && !onSet.has(ch)) {
       const inv = invokes.find((x) => x.channel === ch);
       errors.push({
         rule: 'E003',
@@ -441,7 +367,7 @@ export function crossCheck(mainResult, preloadResult) {
   }
   // on 缺少 send
   for (const ch of onSet) {
-    if (!sendSet.has(ch)) {
+    if (!sendSet.has(ch) && !invokeSet.has(ch)) {
       const o = onListeners.find((x) => x.channel === ch);
       errors.push({
         rule: 'E002',
@@ -453,7 +379,7 @@ export function crossCheck(mainResult, preloadResult) {
   }
   // send 缺少 on
   for (const ch of sendSet) {
-    if (!onSet.has(ch)) {
+    if (!onSet.has(ch) && !handleSet.has(ch)) {
       const s = sends.find((x) => x.channel === ch);
       errors.push({
         rule: 'E003',

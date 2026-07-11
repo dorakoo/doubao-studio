@@ -110,23 +110,23 @@ describe('evaluateDependencies', () => {
 
   // ---- 自依赖 ----
 
-  it('自依赖（依赖自身 ID）— 自身状态 done 时 ready', () => {
+  it('自依赖（依赖自身 ID）即使状态 done 也判定 invalid', () => {
     const task = makeTask({ id: 't1', status: 'done', dependsOnTaskIds: ['t1'], dependencyPolicy: 'all_done' });
-    expect(evaluateDependencies(task, [task]).state).toBe('ready');
+    expect(evaluateDependencies(task, [task]).state).toBe('invalid');
   });
 
-  it('自依赖 — 自身状态 queued 时 waiting', () => {
+  it('自依赖 — 自身状态 queued 时也判定 invalid', () => {
     const task = makeTask({ id: 't1', status: 'queued', dependsOnTaskIds: ['t1'], dependencyPolicy: 'all_done' });
-    expect(evaluateDependencies(task, [task]).state).toBe('waiting');
+    expect(evaluateDependencies(task, [task]).state).toBe('invalid');
   });
 
   // ---- 循环依赖 ----
 
-  it('循环依赖 A→B→A — 两者都未 done 时 waiting', () => {
+  it('循环依赖 A→B→A — 两端均判定 invalid', () => {
     const taskA = makeTask({ id: 'A', status: 'queued', dependsOnTaskIds: ['B'], dependencyPolicy: 'all_done' });
     const taskB = makeTask({ id: 'B', status: 'queued', dependsOnTaskIds: ['A'], dependencyPolicy: 'all_done' });
-    expect(evaluateDependencies(taskA, [taskA, taskB]).state).toBe('waiting');
-    expect(evaluateDependencies(taskB, [taskA, taskB]).state).toBe('waiting');
+    expect(evaluateDependencies(taskA, [taskA, taskB]).state).toBe('invalid');
+    expect(evaluateDependencies(taskB, [taskA, taskB]).state).toBe('invalid');
   });
 
   // ---- message 验证 ----

@@ -3,7 +3,7 @@
  *
  * Vitest 测试运行器配置
  * - 默认环境 Node（纯逻辑测试不需要 DOM）
- * - 组件测试通过 projects 配置显式选择 jsdom 环境
+ * - 当前仅运行纯逻辑测试；引入组件测试时再新增独立 DOM project
  * - 覆盖率使用 v8 provider
  */
 
