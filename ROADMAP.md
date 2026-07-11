@@ -58,8 +58,9 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 - 新建 `runtime/`：AutomationRuntime、BrowserRuntime、SessionManager 和任务租约管理。
 - Zustand Store 降为 UI projection，只订阅事件并调用服务，不再决定执行流程。
 - Electron IPC 改为薄适配层：参数校验、调用 Core、返回标准结果。
-- 将 JSON 存储封装为 Repository 接口，为 SQLite 迁移保留兼容边界。
+- 将 JSON 存储封装为 Repository 接口，并由单一写入协调器串行处理读改写，避免桌面 UI、CLI 和 Agent 并发覆盖数据。
 - 引入运行事件模型：`task.created`、`task.started`、`task.stage_changed`、`task.failed`、`artifact.discovered` 等。
+- 明确单一所有者进程：桌面、CLI 和 Agent 客户端只能通过 Core/API 提交命令，不得直接读写数据文件。
 
 **退出标准**：调度器和任务生命周期可在不启动 React 的情况下运行单元测试；主进程与渲染进程不再重复定义领域类型。
 
@@ -93,6 +94,8 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
   - `subscribe_task_events`
 - 为长任务提供事件流或游标轮询，Agent 不需要等待单次调用返回最终视频。
 - 所有写操作支持 `requestId` 幂等键、调用来源、超时和取消信号。
+- 把人工验证、登录失效和会员限制建模为 `action_required`，提供可查询的处理说明和显式恢复命令。
+- 提供素材导入协议，将调用方文件、字节流或受控 URI 转成内部 Asset ID，禁止外部 Agent 直接传任意本地路径。
 - 增加 capability discovery，调用方可查询当前版本支持的模型、比例、时长和适配器健康度。
 - 生成 OpenAPI/JSON Schema 和最小 SDK，优先支持 TypeScript 与 Python。
 
@@ -104,6 +107,7 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 
 - 工作流升级为正式 DAG：输入输出端口、变量映射、条件分支、并发上限和失败策略。
 - 支持 Webhook：任务完成、失败、需要人工验证、额度耗尽和产物下载完成。
+- Webhook 具备签名、重放保护、投递 ID、指数退避和死信记录。
 - 支持导入导出可移植 Workflow Manifest，不包含账号密钥和机器本地路径。
 - 建立 Artifact URI 与元数据规范，支持本地文件、对象存储和第三方资产库。
 - 增加插件清单、权限声明、版本约束和隔离执行；插件不能直接访问任意 Electron API。

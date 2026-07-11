@@ -192,33 +192,69 @@
 ### G-201 工程检查增强
 
 **依赖**：Wave 1 完成  
-**允许修改**：`scripts/check-project.mjs`、测试 Fixture
+**允许修改**：`scripts/check-project.mjs`、`scripts/lib/`、`scripts/fixtures/`
+**禁止修改**：业务代码、IPC channel、`package.json`、锁文件
 
-- 同时检查 `ipcMain.handle` 与 `ipcMain.on` 重复注册。
-- 对照主进程注册 channel、preload 暴露调用和 renderer 类型声明。
-- 对动态 channel 或明确单向事件提供白名单，避免脆弱正则误报。
-- 检查模块顶层 IPC 注册和 `app.getPath()` 调用。
+- 使用现有 `typescript` 依赖的 Compiler API 解析 AST，不继续堆叠正则。
+- 扫描 `main/main.ts` 与 `main/ipc/**/*.ts`，同时统计 `ipcMain.handle` 和 `ipcMain.on`。
+- 扫描 `main/preload.ts` 的 `ipcRenderer.invoke/send`，校验 `handle <-> invoke`、`on <-> send` 一一对应。
+- 检查重复 channel、preload 缺少主进程接收端、主进程 channel 未由 preload 暴露，以及通信模式不匹配。
+- 检查模块顶层 `ipcMain.handle/on` 与 `app.getPath()`；允许在注册函数、回调或普通函数体内调用。
+- 非字符串动态 channel 默认报错；确有必要时使用集中白名单并写明理由。
+- 输出按文件、行号、规则编号排列的错误，便于 Agent 自动修复。
+- 提供自测试 Fixture，至少包含正常、重复、缺失接收端、模式不匹配和顶层注册五种情况。
 
-退出标准：故意加入重复 channel、漏暴露 channel 和顶层注册时检查脚本必须失败。
+退出标准：
 
-### G-202 ESLint 与基础测试
+- 当前工程应识别 49 个 invoke/handle channel 和 3 个 send/on channel。
+- 五类错误 Fixture 均返回非零结果，正常 Fixture 返回零。
+- `pnpm.cmd run check:project` 与 `pnpm.cmd run validate` 通过。
+- 提交建议：`build(check): validate IPC contracts with TypeScript AST`
+
+### G-202 ESLint 基线
 
 **依赖**：G-201  
-**允许修改**：Lint/测试配置、`package.json`、`pnpm-lock.yaml`、新测试文件  
-**禁止修改**：为消除告警而批量改写业务代码
+**允许修改**：ESLint 配置、`package.json`、`pnpm-lock.yaml`
+**禁止修改**：业务代码、测试框架、为消除告警而批量格式化
 
-- 使用 ESLint flat config 与 TypeScript/React 规则。
-- 初期规则以阻断真实错误为主，不一次性清理所有存量风格问题。
-- 引入适合当前 TypeScript 工程的测试运行器。
-- `validate` 顺序固定为类型检查、Lint、工程检查、测试、构建。
+- 使用 ESLint flat config，覆盖 TypeScript、React Hooks、Electron 主进程和 Node 脚本。
+- 首批只启用能发现真实缺陷的规则；`any`、复杂度和风格规则先记录基线，不得靠全局 disable 掩盖。
+- 将现有 `lint` 脚本改为真正的 ESLint，`ts-check` 保持独立。
+- `validate` 暂按 `ts-check -> lint -> check:project -> build` 执行。
 
-退出标准：CI 和本地 Windows 环境使用同一命令通过；测试失败会返回非零退出码。
+退出标准：故意加入未处理的空分支、错误 Hook 依赖或无效 Promise 使用时，至少对应的高价值规则能失败；现有工程无需大范围业务改写即可通过。
 
-### G-203 纯逻辑回归测试
+### G-203 测试运行器基线
 
 **依赖**：G-202  
-**允许修改**：测试文件，以及为可测试性抽出的无副作用 helper  
-**禁止修改**：任务 UI、真实 Webview 自动化
+**允许修改**：测试配置、`package.json`、`pnpm-lock.yaml`、一个基础测试、`.github/workflows/ci.yml`
+**禁止修改**：业务行为、真实 Webview 自动化、纯逻辑抽取
+
+- 引入与当前 Vite/TypeScript 兼容的测试运行器并锁定版本。
+- 默认测试环境使用 Node；仅组件测试显式选择 DOM 环境。
+- 增加 `test` 和适合 CI 的单次运行命令，不启用默认 watch。
+- 将 `validate` 固定为 `ts-check -> lint -> check:project -> test -> build`。
+- 更新 CI 只调用 `pnpm run validate`，避免本地与 CI 门槛分叉。
+
+退出标准：一个通过和一个临时失败断言能分别产生零/非零退出码；Windows CI 与本地使用同一命令。
+
+### G-204 纯逻辑测试接缝
+
+**依赖**：G-203
+**允许修改**：被批准的无副作用 helper、原调用点、对应测试
+**禁止修改**：任务 UI、IPC 返回结构、DOM 注入、生成与下载行为
+
+- 每次只抽取一个纯逻辑域并保留原行为，禁止一次搬迁全部类型。
+- 建议顺序：版本比较、CSV 解析、错误分类、依赖状态、账号调度评分。
+- 主进程 helper 保留在 `main/` 边界，渲染进程 helper 保留在 `src/` 边界；共享类型迁移仍留给 G-301。
+- 时间相关逻辑通过显式 `now` 参数或可控时钟测试，不依赖真实当天时间。
+
+退出标准：原调用点只负责 IO/状态编排，纯函数可在不启动 Electron、React 或 Webview 时导入测试。
+
+### G-205 核心回归矩阵
+
+**依赖**：G-204
+**允许修改**：测试与必要 Fixture；新增业务改动必须另开任务
 
 首批覆盖：
 
@@ -229,7 +265,7 @@
 - 账号调度评分、额度耗尽和冷却状态。
 - JSON 备份读取与写入失败语义。
 
-退出标准：关键分支有断言；测试不依赖真实豆包账号和网络。
+退出标准：关键分支有断言；测试不依赖真实豆包账号、网络、系统日期或用户数据目录；覆盖率只作观测，不以追求数字为由编写低价值测试。
 
 ## Wave 3：平台化设计任务
 
