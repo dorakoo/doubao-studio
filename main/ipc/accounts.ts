@@ -160,10 +160,15 @@ export function registerAccountIPC(): void {
   // ---- 获取所有账号 ----
   ipcMain.handle('accounts:list', async (): Promise<Account[]> => {
     const accounts = loadAccounts();
+    // 规范化前快照，用于判断是否真正产生了字段补全或额度重置
+    const before = JSON.stringify(accounts);
     accounts.forEach(normalizeQuota);
     accounts.forEach(normalizeHealth);
     accounts.forEach(normalizeScheduling);
-    saveAccounts(accounts);
+    // 仅在规范化确实改变了数据时写盘，避免每次 list 都产生无意义磁盘 IO
+    if (JSON.stringify(accounts) !== before) {
+      saveAccounts(accounts);
+    }
     return accounts;
   });
 
@@ -172,16 +177,21 @@ export function registerAccountIPC(): void {
     'accounts:add',
     async (_event, params: { name: string }): Promise<{ success: boolean; account?: Account; error?: string }> => {
       try {
+        const trimmedName = params.name.trim();
+        if (!trimmedName) {
+          return { success: false, error: '账号名称不能为空' };
+        }
+
         const accounts = loadAccounts();
 
         // 检查同名账号
-        if (accounts.some((a) => a.name === params.name.trim())) {
-          return { success: false, error: `账号「${params.name}」已存在` };
+        if (accounts.some((a) => a.name === trimmedName)) {
+          return { success: false, error: `账号「${trimmedName}」已存在` };
         }
 
         const newAccount: Account = {
           id: uuidv4(),
-          name: params.name.trim(),
+          name: trimmedName,
           avatar: '', // 后续从豆包页面抓取
           partition: `account_${uuidv4().slice(0, 8)}`,
           status: 'idle',
@@ -209,7 +219,9 @@ export function registerAccountIPC(): void {
         getSessionForAccount(newAccount.id, newAccount.partition);
 
         accounts.push(newAccount);
-        saveAccounts(accounts);
+        if (!saveAccounts(accounts)) {
+          return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+        }
 
         return { success: true, account: newAccount };
       } catch (err: any) {
@@ -222,15 +234,27 @@ export function registerAccountIPC(): void {
   ipcMain.handle(
     'accounts:update',
     async (_event, params: { id: string; name: string }): Promise<{ success: boolean; error?: string }> => {
+      const trimmedName = params.name.trim();
+      if (!trimmedName) {
+        return { success: false, error: '账号名称不能为空' };
+      }
+
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
       if (!account) {
         return { success: false, error: '账号不存在' };
       }
 
-      account.name = params.name.trim();
+      // 排除自身后查重
+      if (accounts.some((a) => a.id !== params.id && a.name === trimmedName)) {
+        return { success: false, error: `账号「${trimmedName}」已存在` };
+      }
+
+      account.name = trimmedName;
       account.updatedAt = new Date().toISOString();
-      saveAccounts(accounts);
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+      }
 
       return { success: true };
     }
@@ -246,12 +270,21 @@ export function registerAccountIPC(): void {
         return { success: false, error: '账号不存在' };
       }
 
+      // 引用完整性：存在关联任务时拒绝删除，避免产生孤儿任务引用
+      const tasks = readJSON<Array<{ assignedAccountId?: string | null }>>('tasks.json', []);
+      const linkedTaskCount = tasks.filter((t) => t.assignedAccountId === params.id).length;
+      if (linkedTaskCount > 0) {
+        return { success: false, error: `仍有 ${linkedTaskCount} 个任务指派到此账号，请先迁移或删除这些任务` };
+      }
+
       const removed = accounts.splice(idx, 1)[0];
 
       // 清除该账号的 Session 数据
       await clearAccountSession(removed.partition);
 
-      saveAccounts(accounts);
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+      }
       return { success: true };
     }
   );
@@ -271,7 +304,9 @@ export function registerAccountIPC(): void {
       getSessionForAccount(account.id, account.partition);
       account.status = 'idle';
       account.updatedAt = new Date().toISOString();
-      saveAccounts(accounts);
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+      }
 
       return { success: true };
     }
@@ -286,7 +321,9 @@ export function registerAccountIPC(): void {
       if (account) {
         account.status = params.status;
         account.updatedAt = new Date().toISOString();
-        saveAccounts(accounts);
+        if (!saveAccounts(accounts)) {
+          return { success: false };
+        }
       }
       return { success: true };
     }
@@ -301,7 +338,9 @@ export function registerAccountIPC(): void {
       if (account) {
         account.pinned = params.pinned;
         account.updatedAt = new Date().toISOString();
-        saveAccounts(accounts);
+        if (!saveAccounts(accounts)) {
+          return { success: false };
+        }
       }
       return { success: true };
     }
@@ -315,7 +354,9 @@ export function registerAccountIPC(): void {
     account.scheduling = { ...account.scheduling!, ...params.updates };
     normalizeScheduling(account);
     account.updatedAt = new Date().toISOString();
-    saveAccounts(accounts);
+    if (!saveAccounts(accounts)) {
+      return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+    }
     return { success: true, account };
   });
 
@@ -325,7 +366,7 @@ export function registerAccountIPC(): void {
       id: string;
       action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear';
       errorCode?: string;
-    }): Promise<{ success: boolean; account?: Account }> => {
+    }): Promise<{ success: boolean; account?: Account; error?: string }> => {
       const accounts = loadAccounts();
       const account = accounts.find((item) => item.id === params.id);
       if (!account) return { success: false };
@@ -363,7 +404,9 @@ export function registerAccountIPC(): void {
         };
       }
       account.updatedAt = now.toISOString();
-      saveAccounts(accounts);
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+      }
       return { success: true, account };
     }
   );
@@ -371,7 +414,7 @@ export function registerAccountIPC(): void {
   // ---- 更新 Seedance 每日额度预测 ----
   ipcMain.handle(
     'accounts:updateSeedanceQuota',
-    async (_event, params: { id: string; action: 'consume' | 'exhausted'; units?: number }): Promise<{ success: boolean; account?: Account }> => {
+    async (_event, params: { id: string; action: 'consume' | 'exhausted'; units?: number }): Promise<{ success: boolean; account?: Account; error?: string }> => {
       const accounts = loadAccounts();
       const account = accounts.find((item) => item.id === params.id);
       if (!account) return { success: false };
@@ -386,7 +429,9 @@ export function registerAccountIPC(): void {
       }
       quota.updatedAt = new Date().toISOString();
       account.updatedAt = quota.updatedAt;
-      saveAccounts(accounts);
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
+      }
       return { success: true, account };
     }
   );
