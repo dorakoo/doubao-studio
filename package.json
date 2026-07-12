@@ -19,7 +19,7 @@
     "dist:win": "pnpm run build && electron-builder --win",
     "lint": "eslint . --max-warnings 149",
     "ts-check": "pnpm run build:contracts && tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.test.json",
-    "check:project": "node scripts/fixtures/run-fixture-tests.mjs && node scripts/check-project.mjs && node scripts/check-contracts-boundary.mjs",
+    "check:project": "node scripts/fixtures/run-fixture-tests.mjs && node scripts/fixtures/run-contracts-fixtures.mjs && node scripts/check-project.mjs && node scripts/check-contracts-boundary.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
