@@ -25,6 +25,7 @@
 | G-204 | `4615295` | `4615295` | 已审查，循环依赖和 CSV 非法输入已收口 |
 | G-205 | `49f59f2` | `49f59f2` | 已审查，92 条测试通过 |
 | Wave 2 审查 | — | `0ce4645` | Codex 质量门加固 |
+| G-301 | `d19bb99` | `8ec9b07` | 已审查，修正为私有纯类型 contracts 包方案 |
 
 ## 协作职责
 
@@ -308,7 +309,7 @@
 | `src/components/BrowserPanel.tsx` | Codex | GLM 仅执行定时器清理，不改自动化行为 |
 | `src/utils/doubaoBridge.ts` | Codex | 涉及真实页面行为，禁止并行修改 |
 | `scripts/`、Lint、测试配置 | GLM | 不得降低现有校验强度 |
-| `shared/`、`core/`、外部 API | 先设计后定所有者 | 契约评审通过后实施 |
+| `packages/contracts/`、`core/`、外部 API | 先设计后定所有者 | 契约评审通过后实施 |
 
 ## GLM 单任务指令模板
 
