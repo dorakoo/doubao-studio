@@ -29,6 +29,7 @@
 | G-304 | `9b1c28f` | `9b1c28f` | 已审查，视频原始产物多策略解析与下载校验已集成，221 条测试通过 |
 | G-302 | `5762ad4` + `29abb25` + `9a79bba` | `9a79bba` | 已审查，Capability API Schema v1 与 requestId 恢复查询语义已集成，273 条测试通过 |
 | G-303 | `80c3a37` + `ee44c7a` + `cd42dc1` + `de1969a` | `de1969a` | 已审查，CLI/MCP 映射、事件响应包络 Schema 与跨平台 Token 安全设计已集成，281 条测试通过 |
+| G-401 | `963213d` + `f299808` + `d1dbd89` | `f58deaf` | 已审查，纯类型 contracts workspace、AST 边界检查与 C003 fixture 自测已集成，291 条测试通过 |
 
 ## 协作职责
 
