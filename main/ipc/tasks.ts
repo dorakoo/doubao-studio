@@ -6,6 +6,7 @@
 
 import { ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
+import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 
@@ -867,8 +868,14 @@ export function registerTaskIPC(): void {
                 },
                 signal: controller.signal,
               }).finally(() => clearTimeout(timeout));
-              if (!response.ok) {
-                const failure = `HTTP ${response.status}`;
+
+              const buffer = Buffer.from(await response.arrayBuffer());
+              const contentType = response.headers.get('content-type') || '';
+
+              // 统一验证：HTTP 状态、非空文件、视频 content-type
+              const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
+              if (!validation.valid) {
+                const failure = validation.message || '下载验证失败';
                 failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
                 job.status = 'failed';
                 job.error = failure;
@@ -877,16 +884,6 @@ export function registerTaskIPC(): void {
                 continue;
               }
 
-              const buffer = Buffer.from(await response.arrayBuffer());
-              if (buffer.length === 0) {
-                failures.push(`${task.taskId.slice(0, 8)}: 文件为空`);
-                job.status = 'failed';
-                job.error = '文件为空';
-                job.updatedAt = new Date().toISOString();
-                saveDownloadJobs(jobs);
-                continue;
-              }
-              const contentType = response.headers.get('content-type') || '';
               let ext = path.extname(parsedUrl.pathname).toLowerCase();
               if (!ext || ext.length > 6) {
                 if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
@@ -911,13 +908,13 @@ export function registerTaskIPC(): void {
                   if (entry.endsWith(`.${job.id}.part`)) fs.unlinkSync(path.join(saveDir, entry));
                 }
               } catch {}
-              const failure = e.name === 'AbortError' ? '下载超时' : e.message;
-              failures.push(`${task.taskId.slice(0, 8)}: ${failure}`);
+              const classified = classifyDownloadException(e);
+              failures.push(`${task.taskId.slice(0, 8)}: ${classified.message}`);
               job.status = 'failed';
-              job.error = failure;
+              job.error = classified.message;
               job.updatedAt = new Date().toISOString();
               saveDownloadJobs(jobs);
-              console.warn(`[tasks:downloadOutputs] 下载产物失败:`, e.message);
+              console.warn(`[tasks:downloadOutputs] 下载产物失败 (${classified.type}):`, e.message);
             }
           }
         }

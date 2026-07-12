@@ -37,7 +37,32 @@ import {
   getVideoPlayUrl,
   startNewConversation,
   detectRobotVerification,
+  resolveVideoArtifact,
+  manualResolveVideoArtifact,
 } from '../utils/doubaoBridge';
+import type { VideoArtifactResolution } from '../utils/videoArtifactResolver';
+
+/** 将解析结果转换为用户可读的消息 */
+const formatResolutionMessage = (result: VideoArtifactResolution): string => {
+  const sourceLabels: Record<string, string> = {
+    platform_download_info: '创作空间下载信息',
+    play_info: '播放信息接口',
+    captured_response: '已拦截响应',
+    conversation_scan: '对话页面扫描',
+    page_fallback: '页面回退地址',
+  };
+  const statusLabels: Record<string, string> = {
+    resolved: '已获取',
+    unavailable: '不可用',
+    expired: '已过期',
+    unauthorized: '无权限或登录失效',
+    retryable_error: '可重试错误',
+    needs_manual_selection: '需要人工选择',
+  };
+  const sourceLabel = result.source ? sourceLabels[result.source] || result.source : '';
+  const statusLabel = statusLabels[result.status] || result.status;
+  return `${statusLabel}${sourceLabel ? `（来源：${sourceLabel}）` : ''}${result.reason ? `：${result.reason}` : ''}`;
+};
 
 interface BrowserPanelProps {
   accounts: Account[];
@@ -99,30 +124,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     return result;
   };
 
-  const extractVideoOutputs = async (webview: HTMLWebViewElement): Promise<string[]> => {
-    const cached = await getCachedVideoUrl(webview);
-    if (cached) {
-      // 先用 vid 重新请求播放信息，优先拿豆包明确返回的原始媒体地址。
-      const playUrl = await getVideoPlayUrl(webview, cached.vid);
-      if (playUrl) {
-        const playUrls = normalizeVideoUrls([playUrl]);
-        if (playUrls.length > 0) return playUrls;
-      }
-      if (cached.videoUrl) {
-        const cachedUrls = normalizeVideoUrls([cached.videoUrl]);
-        if (cachedUrls.length > 0) return cachedUrls;
-      }
+  const extractVideoOutputs = async (webview: HTMLWebViewElement, conversationUrl?: string, signal?: AbortSignal): Promise<string[]> => {
+    // 使用结构化解析器，优先获取平台明确返回的原始媒体地址
+    const result = await resolveVideoArtifact(webview, {
+      conversationUrl: conversationUrl || webview.getURL(),
+      timeoutMs: 12000,
+      signal,
+    });
+    if (result.status === 'resolved' && result.url) {
+      console.log(`[extractVideoOutputs] 解析成功，来源: ${result.source}, vid: ${result.vid || 'N/A'}`);
+      return normalizeVideoUrls([result.url]);
     }
-
-    const rawResult = await getResultUrl(webview);
-    let urls: string[] = [];
-    try {
-      const parsed = JSON.parse(rawResult);
-      urls = Array.isArray(parsed) ? parsed : [];
-    } catch {
-      urls = rawResult ? [rawResult] : [];
-    }
-    return normalizeVideoUrls(urls);
+    console.warn(`[extractVideoOutputs] 解析失败: ${result.status} - ${result.reason}`);
+    return [];
   };
 
   const activeAutoState: AutomationState | undefined = activeAccount
@@ -390,16 +404,26 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await waitForWebviewReady(webview, 20_000);
           await new Promise((resolve) => setTimeout(resolve, 1_500));
         }
-        const outputs = await extractVideoOutputs(webview);
-        if (outputs.length === 0) {
-          message.warning('暂未提取到视频下载地址，请稍后再试');
-          useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
-          return;
+        // 使用手动提取（有限重试 + 15s 超时）
+        const result = await manualResolveVideoArtifact(webview, {
+          conversationUrl: task.runtime?.conversationUrl,
+          runId: task.runtime?.runId,
+          timeoutMs: 15000,
+          isManual: true,
+        });
+        if (result.status === 'resolved' && result.url) {
+          const outputs = normalizeVideoUrls([result.url]);
+          if (outputs.length > 0) {
+            await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
+            useTaskStore.getState().setAccountAutomationState(accountId, 'completed', `视频地址已提取（来源：${result.source}）`);
+            message.success(`已为该任务绑定视频地址（来源：${result.source}）`);
+            return;
+          }
         }
-
-        await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
-        useTaskStore.getState().setAccountAutomationState(accountId, 'completed', '视频地址已提取');
-        message.success(`已为该任务绑定 ${outputs.length} 个视频地址`);
+        // 解析失败，显示结构化原因
+        const failMsg = formatResolutionMessage(result);
+        message.warning(`暂未提取到视频地址：${failMsg}`);
+        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
       } catch (err: any) {
         message.error(`提取失败：${err.message || err}`);
         useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
@@ -494,12 +518,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
     try {
       console.log(`[Automation:${accountId}] 开始`);
+      let taskConversationUrl: string | undefined;
       for (let submissionAttempt = 0; submissionAttempt < 3; submissionAttempt++) {
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
       const newConversationReady = await startNewConversation(webview);
       if (!newConversationReady) throw new Error('创建新对话失败');
       await waitForWebviewReady(webview, 15000);
-      await updateTaskRuntime(taskId, { runtime: { conversationUrl: webview.getURL() } });
+      taskConversationUrl = webview.getURL();
+      await updateTaskRuntime(taskId, { runtime: { conversationUrl: taskConversationUrl } });
       // 根据任务模式切换到对应页面
       if (mode && mode !== 'chat') {
         const modeLabel = mode === 'image' ? '图片' : mode === 'video' ? '视频' : mode === 'music' ? '音乐' : mode;
@@ -685,7 +711,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           }
         }
         if (mode === 'video') {
-          imageUrls = await extractVideoOutputs(webview);
+          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal);
           if (imageUrls.length > 0) {
             generating = false;
             break;
@@ -713,7 +739,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         while (imageUrls.length === 0 && Date.now() - startWait < maxVideoWaitMs) {
           pollCount++;
 
-          imageUrls = await extractVideoOutputs(webview);
+          imageUrls = await extractVideoOutputs(webview, taskConversationUrl, controller.signal);
           if (imageUrls.length > 0) {
             console.log(`[Automation:${accountId}] 获取视频地址成功: ${imageUrls.length} 个`);
             break;
