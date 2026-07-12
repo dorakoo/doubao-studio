@@ -7,11 +7,11 @@
 import { ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
+import type { AccountStatus, GenerationMode } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-/** 账号状态 */
-export type AccountStatus = 'idle' | 'busy' | 'error';
+// AccountStatus 和 GenerationMode 已迁移至 @doubao-studio/contracts。
 
 /** 账号数据结构 */
 export interface Account {
@@ -63,7 +63,7 @@ function localDateKey(): string {
   return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
-type GenerationMode = 'chat' | 'image' | 'video' | 'music';
+// GenerationMode 已迁移至 @doubao-studio/contracts
 
 function normalizeQuota(account: Account): void {
   const today = localDateKey();

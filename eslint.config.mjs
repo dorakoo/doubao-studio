@@ -29,6 +29,8 @@ export default tseslint.config(
       'data/**',
       // 根级 doubaoBridge.ts 是历史游离文件，不在任何 tsconfig include 中
       'doubaoBridge.ts',
+      // contracts 边界检查 fixture 文件包含故意违规的 import，不参与 lint
+      'scripts/fixtures/contracts-violations.ts',
     ],
   },
 

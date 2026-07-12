@@ -9,36 +9,19 @@ import { readJSON, writeJSON } from '../utils/store';
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
+import type {
+  GenerationMode,
+  VideoModel,
+  VideoDuration,
+  VideoAspectRatio,
+  TaskStatus,
+  TaskStage,
+  DependencyPolicy,
+} from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-/** 生成模式 */
-export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
-
-/** 视频生成模型 */
-export type VideoModel = 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
-
-/** 视频时长 */
-export type VideoDuration = '5s' | '10s' | '15s';
-
-/** 视频比例 */
-export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
-
-export type TaskStatus =
-  | 'queued'
-  | 'executing'
-  | 'generating'
-  | 'waiting_verification'
-  | 'paused'
-  | 'done'
-  | 'fail'
-  | 'cancelled';
-
-export type TaskStage =
-  | 'queued' | 'preparing_account' | 'new_conversation' | 'switching_mode'
-  | 'configuring' | 'uploading_assets' | 'injecting_prompt' | 'submitting'
-  | 'waiting_verification' | 'generating' | 'extracting_outputs'
-  | 'completed' | 'paused' | 'failed' | 'cancelled';
+// 枚举/联合类型已迁移至 @doubao-studio/contracts，此处仅保留接口定义。
 
 export interface TaskErrorInfo {
   code: string;
@@ -150,7 +133,7 @@ export interface Task {
   batchId?: string;
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
-  dependencyPolicy?: 'all_done' | 'all_finished';
+  dependencyPolicy?: DependencyPolicy;
   projectId?: string;
   createdAt: string;
   updatedAt: string;

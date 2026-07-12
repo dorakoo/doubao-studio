@@ -27,6 +27,9 @@ importers:
         specifier: ^5.0.0
         version: 5.0.14(@types/react@18.3.31)(react@18.3.1)
     devDependencies:
+      '@doubao-studio/contracts':
+        specifier: workspace:*
+        version: link:packages/contracts
       '@eslint/js':
         specifier: ^9.39.4
         version: 9.39.4
@@ -90,6 +93,8 @@ importers:
       wait-on:
         specifier: ^8.0.1
         version: 8.0.5
+
+  packages/contracts: {}
 
 packages:
 
@@ -818,9 +823,6 @@ packages:
 
   '@types/node@26.0.0':
     resolution: {integrity: sha512-vf2YFi1iY9lHGwNJMs01biZFbKJkrZR1T6/MlzjhJLPdntOHLhTrDSnSVcdtvjihi4VQNlrFRIxLsDBlQpAipA==}
-
-  '@types/node@26.1.0':
-    resolution: {integrity: sha512-O0A1G3xPGy4w7AgQdAQYUlQ+BKk2Oovw8eRpofyp5KdBZULnbe+WqaOVNrm705SHphCiG4XHsACrSmPu1f+Kgw==}
 
   '@types/plist@3.0.5':
     resolution: {integrity: sha512-E6OCaRmAe4WDmWNsL/9RMqdkkzDCY1etutkflWk4c+AcjDU07Pcz1fQwTX0TQz+Pxqn9i4L1TU3UFpjnrcDgxA==}
@@ -3901,7 +3903,7 @@ snapshots:
 
   '@types/fs-extra@9.0.13':
     dependencies:
-      '@types/node': 26.1.0
+      '@types/node': 26.0.0
 
   '@types/http-cache-semantics@4.2.0': {}
 
@@ -3921,13 +3923,9 @@ snapshots:
     dependencies:
       undici-types: 8.3.0
 
-  '@types/node@26.1.0':
-    dependencies:
-      undici-types: 8.3.0
-
   '@types/plist@3.0.5':
     dependencies:
-      '@types/node': 26.1.0
+      '@types/node': 26.0.0
       xmlbuilder: 15.1.1
     optional: true
 

@@ -3,7 +3,13 @@
  * CSV 解析纯函数 — 不依赖 Electron/Node 运行时
  */
 
-export type CsvGenerationMode = 'chat' | 'image' | 'video' | 'music';
+import type { GenerationMode } from '@doubao-studio/contracts';
+
+/**
+ * @deprecated 使用 GenerationMode 代替。保留仅为向后兼容，
+ * 将在 G-301 批次 6 中删除。
+ */
+export type CsvGenerationMode = GenerationMode;
 
 /**
  * 解析 CSV 文本为二维数组。
@@ -47,7 +53,7 @@ export function parseCsv(text: string): string[][] {
  * 将 CSV 中的模式字段值标准化为 GenerationMode。
  * 支持 image/图片、video/视频、music/音乐，其余归为 chat。
  */
-export function normalizeCsvMode(value: string): CsvGenerationMode {
+export function normalizeCsvMode(value: string): GenerationMode {
   const normalized = value.trim().toLowerCase();
   if (['image', '图片'].includes(normalized)) return 'image';
   if (['video', '视频'].includes(normalized)) return 'video';
