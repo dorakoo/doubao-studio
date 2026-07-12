@@ -42,6 +42,7 @@ describe('classifyTaskError', () => {
   it('匹配 face_restricted', () => {
     const result = classifyTaskError('检测到真人脸，肖像保护', FIXED_TIME);
     expect(result.code).toBe('face_restricted');
+    expect(result.recoverable).toBe(false);
   });
 
   it('匹配 content_rejected', () => {

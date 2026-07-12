@@ -9,7 +9,8 @@ const ERROR_RULES: Array<{ code: TaskErrorCode; recoverable: boolean; pattern: R
   { code: 'cancelled', recoverable: true, pattern: /取消|中止|abort/i },
   { code: 'quota_exhausted', recoverable: false, pattern: /免费次数.*用完|次数已用完|次数不足|余额不足|权益不足/ },
   { code: 'membership_required', recoverable: true, pattern: /会员专享|仅限会员|开通会员|升级会员/ },
-  { code: 'face_restricted', recoverable: true, pattern: /真人脸|人脸素材|肖像保护|人物面部/ },
+  // 同一批真人脸素材再次提交通常仍会被平台拦截，需修改素材或提示词后再重新运行。
+  { code: 'face_restricted', recoverable: false, pattern: /真人脸|人脸素材|肖像保护|人物面部/ },
   { code: 'content_rejected', recoverable: true, pattern: /内容未通过|审核未通过|违规|无法生成/ },
   { code: 'verification', recoverable: true, pattern: /机器人验证|安全验证|验证码|滑块/ },
   { code: 'output_missing', recoverable: true, pattern: /产物.*超时|下载地址|可下载地址|产物尚未/ },

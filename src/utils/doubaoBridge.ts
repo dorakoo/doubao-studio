@@ -2705,6 +2705,7 @@ export async function configureVideoOptions(
     label: string
   ): Promise<boolean> => {
     const canNativeClick = typeof webview.sendInputEvent === 'function';
+    const requireExactText = label === '视频时长' || label === '视频比例';
     const nativeClick = async (clickPos?: string): Promise<boolean> => {
       if (!canNativeClick || !clickPos) return false;
       const parts = clickPos.split(',').map((n) => Number(n));
@@ -2731,19 +2732,27 @@ export async function configureVideoOptions(
           var viewportH = window.innerHeight;
           var candidates = [];
 
-          var allClickable = document.querySelectorAll('button, [role="button"], div, span');
+          // 视频配置控件位于编辑器底部，优先只接受真实按钮，避免把聊天正文中
+          // 包含“比”“s”等字符的文本误判为下拉触发器。
+          var allClickable = document.querySelectorAll('button, [role="button"]');
           for (var i = 0; i < allClickable.length; i++) {
             var el = allClickable[i];
             if (el.offsetParent === null) continue;
             var rect = el.getBoundingClientRect();
             if (rect.width < 20 || rect.height < 20) continue;
-            if (rect.top < viewportH * 0.5) continue;
+            if (rect.top < viewportH * 0.55 || rect.left < window.innerWidth * 0.2) continue;
             var text = (el.innerText || '').trim();
             if (!text || text.length > 30) continue;
 
             var matched = false;
             for (var t = 0; t < triggerTexts.length; t++) {
-              if (text.indexOf(triggerTexts[t]) >= 0) { matched = true; break; }
+              var trigger = triggerTexts[t];
+              if (${JSON.stringify(requireExactText)}
+                ? text.replace(/\\s+/g, '') === trigger.replace(/\\s+/g, '')
+                : text.indexOf(trigger) >= 0) {
+                matched = true;
+                break;
+              }
             }
             if (!matched) continue;
 
@@ -2752,7 +2761,10 @@ export async function configureVideoOptions(
 
             var bottomScore = rect.top > viewportH * 0.7 ? 100 : 0;
             var sizeScore = rect.width * rect.height < 10000 ? 50 : 0;
-            candidates.push({ el: el, text: text, score: bottomScore + sizeScore, rect: rect });
+            var exactScore = triggerTexts.some(function(trigger) {
+              return text.replace(/\\s+/g, '') === trigger.replace(/\\s+/g, '');
+            }) ? 300 : 0;
+            candidates.push({ el: el, text: text, score: 1000 + exactScore + bottomScore + sizeScore, rect: rect });
           }
 
           if (candidates.length === 0) return { ok: false, error: '未找到触发按钮' };
@@ -2843,6 +2855,7 @@ export async function configureVideoOptions(
       (function() {
         try {
           var optionTexts = ${JSON.stringify(optionTexts)};
+          var requireExactText = ${JSON.stringify(requireExactText)};
           var snapBefore = ${JSON.stringify(snapshotBefore)};
           var useNativeClick = ${JSON.stringify(canNativeClick)};
           var snapMap = {};
@@ -2858,6 +2871,13 @@ export async function configureVideoOptions(
           function textMatch(text) {
             var t = (text || '').trim();
             if (!t) return false;
+            if (requireExactText) {
+              var normalized = t.replace(/\\s+/g, '');
+              for (var exactIndex = 0; exactIndex < optionTexts.length; exactIndex++) {
+                if (normalized === optionTexts[exactIndex].replace(/\\s+/g, '')) return true;
+              }
+              return false;
+            }
             var tl = t.toLowerCase();
             for (var m = 0; m < optionTexts.length; m++) {
               if (t === optionTexts[m] || tl === optLow[m]) return true;
@@ -3119,7 +3139,9 @@ export async function configureVideoOptions(
   // 1. 选择模型
   console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
   const modelTriggers = ['模型', 'Mini', 'Fast', '2.0'];
-  await selectDropdownOption(modelTriggers, modelTexts, '视频模型');
+  if (!await selectDropdownOption(modelTriggers, modelTexts, '视频模型')) {
+    throw new Error(`视频模型配置失败: ${config.model}`);
+  }
   await sleep(400);
 
   // 2. 选择时长
@@ -3128,15 +3150,18 @@ export async function configureVideoOptions(
     console.log(`[doubaoBridge] 配置视频时长: 15s（通过请求拦截实现，UI 跳过）`);
   } else {
     console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-    const durationTriggers = ['秒', 's', '时长'];
-    await selectDropdownOption(durationTriggers, durationTexts, '视频时长');
+    const durationTriggers = ['5s', '10s', '时长'];
+    if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
+      throw new Error(`视频时长配置失败: ${config.duration}`);
+    }
   }
   await sleep(300);
 
   // 3. 选择比例
   console.log(`[doubaoBridge] 配置视频比例: ${config.aspectRatio}`);
-  const ratioTriggers = ['比例', '比'];
-  await selectDropdownOption(ratioTriggers, [config.aspectRatio], '视频比例');
+  if (!await selectDropdownOption(['比例'], [config.aspectRatio], '视频比例')) {
+    throw new Error(`视频比例配置失败: ${config.aspectRatio}`);
+  }
   await sleep(400);
 
   // 最后确保在视频模式且配置栏正常
