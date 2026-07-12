@@ -21,6 +21,7 @@ const EXPECTED_FILES = [
   'create-task-request.schema.json',
   'task-snapshot.schema.json',
   'task-event.schema.json',
+  'task-events-response.schema.json',
   'artifact-descriptor.schema.json',
   'api-error.schema.json',
 ] as const;
@@ -107,7 +108,7 @@ describe('Capability API Schema v1 — 结构自检', () => {
 
   // ---- 1. 所有预期文件存在且可解析 ----
 
-  it('schemas/capability/v1/ 目录下存在 6 份 Schema 文件', () => {
+  it('schemas/capability/v1/ 目录下存在 7 份 Schema 文件', () => {
     const actualFiles = readdirSync(SCHEMA_DIR).filter((f) => f.endsWith('.json'));
     for (const expected of EXPECTED_FILES) {
       expect(actualFiles).toContain(expected);
@@ -465,5 +466,50 @@ describe('Capability API Schema v1 — 结构自检', () => {
     ) as Record<string, unknown> | undefined;
     expect(videoExample).toBeDefined();
     expect(videoExample!.videoConfig).toBeDefined();
+  });
+
+  // ---- 16. TaskEventsResponse 事件响应包络 ----
+
+  it('TaskEventsResponse 包含 serviceInstanceId 和 events 字段', () => {
+    const resp = schemas['task-events-response.schema.json'] as Record<string, unknown>;
+    const props = resp.properties as Record<string, unknown>;
+    expect(props.serviceInstanceId).toBeDefined();
+    expect(props.events).toBeDefined();
+    expect(resp.required).toContain('serviceInstanceId');
+    expect(resp.required).toContain('events');
+  });
+
+  it('TaskEventsResponse.events 引用 task-event.schema.json', () => {
+    const resp = schemas['task-events-response.schema.json'] as Record<string, unknown>;
+    const props = resp.properties as Record<string, unknown>;
+    const events = props.events as Record<string, unknown>;
+    const items = events.items as Record<string, unknown>;
+    expect(items.$ref).toBe('task-event.schema.json');
+  });
+
+  it('TaskEventsResponse 不包含 TaskEvent 内部字段（sequence/eventId 等）', () => {
+    const resp = schemas['task-events-response.schema.json'] as Record<string, unknown>;
+    const props = resp.properties as Record<string, unknown>;
+    // 包络只应有 serviceInstanceId 和 events
+    const forbiddenKeys = ['sequence', 'eventId', 'taskId', 'eventType', 'payload'];
+    for (const key of forbiddenKeys) {
+      expect(props[key]).toBeUndefined();
+    }
+  });
+
+  it('TaskEventsResponse examples 包含空事件和非空事件两种情况', () => {
+    const resp = schemas['task-events-response.schema.json'] as Record<string, unknown>;
+    const examples = resp.examples as unknown[];
+    expect(examples.length).toBeGreaterThanOrEqual(2);
+    const hasEmpty = examples.some(
+      (e) => Array.isArray((e as Record<string, unknown>).events) &&
+        ((e as Record<string, unknown>).events as unknown[]).length === 0,
+    );
+    const hasNonEmpty = examples.some(
+      (e) => Array.isArray((e as Record<string, unknown>).events) &&
+        ((e as Record<string, unknown>).events as unknown[]).length > 0,
+    );
+    expect(hasEmpty).toBe(true);
+    expect(hasNonEmpty).toBe(true);
   });
 });

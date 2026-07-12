@@ -39,7 +39,7 @@
 | `doubao-studio tasks get <taskId>` | `GET /tasks/{taskId}` | → `TaskSnapshot` | 查询任务快照 |
 | `doubao-studio tasks lookup --request-id <id>` | `GET /tasks:lookup?requestId={requestId}` | → `{ found: boolean, taskId?, snapshot? }` | 按 requestId 查询任务 |
 | `doubao-studio tasks cancel <taskId>` | `POST /tasks/{taskId}:cancel` | → `TaskSnapshot` | 取消任务 |
-| `doubao-studio tasks events` | `GET /tasks/events?since={n}` | → `TaskEvent[]` | 拉取事件流 |
+| `doubao-studio tasks events` | `GET /tasks/events?since={n}` | → `TaskEventsResponse` | 拉取事件流 |
 | `doubao-studio artifacts list --task-id <id>` | `GET /tasks/{taskId}/artifacts` | → `ArtifactDescriptor[]` | 列出任务产物 |
 | `doubao-studio artifacts get <artifactId>` | `GET /artifacts/{artifactId}` | → `ArtifactDescriptor` | 获取产物描述符 |
 
@@ -269,7 +269,7 @@ doubao-studio tasks events [--since <sequence>] [--task-id <taskId>] [--follow] 
 | `--follow` | 持续轮询模式，有新事件时输出 |
 | `--timeout <ms>` | 单次轮询超时（毫秒），超时返回空列表 |
 
-**输出**：事件响应包络
+**输出**：`TaskEventsResponse`（事件响应包络，Schema：[`task-events-response.schema.json`](../../schemas/capability/v1/task-events-response.schema.json)）
 
 ```json
 {
@@ -562,7 +562,7 @@ doubao-studio artifacts get <artifactId> [--format json|table]
 }
 ```
 
-**输出**：事件响应包络（含 `serviceInstanceId` 和 `events`，见 [§2.7](#27-tasks-events)）
+**输出**：`TaskEventsResponse`（含 `serviceInstanceId` 和 `events`，见 [§2.7](#27-tasks-events)）
 
 **去重语义**：见 [§2.7](#27-tasks-events)
 

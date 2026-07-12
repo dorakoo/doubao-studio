@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/task-events-response.schema.json",
+  "title": "TaskEventsResponse",
+  "description": "事件查询响应包络。包含当前服务实例标识 serviceInstanceId 和事件列表。客户端通过比较 serviceInstanceId 检测服务重启：重启后该值改变，客户端应从 sequence=0 重新同步并通过 eventId 去重。",
+  "type": "object",
+  "required": ["serviceInstanceId", "events"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "serviceInstanceId": "inst_550e8400-e29b-41d4-a716-446655440000",
+      "events": [
+        {
+          "sequence": 42,
+          "eventId": "evt_550e8400-e29b-41d4-a716-446655440000",
+          "taskId": "task_abc123",
+          "timestamp": "2025-07-12T10:30:00.000Z",
+          "eventType": "task.stage_changed",
+          "payload": {
+            "stage": "generating",
+            "percent": 50
+          }
+        }
+      ]
+    },
+    {
+      "serviceInstanceId": "inst_550e8400-e29b-41d4-a716-446655440000",
+      "events": []
+    }
+  ],
+  "properties": {
+    "serviceInstanceId": {
+      "type": "string",
+      "description": "当前服务实例标识。服务进程启动时生成（建议 UUID v4），进程生命周期内不变。服务重启后此值改变，客户端据此检测重启并从 sequence=0 重新同步。",
+      "minLength": 1,
+      "examples": ["inst_550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "events": {
+      "type": "array",
+      "description": "事件列表，按 sequence 升序排列。无新事件时为空数组。空数组不等于服务重启——只有 serviceInstanceId 变化才表示重启。",
+      "items": {
+        "$ref": "task-event.schema.json"
+      },
+      "examples": [
+        [
+          {
+            "sequence": 42,
+            "eventId": "evt_550e8400-e29b-41d4-a716-446655440000",
+            "taskId": "task_abc123",
+            "timestamp": "2025-07-12T10:30:00.000Z",
+            "eventType": "task.stage_changed",
+            "payload": {
+              "stage": "generating",
+              "percent": 50
+            }
+          }
+        ],
+        []
+      ]
+    }
+  }
+}
