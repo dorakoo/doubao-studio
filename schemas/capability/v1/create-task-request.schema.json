@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/create-task-request.schema.json",
+  "title": "CreateTaskRequest",
+  "description": "创建任务的异步请求。成功只返回已接收的任务快照或任务 ID，绝不等待生成完成。客户端通过 requestId 实现幂等：相同 requestId 在保留期内重复提交时返回同一任务。",
+  "type": "object",
+  "required": ["requestId", "mode", "prompt"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "requestId": "550e8400-e29b-41d4-a716-446655440000",
+      "mode": "video",
+      "prompt": "一只猫在月光下奔跑，电影质感",
+      "videoConfig": {
+        "model": "seedance-2.0",
+        "duration": "15s",
+        "aspectRatio": "16:9"
+      },
+      "inputAssetIds": ["asset_abc123"],
+      "projectId": "proj_001",
+      "priority": "normal",
+      "dependsOnTaskIds": ["task_prev_001"],
+      "dependencyPolicy": "all_done"
+    }
+  ],
+  "properties": {
+    "requestId": {
+      "type": "string",
+      "description": "客户端生成的幂等键。建议使用 UUID v4。同一 requestId 在保留期（默认 24 小时）内重复提交时，服务端返回原始任务而不创建新任务。",
+      "minLength": 1,
+      "maxLength": 128,
+      "examples": ["550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "mode": {
+      "type": "string",
+      "description": "生成模式。客户端必须处理未知值。",
+      "enum": ["chat", "image", "video", "music"],
+      "examples": ["video"]
+    },
+    "prompt": {
+      "type": "string",
+      "description": "生成提示词。",
+      "minLength": 1,
+      "maxLength": 10000,
+      "examples": ["一只猫在月光下奔跑，电影质感"]
+    },
+    "videoConfig": {
+      "$ref": "#/$defs/VideoConfig",
+      "description": "视频生成参数。仅在 mode 为 'video' 时有效。"
+    },
+    "inputAssetIds": {
+      "type": "array",
+      "description": "输入资产的不透明 ID 列表（如参考图片、参考音频）。资产通过受控上传 API 获取 ID，客户端不得直接传递本地文件路径或 URL。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "maxItems": 20,
+      "uniqueItems": true,
+      "examples": [["asset_abc123", "asset_def456"]]
+    },
+    "projectId": {
+      "type": "string",
+      "description": "可选的项目 ID，用于将任务归属到特定项目。",
+      "examples": ["proj_001"]
+    },
+    "priority": {
+      "type": "string",
+      "description": "任务优先级。低优先级任务在高优先级任务之后调度。",
+      "enum": ["low", "normal", "high"],
+      "default": "normal",
+      "examples": ["normal"]
+    },
+    "dependsOnTaskIds": {
+      "type": "array",
+      "description": "依赖的前置任务 ID 列表。前置任务完成后再执行本任务。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "examples": [["task_abc123"]]
+    },
+    "dependencyPolicy": {
+      "type": "string",
+      "description": "依赖完成策略。all_done 表示前置任务全部成功完成；all_finished 表示前置任务只要结束（含失败/取消）即可继续。",
+      "enum": ["all_done", "all_finished"],
+      "default": "all_done",
+      "examples": ["all_done"]
+    }
+  },
+  "$defs": {
+    "VideoConfig": {
+      "type": "object",
+      "description": "视频生成配置。",
+      "required": ["model", "duration", "aspectRatio"],
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "视频模型 ID。客户端必须处理未知值。",
+          "enum": ["seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"],
+          "examples": ["seedance-2.0"]
+        },
+        "duration": {
+          "type": "string",
+          "enum": ["5s", "10s", "15s"],
+          "examples": ["15s"]
+        },
+        "aspectRatio": {
+          "type": "string",
+          "enum": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"],
+          "examples": ["16:9"]
+        }
+      }
+    }
+  }
+}

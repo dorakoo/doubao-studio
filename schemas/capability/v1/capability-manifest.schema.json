@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/capability-manifest.schema.json",
+  "title": "CapabilityManifest",
+  "description": "服务能力清单。声明当前实例支持的生成模式、模型、参数范围、并发限制和可选能力。客户端应在首次连接时获取并缓存此清单。",
+  "type": "object",
+  "required": [
+    "protocolVersion",
+    "serviceVersion",
+    "supportedModes",
+    "models",
+    "concurrencyLimit",
+    "actionTypes",
+    "health"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "protocolVersion": "1.0.0",
+      "serviceVersion": "2.1.0",
+      "supportedModes": ["chat", "image", "video", "music"],
+      "models": [
+        {
+          "modelId": "seedance-2.0",
+          "label": "Seedance 2.0",
+          "supportedDurations": ["5s", "10s", "15s"],
+          "supportedAspectRatios": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
+        }
+      ],
+      "concurrencyLimit": 3,
+      "actionTypes": ["robot_verification", "quota_exhausted", "login_expired"],
+      "optionalCapabilities": ["csv_import", "batch_operations", "task_events"],
+      "health": {
+        "status": "healthy",
+        "providerAdapters": [
+          {
+            "name": "doubao",
+            "status": "healthy",
+            "lastCheckedAt": "2025-07-12T10:00:00.000Z"
+          }
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "protocolVersion": {
+      "type": "string",
+      "description": "Capability API 协议版本（语义化版本）。v1 系列必须以 '1.' 开头。",
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "examples": ["1.0.0"]
+    },
+    "serviceVersion": {
+      "type": "string",
+      "description": "豆包工作室应用版本（语义化版本）。",
+      "pattern": "^\\d+\\.\\d+\\.\\d+",
+      "examples": ["2.1.0"]
+    },
+    "supportedModes": {
+      "type": "array",
+      "description": "支持的生成模式列表。客户端必须处理未知值以兼容未来新增模式。",
+      "items": {
+        "type": "string",
+        "enum": ["chat", "image", "video", "music"]
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "examples": [["chat", "image", "video", "music"]]
+    },
+    "models": {
+      "type": "array",
+      "description": "支持的视频生成模型及其参数范围。",
+      "items": {
+        "$ref": "#/$defs/ModelCapability"
+      },
+      "examples": [
+        [
+          {
+            "modelId": "seedance-2.0",
+            "label": "Seedance 2.0",
+            "supportedDurations": ["5s", "10s", "15s"],
+            "supportedAspectRatios": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
+          }
+        ]
+      ]
+    },
+    "concurrencyLimit": {
+      "type": "integer",
+      "description": "允许同时执行的最大任务数。",
+      "minimum": 1,
+      "examples": [3]
+    },
+    "actionTypes": {
+      "type": "array",
+      "description": "本实例支持的人工动作类型。客户端必须处理未知值。",
+      "items": {
+        "type": "string",
+        "enum": [
+          "robot_verification",
+          "face_restriction",
+          "membership_required",
+          "quota_exhausted",
+          "login_expired",
+          "user_cancelled"
+        ]
+      },
+      "uniqueItems": true,
+      "examples": [["robot_verification", "quota_exhausted", "login_expired"]]
+    },
+    "optionalCapabilities": {
+      "type": "array",
+      "description": "可选能力标识。客户端不应假设这些能力一定存在。",
+      "items": {
+        "type": "string",
+        "enum": [
+          "csv_import",
+          "batch_operations",
+          "webhooks",
+          "task_events",
+          "artifact_validation",
+          "multi_project"
+        ]
+      },
+      "uniqueItems": true,
+      "examples": [["csv_import", "batch_operations", "task_events"]]
+    },
+    "health": {
+      "$ref": "#/$defs/HealthStatus"
+    }
+  },
+  "$defs": {
+    "ModelCapability": {
+      "type": "object",
+      "description": "单个模型的参数范围声明。",
+      "required": [
+        "modelId",
+        "label",
+        "supportedDurations",
+        "supportedAspectRatios"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "modelId": {
+          "type": "string",
+          "examples": ["seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"]
+        },
+        "label": {
+          "type": "string",
+          "examples": ["Seedance 2.0"]
+        },
+        "supportedDurations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["5s", "10s", "15s"]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "supportedAspectRatios": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "HealthStatus": {
+      "type": "object",
+      "description": "实例健康状态摘要。",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["healthy", "degraded", "unavailable"]
+        },
+        "providerAdapters": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "examples": ["doubao"]
+              },
+              "status": {
+                "type": "string",
+                "enum": ["healthy", "degraded", "unavailable"]
+              },
+              "lastCheckedAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/artifact-descriptor.schema.json",
+  "title": "ArtifactDescriptor",
+  "description": "产物描述符。使用不透明 ID 标识产物，通过受控 API 预览和下载。禁止暴露绝对路径和原始带认证 URL。",
+  "type": "object",
+  "required": [
+    "artifactId",
+    "taskId",
+    "mediaType",
+    "createdAt",
+    "validationState",
+    "downloadAvailable",
+    "previewAvailable"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "artifactId": "artifact_550e8400",
+      "taskId": "task_abc123",
+      "mediaType": "video",
+      "mimeType": "video/mp4",
+      "sizeBytes": 15728640,
+      "createdAt": "2025-07-12T10:30:00.000Z",
+      "expiresAt": "2025-07-13T10:30:00.000Z",
+      "validationState": "valid",
+      "validatedAt": "2025-07-12T10:31:00.000Z",
+      "downloadAvailable": true,
+      "previewAvailable": true,
+      "source": "network"
+    }
+  ],
+  "properties": {
+    "artifactId": {
+      "type": "string",
+      "description": "公共产物 ID。不透明标识，不包含内部路径或 URL。",
+      "examples": ["artifact_550e8400"]
+    },
+    "taskId": {
+      "type": "string",
+      "description": "所属任务 ID。",
+      "examples": ["task_abc123"]
+    },
+    "mediaType": {
+      "type": "string",
+      "description": "产物媒体类型。客户端必须处理未知值。",
+      "enum": ["image", "video", "audio", "file"],
+      "examples": ["video"]
+    },
+    "mimeType": {
+      "type": "string",
+      "description": "MIME 类型（可选）。",
+      "examples": ["video/mp4"]
+    },
+    "sizeBytes": {
+      "type": "integer",
+      "description": "文件大小（字节，可选）。",
+      "minimum": 0,
+      "examples": [15728640]
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "产物发现时间。",
+      "examples": ["2025-07-12T10:30:00.000Z"]
+    },
+    "expiresAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "产物过期时间（可选）。过期后下载可能返回 expired 状态。客户端应在此时间前下载或刷新。"
+    },
+    "validationState": {
+      "type": "string",
+      "description": "下载地址校验状态。客户端必须处理未知值。",
+      "enum": ["unknown", "valid", "expired", "invalid"],
+      "examples": ["valid"]
+    },
+    "validatedAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "最近一次校验时间（可选）。"
+    },
+    "downloadAvailable": {
+      "type": "boolean",
+      "description": "是否可通过下载 API 获取该产物。",
+      "examples": [true]
+    },
+    "previewAvailable": {
+      "type": "boolean",
+      "description": "是否可通过预览 API 获取该产物的预览。",
+      "examples": [true]
+    },
+    "source": {
+      "type": "string",
+      "description": "产物来源类型（可选，用于诊断）。客户端不应依赖此字段做逻辑判断。",
+      "enum": ["network", "page", "manual"]
+    }
+  }
+}

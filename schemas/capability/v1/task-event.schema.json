@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/task-event.schema.json",
+  "title": "TaskEvent",
+  "description": "任务事件。使用单调递增的 sequence 实现断线续订：客户端发送上次收到的 lastSequence，服务端返回所有 sequence > lastSequence 的事件。在至少一次投递语义下，客户端通过 eventId 去重。",
+  "type": "object",
+  "required": ["sequence", "eventId", "taskId", "timestamp", "eventType"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "sequence": 42,
+      "eventId": "evt_550e8400-e29b-41d4-a716-446655440000",
+      "taskId": "task_abc123",
+      "timestamp": "2025-07-12T10:30:00.000Z",
+      "eventType": "task.stage_changed",
+      "payload": {
+        "stage": "generating",
+        "percent": 50
+      }
+    }
+  ],
+  "properties": {
+    "sequence": {
+      "type": "integer",
+      "description": "单调递增序列号。同一服务实例的事件序列号全局唯一且递增。客户端以 lastSequence 作为续订游标。",
+      "minimum": 0,
+      "examples": [42]
+    },
+    "eventId": {
+      "type": "string",
+      "description": "事件唯一标识。用于至少一次投递语义下的客户端去重。建议 UUID v4。",
+      "minLength": 1,
+      "examples": ["evt_550e8400-e29b-41d4-a716-446655440000"]
+    },
+    "taskId": {
+      "type": "string",
+      "description": "关联的任务 ID。",
+      "examples": ["task_abc123"]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "事件产生时间。",
+      "examples": ["2025-07-12T10:30:00.000Z"]
+    },
+    "eventType": {
+      "type": "string",
+      "description": "事件类型。客户端必须处理未知值。未知事件类型的 payload 应被忽略但不视为错误。",
+      "enum": [
+        "task.created",
+        "task.started",
+        "task.stage_changed",
+        "task.progress",
+        "task.paused",
+        "task.resumed",
+        "task.cancelled",
+        "task.failed",
+        "task.done",
+        "action_required",
+        "action_resolved",
+        "artifact.discovered",
+        "artifact.validated",
+        "artifact.downloaded"
+      ],
+      "examples": ["task.stage_changed"]
+    },
+    "payload": {
+      "type": "object",
+      "description": "事件载荷。结构取决于 eventType。未知事件类型的 payload 应被忽略。已知事件类型的 payload 字段均为可选，客户端不应因缺少字段而崩溃。",
+      "additionalProperties": true,
+      "properties": {
+        "stage": {
+          "type": "string",
+          "description": "新阶段（task.stage_changed 事件使用）。"
+        },
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "进度百分比（task.progress 事件使用）。"
+        },
+        "message": {
+          "type": "string",
+          "description": "进度描述（task.progress 事件使用）。"
+        },
+        "artifactId": {
+          "type": "string",
+          "description": "产物 ID（artifact.* 事件使用）。"
+        },
+        "actionType": {
+          "type": "string",
+          "description": "动作类型（action_required 事件使用）。"
+        },
+        "error": {
+          "description": "错误信息（task.failed 事件使用）。",
+          "$ref": "api-error.schema.json"
+        }
+      },
+      "examples": [
+        {
+          "stage": "generating",
+          "percent": 50
+        }
+      ]
+    }
+  }
+}

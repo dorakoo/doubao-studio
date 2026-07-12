@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/task-snapshot.schema.json",
+  "title": "TaskSnapshot",
+  "description": "任务的公共视图快照。不直接暴露内部 Task 实体的全部字段，仅包含外部 Agent 需要的状态信息。",
+  "type": "object",
+  "required": [
+    "taskId",
+    "status",
+    "stage",
+    "mode",
+    "prompt",
+    "retry",
+    "timestamps"
+  ],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "taskId": "task_550e8400",
+      "status": "generating",
+      "stage": "generating",
+      "mode": "video",
+      "prompt": "一只猫在月光下奔跑",
+      "videoConfig": {
+        "model": "seedance-2.0",
+        "duration": "15s",
+        "aspectRatio": "16:9"
+      },
+      "progress": {
+        "percent": 65,
+        "message": "豆包生成中…"
+      },
+      "retry": {
+        "attempt": 0,
+        "maxAttempts": 3,
+        "retryable": true
+      },
+      "timestamps": {
+        "createdAt": "2025-07-12T10:00:00.000Z",
+        "updatedAt": "2025-07-12T10:05:00.000Z",
+        "startedAt": "2025-07-12T10:00:05.000Z"
+      }
+    }
+  ],
+  "properties": {
+    "taskId": {
+      "type": "string",
+      "description": "公共任务 ID。",
+      "examples": ["task_550e8400"]
+    },
+    "status": {
+      "type": "string",
+      "description": "任务队列级状态。客户端必须处理未知值以兼容未来新增状态。",
+      "enum": [
+        "queued",
+        "executing",
+        "generating",
+        "waiting_verification",
+        "paused",
+        "done",
+        "fail",
+        "cancelled"
+      ],
+      "examples": ["generating"]
+    },
+    "stage": {
+      "type": "string",
+      "description": "当前执行阶段。比 status 更细粒度。客户端必须处理未知值。",
+      "enum": [
+        "queued",
+        "preparing_account",
+        "new_conversation",
+        "switching_mode",
+        "configuring",
+        "uploading_assets",
+        "injecting_prompt",
+        "submitting",
+        "waiting_verification",
+        "generating",
+        "extracting_outputs",
+        "completed",
+        "paused",
+        "failed",
+        "cancelled"
+      ],
+      "examples": ["generating"]
+    },
+    "mode": {
+      "type": "string",
+      "description": "生成模式。",
+      "enum": ["chat", "image", "video", "music"],
+      "examples": ["video"]
+    },
+    "prompt": {
+      "type": "string",
+      "description": "生成提示词。",
+      "examples": ["一只猫在月光下奔跑"]
+    },
+    "videoConfig": {
+      "$ref": "#/$defs/VideoConfig",
+      "description": "视频生成配置。仅在 mode 为 'video' 时存在。"
+    },
+    "progress": {
+      "$ref": "#/$defs/Progress",
+      "description": "执行进度信息。"
+    },
+    "retry": {
+      "$ref": "#/$defs/RetryInfo",
+      "description": "重试信息。"
+    },
+    "timestamps": {
+      "$ref": "#/$defs/Timestamps",
+      "description": "任务时间戳。"
+    },
+    "error": {
+      "$ref": "api-error.schema.json",
+      "description": "结构化错误信息。仅在 status 为 'fail' 或存在错误时出现。"
+    },
+    "actionRequired": {
+      "$ref": "#/$defs/ActionRequired",
+      "description": "需要人工处理时出现。包含动作类型和恢复指引。"
+    },
+    "artifacts": {
+      "type": "array",
+      "description": "已发现的产物摘要列表。",
+      "items": {
+        "$ref": "artifact-descriptor.schema.json"
+      },
+      "examples": [
+        [
+          {
+            "artifactId": "artifact_001",
+            "taskId": "task_550e8400",
+            "mediaType": "video",
+            "mimeType": "video/mp4",
+            "createdAt": "2025-07-12T10:30:00.000Z",
+            "validationState": "valid",
+            "downloadAvailable": true,
+            "previewAvailable": true
+          }
+        ]
+      ]
+    },
+    "projectId": {
+      "type": "string",
+      "description": "所属项目 ID（可选）。"
+    }
+  },
+  "$defs": {
+    "VideoConfig": {
+      "type": "object",
+      "required": ["model", "duration", "aspectRatio"],
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "type": "string",
+          "enum": ["seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"]
+        },
+        "duration": {
+          "type": "string",
+          "enum": ["5s", "10s", "15s"]
+        },
+        "aspectRatio": {
+          "type": "string",
+          "enum": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
+        }
+      }
+    },
+    "Progress": {
+      "type": "object",
+      "description": "执行进度。",
+      "required": ["percent"],
+      "additionalProperties": false,
+      "properties": {
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100,
+          "examples": [65]
+        },
+        "message": {
+          "type": "string",
+          "description": "进度描述文本。",
+          "examples": ["豆包生成中…"]
+        }
+      }
+    },
+    "RetryInfo": {
+      "type": "object",
+      "description": "重试信息。",
+      "required": ["attempt", "retryable"],
+      "additionalProperties": false,
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "已尝试次数。0 表示尚未执行过。",
+          "examples": [1]
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "最大重试次数。",
+          "examples": [3]
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "当前错误是否允许重试。",
+          "examples": [true]
+        }
+      }
+    },
+    "Timestamps": {
+      "type": "object",
+      "description": "任务生命周期时间戳。",
+      "required": ["createdAt", "updatedAt"],
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "ActionRequired": {
+      "type": "object",
+      "description": "需要人工处理的动作。当 status 为 'waiting_verification' 或错误需要人工干预时出现。",
+      "required": ["type", "message", "retryable"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "动作类型。客户端必须处理未知值。",
+          "enum": [
+            "robot_verification",
+            "face_restriction",
+            "membership_required",
+            "quota_exhausted",
+            "login_expired",
+            "user_cancelled"
+          ],
+          "examples": ["robot_verification"]
+        },
+        "message": {
+          "type": "string",
+          "description": "面向用户的人类可读说明。",
+          "examples": ["请在豆包页面完成机器人验证后重试"]
+        },
+        "resolutionUrl": {
+          "type": "string",
+          "description": "安全引导 URL（可选），指向用户可执行操作的页面。不包含内部路径或认证参数。",
+          "format": "uri",
+          "examples": ["https://www.doubao.com/chat/create-video/"]
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "人工处理完成后是否可自动重试任务。",
+          "examples": [true]
+        }
+      }
+    }
+  }
+}

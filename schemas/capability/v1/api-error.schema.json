@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doubao.studio/schemas/capability/v1/api-error.schema.json",
+  "title": "ApiError",
+  "description": "统一的 API 错误响应。使用稳定错误码，不泄露堆栈和豆包页面细节。包含是否可重试、建议等待时间、关联任务和人工动作指引。",
+  "type": "object",
+  "required": ["code", "message", "retryable"],
+  "additionalProperties": false,
+  "examples": [
+    {
+      "code": "quota_exhausted",
+      "message": "账号每日生成额度已用完，请明天再试",
+      "retryable": false,
+      "taskId": "task_abc123",
+      "actionRequired": {
+        "type": "quota_exhausted",
+        "message": "每日额度已用完，次日自动刷新",
+        "retryable": true
+      },
+      "details": {
+        "limit": 10,
+        "current": 10
+      }
+    }
+  ],
+  "properties": {
+    "code": {
+      "type": "string",
+      "description": "稳定错误码。客户端必须处理未知值（视为不可重试的未知错误）。新增错误码为向后兼容，不改变已有错误码的语义。",
+      "enum": [
+        "cancelled",
+        "verification",
+        "quota_exhausted",
+        "membership_required",
+        "face_restricted",
+        "content_rejected",
+        "network",
+        "timeout",
+        "page_changed",
+        "submission_failed",
+        "generation_failed",
+        "output_missing",
+        "task_not_found",
+        "artifact_not_found",
+        "artifact_expired",
+        "rate_limited",
+        "service_unavailable",
+        "invalid_request",
+        "unknown"
+      ],
+      "examples": ["quota_exhausted"]
+    },
+    "message": {
+      "type": "string",
+      "description": "人类可读的错误描述。不应包含堆栈、内部路径或豆包页面细节。",
+      "minLength": 1,
+      "examples": ["账号每日生成额度已用完，请明天再试"]
+    },
+    "retryable": {
+      "type": "boolean",
+      "description": "当前错误是否可通过重试解决。",
+      "examples": [false]
+    },
+    "suggestedWaitMs": {
+      "type": "integer",
+      "description": "建议等待时间（毫秒）。仅当 retryable 为 true 时有意义。",
+      "minimum": 0,
+      "examples": [5000]
+    },
+    "taskId": {
+      "type": "string",
+      "description": "关联的任务 ID（可选）。"
+    },
+    "actionRequired": {
+      "$ref": "task-snapshot.schema.json#/$defs/ActionRequired",
+      "description": "需要人工处理时出现。包含动作类型和恢复指引。"
+    },
+    "details": {
+      "type": "object",
+      "description": "附加诊断信息。仅允许白名单字段，不包含堆栈、Cookie 或内部状态。",
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string",
+          "description": "出错的请求字段名（如请求参数校验失败）。"
+        },
+        "limit": {
+          "description": "触发限制的阈值（如额度、并发数）。",
+          "oneOf": [
+            { "type": "integer" },
+            { "type": "string" }
+          ]
+        },
+        "current": {
+          "description": "当前值（配合 limit 使用）。",
+          "oneOf": [
+            { "type": "integer" },
+            { "type": "string" }
+          ]
+        }
+      },
+      "examples": [
+        {
+          "limit": 10,
+          "current": 10
+        }
+      ]
+    }
+  }
+}
