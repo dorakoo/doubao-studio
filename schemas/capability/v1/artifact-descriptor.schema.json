@@ -43,8 +43,8 @@
     },
     "mediaType": {
       "type": "string",
-      "description": "产物媒体类型。客户端必须处理未知值。",
-      "enum": ["image", "video", "audio", "file"],
+      "description": "产物媒体类型。已知值：image, video, audio, file。客户端必须处理未知值。",
+      "minLength": 1,
       "examples": ["video"]
     },
     "mimeType": {
@@ -71,8 +71,8 @@
     },
     "validationState": {
       "type": "string",
-      "description": "下载地址校验状态。客户端必须处理未知值。",
-      "enum": ["unknown", "valid", "expired", "invalid"],
+      "description": "下载地址校验状态。已知值：unknown, valid, expired, invalid。客户端必须处理未知值。",
+      "minLength": 1,
       "examples": ["valid"]
     },
     "validatedAt": {
@@ -92,8 +92,7 @@
     },
     "source": {
       "type": "string",
-      "description": "产物来源类型（可选，用于诊断）。客户端不应依赖此字段做逻辑判断。",
-      "enum": ["network", "page", "manual"]
+      "description": "产物来源类型（可选，用于诊断）。已知值：network, page, manual。客户端不应依赖此字段做逻辑判断。"
     }
   }
 }

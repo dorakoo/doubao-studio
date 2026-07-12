@@ -26,28 +26,8 @@
   "properties": {
     "code": {
       "type": "string",
-      "description": "稳定错误码。客户端必须处理未知值（视为不可重试的未知错误）。新增错误码为向后兼容，不改变已有错误码的语义。",
-      "enum": [
-        "cancelled",
-        "verification",
-        "quota_exhausted",
-        "membership_required",
-        "face_restricted",
-        "content_rejected",
-        "network",
-        "timeout",
-        "page_changed",
-        "submission_failed",
-        "generation_failed",
-        "output_missing",
-        "task_not_found",
-        "artifact_not_found",
-        "artifact_expired",
-        "rate_limited",
-        "service_unavailable",
-        "invalid_request",
-        "unknown"
-      ],
+      "description": "稳定错误码。已知值：cancelled, verification, quota_exhausted, membership_required, face_restricted, content_rejected, network, timeout, page_changed, submission_failed, generation_failed, output_missing, task_not_found, artifact_not_found, artifact_expired, rate_limited, service_unavailable, invalid_request, unknown。客户端必须处理未知值（视为不可重试的未知错误）。新增错误码为向后兼容，不改变已有错误码的语义。",
+      "minLength": 1,
       "examples": ["quota_exhausted"]
     },
     "message": {

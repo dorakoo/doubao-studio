@@ -50,45 +50,17 @@
     },
     "status": {
       "type": "string",
-      "description": "任务队列级状态。客户端必须处理未知值以兼容未来新增状态。",
-      "enum": [
-        "queued",
-        "executing",
-        "generating",
-        "waiting_verification",
-        "paused",
-        "done",
-        "fail",
-        "cancelled"
-      ],
+      "description": "任务队列级状态。已知值：queued, executing, generating, waiting_verification, paused, done, fail, cancelled。客户端必须处理未知值以兼容未来新增状态。",
       "examples": ["generating"]
     },
     "stage": {
       "type": "string",
-      "description": "当前执行阶段。比 status 更细粒度。客户端必须处理未知值。",
-      "enum": [
-        "queued",
-        "preparing_account",
-        "new_conversation",
-        "switching_mode",
-        "configuring",
-        "uploading_assets",
-        "injecting_prompt",
-        "submitting",
-        "waiting_verification",
-        "generating",
-        "extracting_outputs",
-        "completed",
-        "paused",
-        "failed",
-        "cancelled"
-      ],
+      "description": "当前执行阶段。已知值：queued, preparing_account, new_conversation, switching_mode, configuring, uploading_assets, injecting_prompt, submitting, waiting_verification, generating, extracting_outputs, completed, paused, failed, cancelled。比 status 更细粒度。客户端必须处理未知值。",
       "examples": ["generating"]
     },
     "mode": {
       "type": "string",
-      "description": "生成模式。",
-      "enum": ["chat", "image", "video", "music"],
+      "description": "生成模式。已知值：chat, image, video, music。",
       "examples": ["video"]
     },
     "prompt": {
@@ -154,15 +126,18 @@
       "properties": {
         "model": {
           "type": "string",
-          "enum": ["seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"]
+          "description": "已知值：seedance-2.0, seedance-2.0-fast, seedance-2.0-mini。",
+          "minLength": 1
         },
         "duration": {
           "type": "string",
-          "enum": ["5s", "10s", "15s"]
+          "description": "已知值：5s, 10s, 15s。",
+          "minLength": 1
         },
         "aspectRatio": {
           "type": "string",
-          "enum": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"]
+          "description": "已知值：1:1, 3:4, 4:3, 9:16, 16:9, 21:9。",
+          "minLength": 1
         }
       }
     },
@@ -242,15 +217,8 @@
       "properties": {
         "type": {
           "type": "string",
-          "description": "动作类型。客户端必须处理未知值。",
-          "enum": [
-            "robot_verification",
-            "face_restriction",
-            "membership_required",
-            "quota_exhausted",
-            "login_expired",
-            "user_cancelled"
-          ],
+          "description": "动作类型。已知值：robot_verification, face_restriction, membership_required, quota_exhausted, login_expired, user_cancelled。客户端必须处理未知值。",
+          "minLength": 1,
           "examples": ["robot_verification"]
         },
         "message": {

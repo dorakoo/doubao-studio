@@ -45,23 +45,8 @@
     },
     "eventType": {
       "type": "string",
-      "description": "事件类型。客户端必须处理未知值。未知事件类型的 payload 应被忽略但不视为错误。",
-      "enum": [
-        "task.created",
-        "task.started",
-        "task.stage_changed",
-        "task.progress",
-        "task.paused",
-        "task.resumed",
-        "task.cancelled",
-        "task.failed",
-        "task.done",
-        "action_required",
-        "action_resolved",
-        "artifact.discovered",
-        "artifact.validated",
-        "artifact.downloaded"
-      ],
+      "description": "事件类型。已知值：task.created, task.started, task.stage_changed, task.progress, task.paused, task.resumed, task.cancelled, task.failed, task.done, action_required, action_resolved, artifact.discovered, artifact.validated, artifact.downloaded。客户端必须处理未知值。未知事件类型的 payload 应被忽略但不视为错误。",
+      "minLength": 1,
       "examples": ["task.stage_changed"]
     },
     "payload": {
