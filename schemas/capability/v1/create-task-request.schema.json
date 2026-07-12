@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://doubao.studio/schemas/capability/v1/create-task-request.schema.json",
   "title": "CreateTaskRequest",
-  "description": "创建任务的异步请求。成功只返回已接收的任务快照或任务 ID，绝不等待生成完成。客户端通过 requestId 实现幂等：相同 requestId 在保留期内重复提交时返回同一任务。",
+  "description": "创建任务的异步请求。成功只返回已接收的任务快照或任务 ID，绝不等待生成完成。客户端通过 requestId 实现幂等：相同 requestId 在当前服务进程生命周期内重复提交时返回同一任务。进程重启后 requestId 缓存丢失；响应丢失时，客户端应先通过 requestId 查询端点核对任务，再决定是否重试。",
   "type": "object",
   "required": ["requestId", "mode", "prompt"],
   "additionalProperties": false,
@@ -26,15 +26,15 @@
   "properties": {
     "requestId": {
       "type": "string",
-      "description": "客户端生成的幂等键。建议使用 UUID v4。同一 requestId 在保留期（默认 24 小时）内重复提交时，服务端返回原始任务而不创建新任务。",
+      "description": "客户端生成的幂等键。建议使用 UUID v4。相同 requestId 在当前服务进程生命周期内重复提交时，服务端返回原始任务而不创建新任务。进程重启后 requestId 缓存丢失；客户端应先调用 requestId 查询端点核对任务状态，无法确认时不得自动重复提交。",
       "minLength": 1,
       "maxLength": 128,
       "examples": ["550e8400-e29b-41d4-a716-446655440000"]
     },
     "mode": {
       "type": "string",
-      "description": "生成模式。客户端必须处理未知值。",
-      "enum": ["chat", "image", "video", "music"],
+      "description": "生成模式。已知值：chat, image, video, music。客户端必须处理未知值以兼容未来新增模式。",
+      "minLength": 1,
       "examples": ["video"]
     },
     "prompt": {
@@ -66,8 +66,7 @@
     },
     "priority": {
       "type": "string",
-      "description": "任务优先级。低优先级任务在高优先级任务之后调度。",
-      "enum": ["low", "normal", "high"],
+      "description": "任务优先级。已知值：low, normal, high。低优先级任务在高优先级任务之后调度。",
       "default": "normal",
       "examples": ["normal"]
     },
@@ -83,12 +82,22 @@
     },
     "dependencyPolicy": {
       "type": "string",
-      "description": "依赖完成策略。all_done 表示前置任务全部成功完成；all_finished 表示前置任务只要结束（含失败/取消）即可继续。",
-      "enum": ["all_done", "all_finished"],
+      "description": "依赖完成策略。已知值：all_done, all_finished。all_done 表示前置任务全部成功完成；all_finished 表示前置任务只要结束（含失败/取消）即可继续。",
       "default": "all_done",
       "examples": ["all_done"]
     }
   },
+  "allOf": [
+    {
+      "description": "条件约束：mode 为 video 时 videoConfig 必填；非 video 模式禁止 videoConfig。",
+      "if": {
+        "properties": { "mode": { "const": "video" } },
+        "required": ["mode"]
+      },
+      "then": { "required": ["videoConfig"] },
+      "else": { "not": { "required": ["videoConfig"] } }
+    }
+  ],
   "$defs": {
     "VideoConfig": {
       "type": "object",
@@ -98,18 +107,20 @@
       "properties": {
         "model": {
           "type": "string",
-          "description": "视频模型 ID。客户端必须处理未知值。",
-          "enum": ["seedance-2.0", "seedance-2.0-fast", "seedance-2.0-mini"],
+          "description": "视频模型 ID。已知值：seedance-2.0, seedance-2.0-fast, seedance-2.0-mini。客户端必须处理未知值。",
+          "minLength": 1,
           "examples": ["seedance-2.0"]
         },
         "duration": {
           "type": "string",
-          "enum": ["5s", "10s", "15s"],
+          "description": "已知值：5s, 10s, 15s。",
+          "minLength": 1,
           "examples": ["15s"]
         },
         "aspectRatio": {
           "type": "string",
-          "enum": ["1:1", "3:4", "4:3", "9:16", "16:9", "21:9"],
+          "description": "已知值：1:1, 3:4, 4:3, 9:16, 16:9, 21:9。",
+          "minLength": 1,
           "examples": ["16:9"]
         }
       }

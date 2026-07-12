@@ -13,6 +13,7 @@ import { join, resolve } from 'node:path';
 // ==================== Schema 加载 ====================
 
 const SCHEMA_DIR = resolve(__dirname, '../../schemas/capability/v1');
+const CAPABILITY_DOC = resolve(__dirname, '../../docs/architecture/capability-api-schema.md');
 
 /** 预期的 Schema 文件列表 */
 const EXPECTED_FILES = [
@@ -75,6 +76,28 @@ function assertHasExamples(schema: Record<string, unknown>, fileName: string): v
   assertHasProperty(schema, 'examples', fileName);
   expect(Array.isArray(schema.examples)).toBe(true);
   expect((schema.examples as unknown[]).length).toBeGreaterThan(0);
+}
+
+/** 递归扫描对象中所有 "enum" 键的路径，用于验证不使用封闭 enum */
+function findEnumKeys(obj: unknown, basePath: string = '$'): string[] {
+  const results: string[] = [];
+  if (obj === null || typeof obj !== 'object') return results;
+  if (Array.isArray(obj)) {
+    obj.forEach((item, i) => {
+      results.push(...findEnumKeys(item, `${basePath}[${i}]`));
+    });
+    return results;
+  }
+  const record = obj as Record<string, unknown>;
+  if ('enum' in record) {
+    results.push(`${basePath}.enum`);
+  }
+  for (const key of Object.keys(record)) {
+    if (typeof record[key] === 'object' && record[key] !== null) {
+      results.push(...findEnumKeys(record[key], `${basePath}.${key}`));
+    }
+  }
+  return results;
 }
 
 // ==================== 测试 ====================
@@ -232,15 +255,18 @@ describe('Capability API Schema v1 — 结构自检', () => {
     expect(detailProps.internalPath).toBeUndefined();
   });
 
-  // ---- 10. ActionRequired 覆盖全部人工动作类型 ----
+  // ---- 10. ActionRequired 覆盖全部已知人工动作类型 ----
 
-  it('ActionRequired 覆盖 6 种人工动作类型', () => {
+  it('ActionRequired 覆盖 6 种已知人工动作类型（description 中列出，不使用封闭 enum）', () => {
     const snap = schemas['task-snapshot.schema.json'] as Record<string, unknown>;
     const defs = snap.$defs as Record<string, unknown>;
     const actionRequired = defs.ActionRequired as Record<string, unknown>;
     const props = actionRequired.properties as Record<string, unknown>;
     const typeProp = props.type as Record<string, unknown>;
-    const enumValues = typeProp.enum as string[];
+    // 不使用封闭 enum
+    expect(typeProp.enum).toBeUndefined();
+    // description 中列出已知值
+    const desc = typeProp.description as string;
     const expected = [
       'robot_verification',
       'face_restriction',
@@ -250,7 +276,7 @@ describe('Capability API Schema v1 — 结构自检', () => {
       'user_cancelled',
     ];
     for (const action of expected) {
-      expect(enumValues).toContain(action);
+      expect(desc).toContain(action);
     }
   });
 
@@ -285,5 +311,159 @@ describe('Capability API Schema v1 — 结构自检', () => {
     const props = err.properties as Record<string, unknown>;
     const actionRequired = props.actionRequired as Record<string, unknown>;
     expect(actionRequired.$ref).toBe('task-snapshot.schema.json#/$defs/ActionRequired');
+  });
+
+  // ---- 13. P1-1: 不使用封闭 enum，已知值通过 description 声明 ----
+
+  it('所有 Schema 中不存在封闭 enum 关键字', () => {
+    for (const file of EXPECTED_FILES) {
+      const schema = schemas[file] as Record<string, unknown>;
+      const enumPaths = findEnumKeys(schema);
+      expect(enumPaths).toEqual([]);
+    }
+  });
+
+  it('CreateTaskRequest.mode 使用 type:string + description 列出已知值', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    const props = req.properties as Record<string, unknown>;
+    const modeProp = props.mode as Record<string, unknown>;
+    expect(modeProp.type).toBe('string');
+    expect(modeProp.enum).toBeUndefined();
+    const desc = modeProp.description as string;
+    for (const known of ['chat', 'image', 'video', 'music']) {
+      expect(desc).toContain(known);
+    }
+  });
+
+  it('TaskSnapshot.status 使用 type:string + description 列出已知值', () => {
+    const snap = schemas['task-snapshot.schema.json'] as Record<string, unknown>;
+    const props = snap.properties as Record<string, unknown>;
+    const statusProp = props.status as Record<string, unknown>;
+    expect(statusProp.type).toBe('string');
+    expect(statusProp.enum).toBeUndefined();
+    const desc = statusProp.description as string;
+    for (const known of ['queued', 'executing', 'generating', 'done', 'fail', 'cancelled']) {
+      expect(desc).toContain(known);
+    }
+  });
+
+  it('TaskEvent.eventType 使用 type:string + description 列出已知值', () => {
+    const evt = schemas['task-event.schema.json'] as Record<string, unknown>;
+    const props = evt.properties as Record<string, unknown>;
+    const eventTypeProp = props.eventType as Record<string, unknown>;
+    expect(eventTypeProp.type).toBe('string');
+    expect(eventTypeProp.enum).toBeUndefined();
+    const desc = eventTypeProp.description as string;
+    for (const known of ['task.created', 'task.done', 'action_required', 'artifact.discovered']) {
+      expect(desc).toContain(known);
+    }
+  });
+
+  it('ApiError.code 使用 type:string + description 列出已知值', () => {
+    const err = schemas['api-error.schema.json'] as Record<string, unknown>;
+    const props = err.properties as Record<string, unknown>;
+    const codeProp = props.code as Record<string, unknown>;
+    expect(codeProp.type).toBe('string');
+    expect(codeProp.enum).toBeUndefined();
+    const desc = codeProp.description as string;
+    for (const known of ['quota_exhausted', 'network', 'rate_limited', 'unknown']) {
+      expect(desc).toContain(known);
+    }
+  });
+
+  it('CapabilityManifest.supportedModes.items 不使用封闭 enum', () => {
+    const manifest = schemas['capability-manifest.schema.json'] as Record<string, unknown>;
+    const props = manifest.properties as Record<string, unknown>;
+    const supportedModes = props.supportedModes as Record<string, unknown>;
+    const items = supportedModes.items as Record<string, unknown>;
+    expect(items.enum).toBeUndefined();
+    expect(items.type).toBe('string');
+    const desc = items.description as string;
+    for (const known of ['chat', 'image', 'video', 'music']) {
+      expect(desc).toContain(known);
+    }
+  });
+
+  it('ArtifactDescriptor.mediaType / validationState / source 不使用封闭 enum', () => {
+    const desc = schemas['artifact-descriptor.schema.json'] as Record<string, unknown>;
+    const props = desc.properties as Record<string, unknown>;
+    for (const field of ['mediaType', 'validationState', 'source']) {
+      const fieldProp = props[field] as Record<string, unknown>;
+      expect(fieldProp.enum).toBeUndefined();
+      expect(fieldProp.type).toBe('string');
+    }
+  });
+
+  // ---- 14. P1-2: 幂等范围收缩为进程生命周期 ----
+
+  it('CreateTaskRequest 顶层 description 不承诺 24 小时幂等', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    const topDesc = req.description as string;
+    expect(topDesc).not.toContain('24 小时');
+    expect(topDesc).not.toContain('24小时');
+    expect(topDesc).toContain('进程生命周期');
+  });
+
+  it('CreateTaskRequest.requestId description 明确进程重启语义', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    const props = req.properties as Record<string, unknown>;
+    const requestIdProp = props.requestId as Record<string, unknown>;
+    const desc = requestIdProp.description as string;
+    expect(desc).not.toContain('24 小时');
+    expect(desc).not.toContain('24小时');
+    expect(desc).toContain('进程生命周期');
+    expect(desc).toContain('进程重启');
+  });
+
+  it('文档定义了不依赖 taskId 的 requestId 查询恢复端点', () => {
+    const doc = readFileSync(CAPABILITY_DOC, 'utf-8');
+    expect(doc).toContain('GET /tasks:lookup?requestId={requestId}');
+    expect(doc).toContain('found: false');
+    expect(doc).toContain('接受重复风险');
+  });
+
+  // ---- 15. P1-3: video 模式条件约束（allOf + if/then/else） ----
+
+  it('CreateTaskRequest 包含 allOf 条件约束', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    expect(req.allOf).toBeDefined();
+    expect(Array.isArray(req.allOf)).toBe(true);
+    expect((req.allOf as unknown[]).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('CreateTaskRequest allOf[0] 定义 video → videoConfig 必填的条件', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    const allOf = req.allOf as unknown[];
+    const constraint = allOf[0] as Record<string, unknown>;
+
+    // if 分支：mode === "video"
+    const ifClause = constraint.if as Record<string, unknown>;
+    expect(ifClause).toBeDefined();
+    const ifProps = ifClause.properties as Record<string, unknown>;
+    const modeProp = ifProps.mode as Record<string, unknown>;
+    expect(modeProp.const).toBe('video');
+    expect(ifClause.required).toContain('mode');
+
+    // then 分支：videoConfig 必填
+    const thenClause = constraint.then as Record<string, unknown>;
+    expect(thenClause).toBeDefined();
+    expect(thenClause.required).toContain('videoConfig');
+
+    // else 分支：禁止 videoConfig
+    const elseClause = constraint.else as Record<string, unknown>;
+    expect(elseClause).toBeDefined();
+    const notClause = elseClause.not as Record<string, unknown>;
+    expect(notClause).toBeDefined();
+    expect(notClause.required).toContain('videoConfig');
+  });
+
+  it('CreateTaskRequest.examples 中的 video 示例包含 videoConfig', () => {
+    const req = schemas['create-task-request.schema.json'] as Record<string, unknown>;
+    const examples = req.examples as unknown[];
+    const videoExample = examples.find(
+      (e) => (e as Record<string, unknown>).mode === 'video',
+    ) as Record<string, unknown> | undefined;
+    expect(videoExample).toBeDefined();
+    expect(videoExample!.videoConfig).toBeDefined();
   });
 });
