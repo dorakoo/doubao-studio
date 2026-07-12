@@ -104,13 +104,13 @@
 
 | JSON 文件 | 当前存储类型 | 迁移后 |
 |-----------|------------|--------|
-| `accounts.json` | `Account[]` | `AccountRecord[]`（= `Account` + `schemaVersion: number`） |
-| `tasks.json` | `Task[]` | `TaskRecord[]`（= `Task` + `schemaVersion: number`） |
-| `projects.json` | `Project[]` | `ProjectRecord[]`（= `Project` + `schemaVersion: number`） |
+| `accounts.json` | `Account[]` | `AccountRecord[]`（首批仍为 `Account` 的类型别名） |
+| `tasks.json` | `Task[]` | `TaskRecord[]`（首批仍为 `Task` 的类型别名） |
+| `projects.json` | `Project[]` | `ProjectRecord[]`（首批仍为 `Project` 的类型别名） |
 | `downloads.json` | `DownloadJob[]` | `DownloadJobRecord[]` |
 | `logs.json` | `LogEntry[]` | `LogEntryRecord[]` |
 
-**策略**：首批迁移保持 `Record = Model`（类型别名），仅引入 `schemaVersion` 字段供未来迁移使用。不立即改变磁盘格式。
+**策略**：首批迁移保持 `Record = Model`（类型别名），不向每条记录写入 `schemaVersion`，因此磁盘格式完全不变。版本来源继续使用现有文件级 `schema.json`；未来如需独立版本，应一次性引入带版本的文件 envelope，并提供原子迁移。
 
 ### 2.4 IPC 命令/响应 DTO
 
@@ -119,16 +119,16 @@
 迁移后应为每个 IPC channel 定义命名 DTO：
 
 ```
-shared/dto/accounts.ts    — ListAccountsResponse, AddAccountRequest, AddAccountResponse, ...
-shared/dto/tasks.ts       — ListTasksResponse, AddTaskRequest, AddTaskResponse, UpdateRuntimeRequest, ...
-shared/dto/projects.ts    — ListProjectsResponse, AddProjectRequest, ...
-shared/dto/system.ts      — CheckIntegrityResponse, ExportBackupResponse, CheckUpdateResponse, ...
-shared/dto/logs.ts        — ListLogsResponse, AppendLogRequest, ...
+packages/contracts/src/dto/accounts.ts    — ListAccountsResponse, AddAccountRequest, AddAccountResponse, ...
+packages/contracts/src/dto/tasks.ts       — ListTasksResponse, AddTaskRequest, AddTaskResponse, UpdateRuntimeRequest, ...
+packages/contracts/src/dto/projects.ts    — ListProjectsResponse, AddProjectRequest, ...
+packages/contracts/src/dto/system.ts      — CheckIntegrityResponse, ExportBackupResponse, CheckUpdateResponse, ...
+packages/contracts/src/dto/logs.ts        — ListLogsResponse, AppendLogRequest, ...
 ```
 
 ### 2.5 公开 Agent API Schema（未来）
 
-ROADMAP 2.3 定义的公共协议对象，当前尚不存在。迁移后应在 `shared/api/` 中预留：
+ROADMAP 2.3 定义的公共协议对象，当前尚不存在。迁移后应在 `packages/contracts/src/api/` 中预留：
 
 - `CapabilityManifest`
 - `CreateTaskRequest`
@@ -179,7 +179,7 @@ doubao-studio-main/
 **`package.json` main 入口影响**：
 - 当前：`"main": "dist/main/main.js"`
 - 变更后：`"main": "dist/main/main/main.js"`（如果 rootDir 改为 `.`）
-- 或保持不变但需要在 tsconfig.main.json 中配置 `rootDir: "."` + `rootDirs: ["main", "shared"]`
+- `rootDirs` 只影响模块解析，不会改变 emit 路径，不能用来保持 `dist/main/main.js`
 
 ### 方案 B：`src/types/` 作为 shared 层 + 主进程路径别名
 
@@ -233,19 +233,42 @@ doubao-studio-main/
 - `electron-builder` 的 `files` 配置需增加 `dist/shared/**/*`
 - 对当前简单构建流程改动最大
 
+### 方案 D：私有 workspace contracts 包
+
+```
+doubao-studio-main/
+├── packages/contracts/
+│   ├── package.json           # @doubao-studio/contracts，private
+│   ├── tsconfig.json          # emitDeclarationOnly
+│   └── src/                   # enums/domain/dto/index
+├── main/                      # rootDir 继续保持 main
+└── src/                       # rootDir 继续保持 src
+```
+
+**优点**：
+- contracts 独立编译，主进程和渲染进程的 `rootDir` 与输出路径完全不变
+- 通过 pnpm workspace 名称解析，不依赖 TypeScript `paths` 运行时重写
+- 首阶段只允许 `import type`，编译后不产生 `require('@doubao-studio/contracts')`
+- 可被未来 CLI、MCP Server 和 SDK 复用
+
+**缺点**：
+- 类型检查前必须先构建 contracts 声明
+- 需要增加一个私有 workspace package 和构建顺序
+- 如未来加入运行时校验器，需要另行设计双格式导出，不能默认把 ESM 当作 CJS 使用
+
 ## 4. 推荐方案
 
-**推荐方案 A：顶层 `shared/` 目录 + 独立 tsconfig**
+**推荐方案 D：私有 workspace contracts 包**
 
 理由：
 1. 物理边界最清晰，shared 层不依赖 Electron/React/Zustand/DOM/Node fs
-2. 对现有构建流程改动可控——仅调整 `rootDir` 和 `include`
-3. 未来可平滑过渡到 workspace package 或独立 npm 包
+2. 不修改主进程与渲染进程的 `rootDir`，Electron 入口继续是 `dist/main/main.js`
+3. 使用现有 pnpm workspace 解析，而不是不会重写运行时 import 的 `paths`
 4. preload 和 renderer 的 `ElectronAPI` 类型可以从 shared DTO 消费同一来源
 
 ### 4.1 shared 层纯洁性约束
 
-`shared/` 下的文件**禁止**导入：
+`packages/contracts/src/` 下的文件**禁止**导入：
 - `electron` — Electron 主进程 API
 - `react` / `react-dom` — 渲染进程 UI 框架
 - `zustand` — 状态管理
@@ -259,91 +282,35 @@ doubao-studio-main/
 
 ### 4.2 构建配置变更
 
-**`shared/tsconfig.json`（新建）**：
-```json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "isolatedModules": true,
-    "noEmit": false,
-    "outDir": "../dist/shared"
-  },
-  "include": ["**/*.ts"]
-}
-```
-
-**`tsconfig.main.json`（修改）**：
-```json
-{
-  "compilerOptions": {
-    "rootDir": ".",               // 从 "main" 改为 "."
-    "outDir": "dist/main",
-    // ... 其余不变
-    "paths": {
-      "@shared/*": ["shared/*"]
-    }
-  },
-  "include": ["main/**/*.ts", "shared/**/*.ts"]
-}
-```
-
-**`tsconfig.renderer.json`（修改）**：
-```json
-{
-  "compilerOptions": {
-    "rootDir": ".",               // 从 "src" 改为 "."
-    "outDir": "dist/renderer",
-    // ... 其余不变
-    "paths": {
-      "@shared/*": ["shared/*"]
-    }
-  },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "shared/**/*.ts"]
-}
-```
-
-**`package.json`**：
-- `"main"` 保持 `"dist/main/main.js"`（rootDir 改为 `.` 后，`main/main.ts` 编译输出仍为 `dist/main/main/main.js`，需要调整）
-
-> **注意**：`rootDir` 从 `main` 改为 `.` 后，`tsc` 会保留输入目录结构。`main/main.ts` → `dist/main/main/main.js`。需要将 `package.json` 的 `"main"` 改为 `"dist/main/main/main.js"`，或将 `rootDir` 设为 `"."` 配合 `rootDirs: ["main", "shared"]` 使输出扁平化。推荐使用 `rootDirs` 方案，输出仍为 `dist/main/main.js`。
-
-**`vite.config.ts`**：
-- 添加 `resolve.alias`：`'@shared': path.resolve(__dirname, 'shared')`
+- 新建 `packages/contracts/package.json`，名称为 `@doubao-studio/contracts`，设置 `private: true`、`sideEffects: false`，仅导出 `dist/index.d.ts` 类型声明。
+- 新建 `packages/contracts/tsconfig.json`，启用 `composite`、`declaration`、`emitDeclarationOnly`，输出到包内 `dist/`。
+- 根应用以 `workspace:*` devDependency 引用 contracts；所有消费点首阶段必须使用 `import type`。
+- `build`、`ts-check` 和测试类型检查在消费方之前构建 contracts。
+- `tsconfig.main.json` 的 `rootDir: "main"`、`outDir: "dist/main"` 保持不变。
+- `tsconfig.renderer.json` 的 `rootDir: "src"` 保持不变；Vite 不需要为纯类型 import 添加 alias。
+- `package.json.main` 保持 `dist/main/main.js`；`electron-builder.files` 不需要打包纯声明包。
+- 禁止使用 `paths` 假装提供运行时模块解析；`paths` 不会改写生成的 `require()`。
 
 ### 4.3 CommonJS 与 ESM 互操作
 
-- 主进程 `tsconfig.main.json` 使用 `module: Node16`（CJS）
-- shared 使用 `module: ESNext`
-- **类型导入**（`import type`）：编译时擦除，无运行时影响，安全跨格式使用
-- **运行时常量**（如 `DEFAULT_VIDEO_CONFIG`）：主进程 CJS 需要 `esModuleInterop: true`（已有），`require()` ESM 输出时 Node 16 可能报错
-- **解决方案**：shared 中的运行时值仅使用 `export const`，主进程通过 `tsconfig` 的 `module: Node16` + `esModuleInterop` 正确处理。或 shared 也编译为 CJS（`module: CommonJS`），但这与渲染进程的 ESM 不冲突——Vite bundler 可以消费 CJS。
-
-**最终建议**：shared 编译为 **CJS**（`module: CommonJS`），因为：
-1. 主进程是 CJS，无需互操作
-2. Vite/Rollup 天然支持 CJS 导入
-3. 类型声明文件（`.d.ts`）不受模块格式影响
+- contracts 首阶段是纯类型包，消费方只使用 `import type`，因此没有 CJS/ESM 运行时互操作。
+- UI 标签、默认配置和其他运行时常量继续留在渲染进程，不进入 contracts。
+- Agent JSON Schema 或运行时校验器应作为后续独立协议包设计，并提供明确的 CJS/ESM exports；`esModuleInterop` 不能解决 Node `require()` ESM 的问题。
 
 ## 5. 版本化与兼容策略
 
 ### 5.1 Schema 版本
 
-- 每个持久化 JSON 文件增加 `schemaVersion: number` 字段（可选，默认 1）
-- 读取时检查版本，执行渐进迁移
-- 备份文件 `format: 'doubao-studio-backup'` + `version: 2` 已有此模式，扩展到实体级别
+- 当前以现有 `schema.json` 作为整个用户数据目录的版本来源，不向数组中的每条实体重复写版本
+- Repository 读取时先读取文件级版本，再执行校验与渐进迁移
+- 备份文件继续使用已有的 `format: 'doubao-studio-backup'` + `version`；备份版本与数据目录 schema 版本职责分离
+- 只有在需要让单个文件独立演进时，才通过一次显式迁移改为 `{ schemaVersion, records }` envelope
 
 ### 5.2 可选字段策略
 
-- 新增字段必须标记为可选（`field?: Type`）
-- 读取时使用 `??` 或 `||` 提供默认值
-- 示例：`Task.artifacts` 已是可选字段；未来新增 `Task.priority` 也应为可选
+- 滚动兼容期间新增字段先设为可选（`field?: Type`），由 Repository 归一化默认值
+- 完成磁盘迁移且所有调用点切换后，可在领域模型中收紧为必填，不能永久用可选字段掩盖不完整状态
+- 示例：新增 `Task.priority` 时旧记录允许缺失，但进入领域层前应被归一化为明确默认值
 
 ### 5.3 枚举扩展策略
 
@@ -354,7 +321,7 @@ doubao-studio-main/
 ### 5.4 旧 JSON 数据迁移
 
 ```typescript
-// shared/migrations.ts（未来）
+// main/core/persistence/migrations/accounts.ts（未来）
 export function migrateAccount(record: unknown): Account {
   // v1: 当前格式
   // v2: 未来可能拆分 scheduling 为独立文件
@@ -362,38 +329,33 @@ export function migrateAccount(record: unknown): Account {
 }
 ```
 
-- 迁移函数在 `readJSON<T>()` 之后调用
-- 迁移失败时回退到 `.bak` 文件（现有机制）
-- 迁移成功后以新版本写盘
+- 迁移属于主进程持久化层，不进入纯类型 contracts 包
+- Repository 按“读取主文件 → 解析/校验/迁移 → 任一步失败则读取并验证 `.bak`”的顺序执行
+- 当前通用 `readJSON<T>()` 不能自动覆盖“JSON 合法但 schema/迁移失败”的回退；实施时需增加 migration-aware Repository
+- 迁移成功后先原子写入，再更新文件级 schema 版本；失败时保留主文件和 `.bak`
 
 ## 6. 迁移批次
 
 每批必须能独立编译、独立提交、可回滚。
 
-### 批次 1：创建 shared 层 + 枚举类型
+### 批次 1：创建 contracts 包 + 枚举类型
 
 | 项目 | 内容 |
 |------|------|
-| **新建文件** | `shared/enums.ts`（`GenerationMode`、`AccountStatus`、`TaskStatus`、`TaskStage`、`VideoModel`、`VideoDuration`、`VideoAspectRatio`、`TaskErrorCode`、`DependencyPolicy`） |
-| **新建文件** | `shared/tsconfig.json` |
-| **修改文件** | `tsconfig.main.json`（rootDir/rootDirs + include shared）、`tsconfig.renderer.json`（同）、`tsconfig.test.json`（同）、`vite.config.ts`（alias） |
-| **修改文件** | `main/ipc/tasks.ts`（删除本地枚举，从 `@shared/enums` 导入） |
-| **修改文件** | `main/ipc/accounts.ts`（删除本地枚举，从 `@shared/enums` 导入） |
-| **修改文件** | `main/utils/csv.ts`（`CsvGenerationMode` → 从 `@shared/enums` 导入 `GenerationMode`） |
-| **修改文件** | `src/types/index.ts`（删除枚举，从 `@shared/enums` re-export） |
-| **兼容桥** | `src/types/index.ts` re-export 所有 shared 枚举，现有渲染进程导入路径不变 |
-| **回滚点** | `git revert` 单次提交；tsconfig 和 alias 恢复后不影响业务行为 |
+| **新建文件** | `packages/contracts/package.json`、`packages/contracts/tsconfig.json`、`packages/contracts/src/enums.ts`、`packages/contracts/src/index.ts` |
+| **修改文件** | 根 workspace 配置与构建顺序；应用的 `rootDir`、Vite alias 和 Electron 入口均不改变 |
+| **修改文件** | `main/ipc/tasks.ts`、`main/ipc/accounts.ts`、`main/utils/csv.ts` 使用 `import type` 从 `@doubao-studio/contracts` 导入 |
+| **修改文件** | `src/types/index.ts` 使用 `export type` 兼容现有渲染进程导入路径 |
+| **约束** | contracts 仅生成 `.d.ts`；禁止普通 import、运行时常量与 TS `paths` 运行时假象 |
+| **回滚点** | `git revert` 单次提交；应用构建入口和输出路径始终不变 |
 
 ### 批次 2：领域模型接口迁移
 
 | 项目 | 内容 |
 |------|------|
-| **新建文件** | `shared/domain.ts`（`Account`、`AccountHealth`、`SeedanceQuota`、`AccountScheduling`、`Task`、`TaskRunSnapshot`、`TaskRunRecord`、`TaskLock`、`TaskArtifact`、`DownloadJob`、`Project`、`LogEntry`） |
-| **修改文件** | `main/ipc/tasks.ts`（删除本地接口，从 `@shared/domain` 导入） |
-| **修改文件** | `main/ipc/accounts.ts`（删除本地接口，从 `@shared/domain` 导入） |
-| **修改文件** | `main/ipc/projects.ts`（从 `@shared/domain` 导入 `Project`） |
-| **修改文件** | `main/ipc/system.ts`（`LogEntry` 从 `@shared/domain` 导入） |
-| **修改文件** | `src/types/index.ts`（删除接口定义，从 `@shared/domain` re-export） |
+| **新建文件** | `packages/contracts/src/domain.ts`（`Account`、`AccountHealth`、`SeedanceQuota`、`AccountScheduling`、`Task`、`TaskRunSnapshot`、`TaskRunRecord`、`TaskLock`、`TaskArtifact`、`DownloadJob`、`Project`、`LogEntry`） |
+| **修改文件** | `main/ipc/tasks.ts`、`main/ipc/accounts.ts`、`main/ipc/projects.ts`、`main/ipc/system.ts` 从 `@doubao-studio/contracts` 进行 type-only 导入 |
+| **修改文件** | `src/types/index.ts` 删除重复接口并进行 type-only re-export |
 | **兼容桥** | `src/types/index.ts` re-export 保持现有导入路径不变 |
 | **行为变化** | 主进程 `TaskErrorInfo.code` 从 `string` 收紧为 `TaskErrorCode`；`AccountHealth.lastErrorCode` 同理 |
 | **回滚点** | `git revert`；如主进程有使用 `string` 而非 `TaskErrorCode` 的错误码，需补充 `'unknown'` |
@@ -402,9 +364,9 @@ export function migrateAccount(record: unknown): Account {
 
 | 项目 | 内容 |
 |------|------|
-| **新建文件** | `shared/dto/accounts.ts`、`shared/dto/tasks.ts`、`shared/dto/projects.ts`、`shared/dto/system.ts`、`shared/dto/logs.ts` |
-| **修改文件** | `main/preload.ts`（从 `@shared/dto/*` 导入类型，替换内联 `any` 签名） |
-| **修改文件** | `src/types/electron.d.ts`（`ElectronAPI` 接口从 `@shared/dto/*` 导入，与 preload 使用同一来源） |
+| **新建文件** | `packages/contracts/src/dto/accounts.ts`、`tasks.ts`、`projects.ts`、`system.ts`、`logs.ts`、`electron-api.ts` |
+| **修改文件** | `main/preload.ts` 从 `@doubao-studio/contracts` 导入 `ElectronAPI` 类型，替换内联 `any` 签名 |
+| **修改文件** | `src/types/electron.d.ts` 只负责用同一个 `ElectronAPI` 增补 `Window` |
 | **修改文件** | `main/ipc/*.ts`（handler 参数/返回值使用 DTO 类型） |
 | **兼容桥** | `ElectronAPI` 结构不变，仅类型来源变更 |
 | **回滚点** | `git revert`；DTO 是类型层变更，无运行时影响 |
@@ -413,27 +375,26 @@ export function migrateAccount(record: unknown): Account {
 
 | 项目 | 内容 |
 |------|------|
-| **修改文件** | `main/preload.ts`（删除本地 `Account`、`Task`、`GenerationMode` 定义，从 `@shared/*` 导入） |
-| **修改文件** | `main/preload.ts`（`contextBridge.exposeInMainWorld` 的回调签名使用 `ElectronAPI` 类型） |
+| **修改文件** | `main/preload.ts` 删除本地领域类型，使用 `import type { ElectronAPI } from '@doubao-studio/contracts'` |
+| **修改文件** | `main/preload.ts` 中导出的对象使用 `satisfies ElectronAPI`，再交给 `contextBridge.exposeInMainWorld` |
 | **兼容桥** | 无——此批次消除 preload 与 electron.d.ts 的类型分叉 |
 | **回滚点** | `git revert` |
 
-### 批次 5：持久化记录与 Schema 版本
+### 批次 5：持久化 Repository 边界
 
 | 项目 | 内容 |
 |------|------|
-| **新建文件** | `shared/persistence.ts`（`AccountRecord`、`TaskRecord`、`ProjectRecord`、`DownloadJobRecord`、`LogEntryRecord`，当前为类型别名） |
-| **新建文件** | `shared/migrations.ts`（迁移函数占位） |
-| **修改文件** | `main/utils/store.ts`（`readJSON<T>` 后调用迁移函数） |
-| **修改文件** | `main/ipc/*.ts`（持久化读写使用 `*Record` 类型） |
-| **兼容桥** | `*Record = *Model` 类型别名，磁盘格式不变 |
+| **新建文件** | `main/core/persistence/` 下的 Repository、记录类型、校验和迁移模块；不放入 contracts |
+| **修改文件** | Repository 封装主文件与 `.bak` 的读取、校验、迁移和原子写入语义 |
+| **修改文件** | `main/ipc/*.ts` 仅通过 Repository 读写，不直接依赖磁盘记录 |
+| **兼容桥** | 首批 `*Record = *Model` 且沿用现有 `schema.json`，磁盘格式不变 |
 | **回滚点** | `git revert`；无磁盘格式变更 |
 
 ### 批次 6：csv.ts 临时类型归一
 
 | 项目 | 内容 |
 |------|------|
-| **修改文件** | `main/utils/csv.ts`（删除 `CsvGenerationMode`，直接从 `@shared/enums` 导入 `GenerationMode`） |
+| **修改文件** | `main/utils/csv.ts`（删除 `CsvGenerationMode`，从 `@doubao-studio/contracts` type-only 导入 `GenerationMode`） |
 | **修改文件** | `tests/unit/csv.test.ts`（更新类型引用） |
 | **依赖** | 批次 1 完成 |
 | **回滚点** | `git revert` |
@@ -459,7 +420,7 @@ main/preload.ts                          src/types/electron.d.ts
 ### 迁移后
 
 ```
-shared/dto/*.ts
+@doubao-studio/contracts
 ┌─────────────────────────┐
 │ export interface        │
 │   AccountsDto { ... }   │
@@ -475,8 +436,8 @@ main/preload.ts    src/types/electron.d.ts
 ┌──────────────┐   ┌──────────────────────┐
 │ import type  │   │ import type          │
 │ { ElectronAPI│   │ { AccountsDto, ... } │
-│ } from       │   │ from '@shared/dto'   │
-│ '@shared/dto'│   │                      │
+│ } from       │   │ from contracts       │
+│ contracts    │   │                      │
 │              │   │ export type          │
 │ const api:   │   │   ElectronAPI =      │
 │ ElectronAPI  │   │   AccountsDto &      │
@@ -488,10 +449,10 @@ main/preload.ts    src/types/electron.d.ts
 ```
 
 **实现步骤**：
-1. 在 `shared/dto/` 中定义每个命名空间的 DTO 接口（如 `AccountsDto`、`TasksDto`）
-2. `ElectronAPI = AccountsDto & TasksDto & ProjectsDto & SettingsDto & LogsDto & SystemDto`
-3. preload 的 `contextBridge.exposeInMainWorld` 调用对象标注为 `ElectronAPI` 类型
-4. TypeScript 编译时验证两边签名一致——如果不一致，编译失败
+1. 在 contracts 中按命名空间定义 API（如 `accounts`、`tasks`），并只导出一个嵌套结构的 `ElectronAPI`
+2. `src/types/electron.d.ts` 只导入 `ElectronAPI` 并声明 `Window.electronAPI: ElectronAPI`，不再重新拼装交叉类型
+3. preload 对象使用 `satisfies ElectronAPI`；任何缺失方法、参数或返回值漂移都会在编译期失败
+4. `contextBridge.exposeInMainWorld('electronAPI', api)` 的运行时对象和 channel 名称保持不变
 
 **安全约束**：
 - preload 的运行时行为不变（仍是 `ipcRenderer.invoke` 调用）
@@ -548,11 +509,11 @@ export type CsvGenerationMode = 'chat' | 'image' | 'video' | 'music';
 
 ### 迁移后
 
-批次 1 完成后，`shared/enums.ts` 导出 `GenerationMode`，`csv.ts` 直接导入：
+批次 1 完成后，contracts 导出 `GenerationMode`，`csv.ts` 以 type-only 方式导入：
 
 ```typescript
 // 迁移后
-import type { GenerationMode } from '@shared/enums';
+import type { GenerationMode } from '@doubao-studio/contracts';
 
 export function normalizeCsvMode(value: string): GenerationMode {
   // ...
@@ -569,28 +530,28 @@ export function normalizeCsvMode(value: string): GenerationMode {
 
 ## 10. 未决风险
 
-1. **rootDir 变更影响输出路径**：`tsconfig.main.json` 的 `rootDir` 从 `"main"` 改为 `"."` 会导致输出路径变化。需要使用 `rootDirs` 或调整 `package.json` 的 `main` 入口。必须在实施前验证 `electron .` 能正确定位入口文件。
+1. **contracts 构建顺序**：消费方类型检查前必须先生成 contracts 声明。根脚本和 CI 应固定该顺序，并验证全新 clone 后可直接执行 `pnpm run validate`。
 
 2. **主进程 `TaskErrorInfo.code` 类型收紧**：从 `string` 改为 `TaskErrorCode` 可能导致主进程代码编译失败——如果存在动态构造错误码的路径。需要在批次 2 前全局搜索 `code:` 赋值点。
 
 3. **preload 运行时与类型对齐**：preload 当前使用大量 `any` 和内联类型。对齐为 `ElectronAPI` 后，可能暴露类型不匹配（如 `Promise<any>` vs `Promise<Task[]>`）。需要逐一修正。
 
-4. **ESLint warning 基线**：类型迁移可能新增或消除 warning。需要与 `--max-warnings 149` 基线协调。如果 warning 减少，应下调基线而非维持。
+4. **类型边界被运行时 import 污染**：首阶段必须通过 ESLint 或工程检查禁止从 contracts 发出普通 import；否则 Electron 主进程可能生成无法解析的 `require('@doubao-studio/contracts')`。
 
 5. **测试覆盖**：类型迁移本身不改变运行时行为，但需要确保 `pnpm run validate`（含 ts-check）在每个批次后通过。建议每个批次都在 CI 上验证。
 
-6. **Vite 对 shared/ 的解析**：Vite 的 `resolve.alias` 配置需要同时处理开发模式和构建模式。需要验证 `vite build` 能正确打包 shared 类型。
+6. **运行时 Schema 的模块格式**：G-302 的 JSON Schema/校验器若需要由主进程和 Agent 服务共同执行，应作为明确支持 CJS/ESM 双入口的后续包，不能混入当前纯声明包。
 
-7. **electron-builder files 配置**：如果 shared 编译输出到 `dist/shared/`，需要更新 `package.json` 的 `build.files` 包含 `dist/shared/**/*`。如果 shared 仅作为类型（`import type`），则不需要。需要区分 shared 中的类型定义和运行时常量。
+7. **持久化回退完整性**：Repository 必须覆盖 JSON 解析、schema 校验和迁移三个失败阶段的 `.bak` 回退，并测试写入失败时主文件与备份均可恢复。
 
 ## 11. 总结
 
 | 项目 | 值 |
 |------|-----|
-| 推荐方案 | 方案 A：顶层 `shared/` 目录 |
-| shared 模块格式 | CJS（与主进程一致，Vite 可消费） |
+| 推荐方案 | 方案 D：私有、纯类型 workspace contracts 包 |
+| contracts 模块格式 | 仅 `.d.ts`，消费方全部使用 `import type` |
 | 迁移批次数 | 6 批 |
-| 首批可独立编译 | 批次 1（枚举类型 + 配置变更） |
+| 首批可独立编译 | 批次 1（contracts 脚手架 + 枚举类型） |
 | 预计影响文件 | ~20 个（含新增） |
 | 运行时行为变更 | 无（纯类型层迁移） |
-| 最大风险 | rootDir 变更影响构建输出路径 |
+| 最大风险 | contracts 构建顺序与 type-only 边界失守 |
