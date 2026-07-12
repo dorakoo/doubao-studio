@@ -7,50 +7,14 @@
 import { ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
-import type { AccountStatus, GenerationMode } from '@doubao-studio/contracts';
+import type { AccountStatus, Account } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-// AccountStatus 和 GenerationMode 已迁移至 @doubao-studio/contracts。
+// 枚举/联合类型和领域模型接口已迁移至 @doubao-studio/contracts。
+// 此处通过 import type 引用，不产生运行时依赖。
 
-/** 账号数据结构 */
-export interface Account {
-  id: string;
-  name: string;
-  /** 头像 URL（豆包默认头像） */
-  avatar: string;
-  /** Session 分区名（每个账号独立） */
-  partition: string;
-  status: AccountStatus;
-  /** 是否手动置顶 */
-  pinned: boolean;
-  seedanceQuota?: {
-    date: string;
-    usedUnits: number;
-    estimatedTotalUnits: number;
-    exhausted: boolean;
-    updatedAt: string;
-  };
-  health?: {
-    loginState: 'unknown' | 'ok' | 'expired';
-    verificationRequired: boolean;
-    consecutiveFailures: number;
-    successCount: number;
-    failureCount: number;
-    lastSuccessAt?: string;
-    lastFailureAt?: string;
-    lastErrorCode?: string;
-    cooldownUntil?: string;
-  };
-  scheduling?: {
-    enabled: boolean;
-    weight: number;
-    preferredModes: GenerationMode[];
-    manualCooldownUntil?: string;
-  };
-  createdAt: string;
-  updatedAt: string;
-}
+export type { Account };
 
 // ==================== 数据持久化 ====================
 

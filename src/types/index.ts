@@ -1,6 +1,10 @@
 /**
  * src/types/index.ts
  * 全局类型定义（渲染进程侧）
+ *
+ * 领域模型接口已迁移至 @doubao-studio/contracts。
+ * 本文件作为渲染进程兼容桥，通过 import type + export type 重导出共享类型，
+ * 同时保留渲染端专属的 UI 常量和辅助类型。
  */
 
 import type {
@@ -13,6 +17,19 @@ import type {
   VideoDuration,
   VideoAspectRatio,
   DependencyPolicy,
+  SeedanceQuota,
+  AccountHealth,
+  AccountScheduling,
+  Account,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskRunRecord,
+  TaskLock,
+  TaskArtifact,
+  DownloadJob,
+  Task,
+  Project,
+  LogEntry,
 } from '@doubao-studio/contracts';
 
 // 兼容性 re-export：保持渲染进程旧导入路径可用
@@ -26,57 +43,69 @@ export type {
   VideoDuration,
   VideoAspectRatio,
   DependencyPolicy,
+  SeedanceQuota,
+  AccountHealth,
+  AccountScheduling,
+  Account,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskRunRecord,
+  TaskLock,
+  TaskArtifact,
+  DownloadJob,
+  Task,
+  Project,
+  LogEntry,
 };
 
-export interface SeedanceQuota {
-  date: string;
-  usedUnits: number;
-  estimatedTotalUnits: number;
-  exhausted: boolean;
-  updatedAt: string;
+// ==================== 渲染端专属类型 ====================
+
+/** 编辑并重新运行任务时可更新的完整输入。 */
+export interface TaskUpdateInput {
+  prompt: string;
+  videoConfig?: Task['videoConfig'];
+  attachments?: string[];
+  audioAttachment?: string;
 }
 
-export interface AccountHealth {
-  loginState: 'unknown' | 'ok' | 'expired';
-  verificationRequired: boolean;
-  consecutiveFailures: number;
-  successCount: number;
-  failureCount: number;
-  lastSuccessAt?: string;
-  lastFailureAt?: string;
-  lastErrorCode?: TaskErrorCode;
-  cooldownUntil?: string;
+export interface CsvImportResult {
+  success: boolean;
+  tasks?: Task[];
+  batchId?: string;
+  imported?: number;
+  skipped?: number;
+  errors?: string[];
+  error?: string;
 }
 
-/** 账号数据结构 */
-export interface Account {
-  id: string;
-  name: string;
-  avatar: string;
-  partition: string;
-  status: AccountStatus;
-  /** 是否手动置顶 */
-  pinned: boolean;
-  /** Seedance 每日额度的本地预测记录。 */
-  seedanceQuota?: SeedanceQuota;
-  health?: AccountHealth;
-  scheduling?: {
-    enabled: boolean;
-    weight: number;
-    preferredModes: GenerationMode[];
-    manualCooldownUntil?: string;
-  };
+export interface AdapterSelfCheckItem {
+  key: string;
+  label: string;
+  ok: boolean;
+  detail: string;
+}
+
+export interface AdapterSelfCheckReport {
+  adapterVersion: string;
+  pageUrl: string;
+  checkedAt: string;
+  score: number;
+  items: AdapterSelfCheckItem[];
+}
+
+export interface AdapterRuleBundle {
+  version: string;
   createdAt: string;
-  updatedAt: string;
+  rules: {
+    input: string[];
+    submit: string[];
+    dialogs: string[];
+    uploads: string[];
+    media: string[];
+  };
 }
 
-// GenerationMode 已迁移至 @doubao-studio/contracts
-
-// VideoModel 已迁移至 @doubao-studio/contracts
-
-// VideoDuration 已迁移至 @doubao-studio/contracts
-
-// VideoAspectRatio 已迁移至 @doubao-studio/contracts
+// ==================== 渲染端专属常量 ====================
 
 /** 视频配置默认值 */
 export const DEFAULT_VIDEO_CONFIG = {
@@ -136,182 +165,6 @@ export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
     description: 'AI 作曲、音乐生成',
   },
 };
-
-/** 任务的队列级状态。具体执行位置记录在 runtime.stage。 */
-// TaskStatus 已迁移至 @doubao-studio/contracts
-
-// TaskStage 已迁移至 @doubao-studio/contracts
-
-// TaskErrorCode 已迁移至 @doubao-studio/contracts
-
-export interface TaskErrorInfo {
-  code: TaskErrorCode;
-  message: string;
-  recoverable: boolean;
-  detectedAt: string;
-}
-
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  color: string;
-  archived: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface TaskRunSnapshot {
-  runId: string;
-  attempt: number;
-  stage: TaskStage;
-  message: string;
-  startedAt: string;
-  stageStartedAt: string;
-  lastHeartbeatAt: string;
-  submittedAt?: string;
-  conversationUrl?: string;
-  input: {
-    prompt: string;
-    mode: GenerationMode;
-    videoConfig?: Task['videoConfig'];
-    attachments: string[];
-    audioAttachment?: string;
-  };
-}
-
-export interface TaskRunRecord {
-  runId: string;
-  attempt: number;
-  startedAt: string;
-  finishedAt?: string;
-  finalStage?: TaskStage;
-  outcome?: 'done' | 'failed' | 'paused' | 'cancelled';
-  errorCode?: TaskErrorCode;
-  durationMs?: number;
-}
-
-export interface TaskLock {
-  ownerId: string;
-  acquiredAt: string;
-  expiresAt: string;
-}
-
-export interface TaskArtifact {
-  id: string;
-  url: string;
-  kind: 'image' | 'video' | 'file';
-  source: 'network' | 'page' | 'manual';
-  runId?: string;
-  conversationUrl?: string;
-  discoveredAt: string;
-  validation?: {
-    state: 'unknown' | 'valid' | 'expired' | 'invalid';
-    checkedAt: string;
-    contentType?: string;
-    contentLength?: number;
-    statusCode?: number;
-    error?: string;
-  };
-}
-
-export interface DownloadJob {
-  id: string;
-  taskId: string;
-  accountId: string | null;
-  mode: GenerationMode;
-  url: string;
-  status: 'queued' | 'downloading' | 'done' | 'failed';
-  attempts: number;
-  saveDir: string;
-  filePath?: string;
-  bytes?: number;
-  error?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** 任务数据结构 */
-export interface Task {
-  id: string;
-  prompt: string;
-  assignedAccountId: string | null;
-  status: TaskStatus;
-  /** 生成模式（默认 chat） */
-  mode: GenerationMode;
-  /** 视频生成配置 */
-  videoConfig?: {
-    model: VideoModel;
-    duration: VideoDuration;
-    aspectRatio: VideoAspectRatio;
-  };
-  /** 参考图片路径列表（图生视频/图生图用） */
-  attachments?: string[];
-  /** 参考音频文件路径（视频生成配音用） */
-  audioAttachment?: string;
-  result: string | null;
-  outputs: string[];
-  /** 跨多次运行保留的产物记录；outputs 仅表示最近一次运行。 */
-  artifacts?: TaskArtifact[];
-  /** 当前或最近一次执行的可恢复快照。 */
-  runtime?: TaskRunSnapshot;
-  /** 结构化失败原因，供恢复、筛选和统计使用。 */
-  errorInfo?: TaskErrorInfo;
-  runHistory?: TaskRunRecord[];
-  lock?: TaskLock;
-  batchId?: string;
-  source?: 'manual' | 'csv' | 'workflow';
-  dependsOnTaskIds?: string[];
-  dependencyPolicy?: DependencyPolicy;
-  projectId?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** 编辑并重新运行任务时可更新的完整输入。 */
-export interface TaskUpdateInput {
-  prompt: string;
-  videoConfig?: Task['videoConfig'];
-  attachments?: string[];
-  audioAttachment?: string;
-}
-
-export interface CsvImportResult {
-  success: boolean;
-  tasks?: Task[];
-  batchId?: string;
-  imported?: number;
-  skipped?: number;
-  errors?: string[];
-  error?: string;
-}
-
-export interface AdapterSelfCheckItem {
-  key: string;
-  label: string;
-  ok: boolean;
-  detail: string;
-}
-
-export interface AdapterSelfCheckReport {
-  adapterVersion: string;
-  pageUrl: string;
-  checkedAt: string;
-  score: number;
-  items: AdapterSelfCheckItem[];
-}
-
-export interface AdapterRuleBundle {
-  version: string;
-  createdAt: string;
-  rules: {
-    input: string[];
-    submit: string[];
-    dialogs: string[];
-    uploads: string[];
-    media: string[];
-  };
-}
 
 /** 任务状态标签配置 */
 export const TASK_STATUS_CONFIG: Record<TaskStatus, { label: string; color: string; className: string }> = {

@@ -1,16 +1,12 @@
 import { ipcMain } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { readJSON, writeJSON } from '../utils/store';
+import type { Project } from '@doubao-studio/contracts';
 
-export interface Project {
-  id: string;
-  name: string;
-  description: string;
-  color: string;
-  archived: boolean;
-  createdAt: string;
-  updatedAt: string;
-}
+// 领域模型接口已迁移至 @doubao-studio/contracts。
+// 此处通过 import type 引用，不产生运行时依赖。
+
+export type { Project };
 
 const STORE_FILE = 'projects.json';
 const DEFAULT_PROJECT_ID = 'default-project';

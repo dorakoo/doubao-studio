@@ -16,3 +16,19 @@ export type {
   VideoAspectRatio,
   DependencyPolicy,
 } from './enums';
+
+export type {
+  SeedanceQuota,
+  AccountHealth,
+  AccountScheduling,
+  Account,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskRunRecord,
+  TaskLock,
+  TaskArtifact,
+  DownloadJob,
+  Task,
+  Project,
+  LogEntry,
+} from './domain';

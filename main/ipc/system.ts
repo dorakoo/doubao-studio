@@ -2,8 +2,10 @@ import { app, dialog, ipcMain } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getDataDir, readJSON, writeJSON } from '../utils/store';
+import type { LogEntry } from '@doubao-studio/contracts';
 
-interface LogEntry { id: string; level: 'info' | 'warn' | 'error'; scope: string; message: string; taskId?: string; accountId?: string; createdAt: string; }
+// 领域模型接口已迁移至 @doubao-studio/contracts。
+// 此处通过 import type 引用，不产生运行时依赖。
 
 const DATA_FILES = ['schema.json', 'projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json'];
 const ARRAY_DATA_FILES = new Set(['projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json', 'logs.json']);

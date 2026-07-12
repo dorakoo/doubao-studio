@@ -6,7 +6,7 @@
  */
 
 import { create } from 'zustand';
-import type { Account, AccountStatus, TaskErrorCode } from '../types';
+import type { Account, AccountStatus } from '../types';
 
 // ==================== 类型 ====================
 
@@ -39,7 +39,7 @@ interface AccountState {
   togglePinned: (id: string) => Promise<void>;
   recordSeedanceUsage: (id: string, units: number) => Promise<void>;
   markSeedanceExhausted: (id: string) => Promise<void>;
-  recordAccountOutcome: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: TaskErrorCode) => Promise<void>;
+  recordAccountOutcome: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: string) => Promise<void>;
   updateScheduling: (id: string, updates: Partial<NonNullable<Account['scheduling']>>) => Promise<void>;
   /** 清除错误 */
   clearError: () => void;

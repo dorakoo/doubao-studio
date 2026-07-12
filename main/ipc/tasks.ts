@@ -15,129 +15,29 @@ import type {
   VideoDuration,
   VideoAspectRatio,
   TaskStatus,
-  TaskStage,
-  DependencyPolicy,
+  Task,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskRunRecord,
+  TaskLock,
+  TaskArtifact,
+  DownloadJob,
 } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-// 枚举/联合类型已迁移至 @doubao-studio/contracts，此处仅保留接口定义。
+// 枚举/联合类型和领域模型接口已迁移至 @doubao-studio/contracts。
+// 此处通过 import type 引用，不产生运行时依赖。
 
-export interface TaskErrorInfo {
-  code: string;
-  message: string;
-  recoverable: boolean;
-  detectedAt: string;
-}
-
-export interface TaskRunSnapshot {
-  runId: string;
-  attempt: number;
-  stage: TaskStage;
-  message: string;
-  startedAt: string;
-  stageStartedAt: string;
-  lastHeartbeatAt: string;
-  submittedAt?: string;
-  conversationUrl?: string;
-  input: {
-    prompt: string;
-    mode: GenerationMode;
-    videoConfig?: Task['videoConfig'];
-    attachments: string[];
-    audioAttachment?: string;
-  };
-}
-
-export interface TaskRunRecord {
-  runId: string;
-  attempt: number;
-  startedAt: string;
-  finishedAt?: string;
-  finalStage?: TaskStage;
-  outcome?: 'done' | 'failed' | 'paused' | 'cancelled';
-  errorCode?: string;
-  durationMs?: number;
-}
-
-export interface TaskLock {
-  ownerId: string;
-  acquiredAt: string;
-  expiresAt: string;
-}
-
-export interface TaskArtifact {
-  id: string;
-  url: string;
-  kind: 'image' | 'video' | 'file';
-  source: 'network' | 'page' | 'manual';
-  runId?: string;
-  conversationUrl?: string;
-  discoveredAt: string;
-  validation?: {
-    state: 'unknown' | 'valid' | 'expired' | 'invalid';
-    checkedAt: string;
-    contentType?: string;
-    contentLength?: number;
-    statusCode?: number;
-    error?: string;
-  };
-}
-
-export interface DownloadJob {
-  id: string;
-  taskId: string;
-  accountId: string | null;
-  mode: GenerationMode;
-  url: string;
-  status: 'queued' | 'downloading' | 'done' | 'failed';
-  attempts: number;
-  saveDir: string;
-  filePath?: string;
-  bytes?: number;
-  error?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** 任务数据结构 */
-export interface Task {
-  id: string;
-  /** 提示词文本 */
-  prompt: string;
-  /** 分配的目标账号 ID */
-  assignedAccountId: string | null;
-  /** 任务状态 */
-  status: TaskStatus;
-  /** 生成模式 */
-  mode: GenerationMode;
-  /** 视频生成配置 */
-  videoConfig?: {
-    model: VideoModel;
-    duration: VideoDuration;
-    aspectRatio: VideoAspectRatio;
-  };
-  /** 参考图片路径列表 */
-  attachments?: string[];
-  /** 参考音频文件路径 */
-  audioAttachment?: string;
-  /** 执行结果/产出描述 */
-  result: string | null;
-  /** 产物的下载链接列表 */
-  outputs: string[];
-  artifacts?: TaskArtifact[];
-  runtime?: TaskRunSnapshot;
-  errorInfo?: TaskErrorInfo;
-  runHistory?: TaskRunRecord[];
-  lock?: TaskLock;
-  batchId?: string;
-  source?: 'manual' | 'csv' | 'workflow';
-  dependsOnTaskIds?: string[];
-  dependencyPolicy?: DependencyPolicy;
-  projectId?: string;
-  createdAt: string;
-  updatedAt: string;
-}
+export type {
+  Task,
+  TaskErrorInfo,
+  TaskRunSnapshot,
+  TaskRunRecord,
+  TaskLock,
+  TaskArtifact,
+  DownloadJob,
+};
 
 // ==================== 数据持久化 ====================
 
