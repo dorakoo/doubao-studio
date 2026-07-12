@@ -25,6 +25,7 @@
 | [CreateTaskRequest](../../schemas/capability/v1/create-task-request.schema.json) | `https://doubao.studio/schemas/capability/v1/create-task-request.schema.json` | 创建任务请求 |
 | [TaskSnapshot](../../schemas/capability/v1/task-snapshot.schema.json) | `https://doubao.studio/schemas/capability/v1/task-snapshot.schema.json` | 任务公共视图快照 |
 | [TaskEvent](../../schemas/capability/v1/task-event.schema.json) | `https://doubao.studio/schemas/capability/v1/task-event.schema.json` | 任务事件 |
+| [TaskEventsResponse](../../schemas/capability/v1/task-events-response.schema.json) | `https://doubao.studio/schemas/capability/v1/task-events-response.schema.json` | 事件查询响应包络（含 `serviceInstanceId` 和 `events`） |
 | [ArtifactDescriptor](../../schemas/capability/v1/artifact-descriptor.schema.json) | `https://doubao.studio/schemas/capability/v1/artifact-descriptor.schema.json` | 产物描述符 |
 | [ApiError](../../schemas/capability/v1/api-error.schema.json) | `https://doubao.studio/schemas/capability/v1/api-error.schema.json` | 统一错误响应 |
 
