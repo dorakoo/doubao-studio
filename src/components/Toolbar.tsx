@@ -119,9 +119,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   // 处理暂停/继续
   const handleTogglePause = async () => {
     if (!schedulerPaused) {
-      await batchPause();
+      const paused = await batchPause();
+      if (paused) message.info('任务调度已暂停');
     } else {
-      await resumeAll();
+      const resumed = await resumeAll();
+      if (resumed) {
+        message.success('任务调度已恢复');
+      } else {
+        message.warning(useTaskStore.getState().error || '部分任务未能恢复，请查看任务详情');
+      }
     }
   };
 

@@ -150,6 +150,8 @@ function resetTaskForQueue(task: Task): void {
   task.result = null;
   task.outputs = [];
   task.errorInfo = undefined;
+  // 暂停/中断任务重新入队时不应继承旧运行锁，否则恢复后会被当作仍在执行。
+  task.lock = undefined;
   if (task.runtime) {
     const now = new Date().toISOString();
     task.runtime = {

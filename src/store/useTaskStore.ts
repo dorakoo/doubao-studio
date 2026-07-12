@@ -344,16 +344,22 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   resumeAll: async () => {
     const pausedTasks = get().tasks.filter((task) => task.status === 'paused');
     const resumed = new Map<string, Task>();
+    const failures: string[] = [];
     for (const task of pausedTasks) {
       const result = await window.electronAPI.tasks.retry(task.id);
-      if (result.success && result.task) resumed.set(task.id, result.task);
+      if (result.success && result.task) {
+        resumed.set(task.id, result.task);
+      } else {
+        failures.push(result.error || `任务 ${task.id.slice(0, 8)} 恢复失败`);
+      }
     }
     set({
       schedulerPaused: false,
       tasks: get().tasks.map((task) => resumed.get(task.id) || task),
+      error: failures.length > 0 ? `部分任务未恢复：${failures.slice(0, 2).join('；')}` : null,
     });
     setTimeout(() => get().processQueue(), 0);
-    return true;
+    return failures.length === 0;
   },
 
   getCompletedOutputs: async () => {
@@ -706,69 +712,76 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   processQueue: () => {
     if (queueProcessing) return;
     queueProcessing = true;
-    const state = get();
-    if (state.schedulerPaused) {
-      queueProcessing = false;
-      return;
-    }
+    let handedOff = false;
+    try {
+      const state = get();
+      if (state.schedulerPaused) return;
     // 找出所有已指派但还在 queued 状态的任务
-    const queuedTasks = state.tasks.filter(
-      (t) => t.status === 'queued' && t.assignedAccountId
-    );
+      const queuedTasks = state.tasks.filter(
+        (t) => t.status === 'queued' && t.assignedAccountId
+      );
 
     // 按创建时间排序
-    queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
 
-    for (const task of queuedTasks) {
-      const dependency = evaluateDependencies(task, state.tasks);
-      if (dependency.state === 'missing' || dependency.state === 'failed' || dependency.state === 'invalid') {
-        const message = dependency.message!;
-        const now = new Date().toISOString();
-        set((current) => ({
-          tasks: current.tasks.map((item) => item.id === task.id ? {
-            ...item,
-            status: 'fail' as TaskStatus,
+      for (const task of queuedTasks) {
+        const dependency = evaluateDependencies(task, state.tasks);
+        if (dependency.state === 'missing' || dependency.state === 'failed' || dependency.state === 'invalid') {
+          const message = dependency.message!;
+          const now = new Date().toISOString();
+          set((current) => ({
+            tasks: current.tasks.map((item) => item.id === task.id ? {
+              ...item,
+              status: 'fail' as TaskStatus,
+              result: message,
+              errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
+              updatedAt: now,
+            } : item),
+          }));
+          void window.electronAPI.tasks.updateRuntime(task.id, {
+            status: 'fail',
             result: message,
             errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
-            updatedAt: now,
-          } : item),
-        }));
-        void window.electronAPI.tasks.updateRuntime(task.id, {
-          status: 'fail',
-          result: message,
-          errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
-        });
-        continue;
-      }
-      if (dependency.state !== 'ready') continue;
-      const accountId = task.assignedAccountId!;
-      const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-      if (getAccountBlockReason(account, task)) {
-        const candidates = useAccountStore.getState().accounts
-          .filter((candidate) => candidate.id !== accountId)
-            .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating', 'waiting_verification'].includes(item.status)).length, task.mode) }))
-          .filter((item) => Number.isFinite(item.score))
-          .sort((a, b) => a.score - b.score);
-        if (candidates[0]) {
-          void state.assignTask(task.id, candidates[0].candidate.id).finally(() => {
+          });
+          continue;
+        }
+        if (dependency.state !== 'ready') continue;
+        const accountId = task.assignedAccountId!;
+        const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
+        if (getAccountBlockReason(account, task)) {
+          const candidates = useAccountStore.getState().accounts
+            .filter((candidate) => candidate.id !== accountId)
+              .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating', 'waiting_verification'].includes(item.status)).length, task.mode) }))
+            .filter((item) => Number.isFinite(item.score))
+            .sort((a, b) => a.score - b.score);
+          if (candidates[0]) {
+            handedOff = true;
+            void state.assignTask(task.id, candidates[0].candidate.id).finally(() => {
+              queueProcessing = false;
+              get().processQueue();
+            });
+            return;
+          }
+          continue;
+        }
+        if (!state.accountBusy[accountId]) {
+          console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
+          handedOff = true;
+          void state.startAutomation(task.id).finally(() => {
             queueProcessing = false;
             get().processQueue();
           });
-          return;
+          return; // 每次只启动一个，完成锁定后继续调度其他空闲账号
         }
-        continue;
       }
-      if (!state.accountBusy[accountId]) {
-        console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
-        void state.startAutomation(task.id).finally(() => {
-          queueProcessing = false;
-          get().processQueue();
-        });
-        // 重新获取 state（startAutomation 已经 set 了）
-        return; // 每次只启动一个，完成锁定后继续调度其他空闲账号
-      }
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err.message : String(err);
+      console.error('[TaskStore] 队列调度异常：', err);
+      set({ error: `任务调度异常：${error}` });
+    } finally {
+      // assign/startAutomation 已接管后，由其 finally 释放调度锁；其余路径必须立即释放。
+      if (!handedOff) queueProcessing = false;
     }
-    queueProcessing = false;
   },
 
   getNextTaskForAccount: (accountId: string) => {

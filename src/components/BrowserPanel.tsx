@@ -82,12 +82,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
   const manual15sRef = useRef<Record<string, boolean>>({});
+  const manualVideoUsageRef = useRef<Set<string>>(new Set());
   /** 每个账号的定时器集合，用于组件卸载或账号删除时统一清理 */
   const timersRef = useRef<Map<string, Set<ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>>>(new Map());
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
   const [manual15sByAccount, setManual15sByAccount] = useState<Record<string, boolean>>({});
+  const [manualVideoExtracting, setManualVideoExtracting] = useState(false);
 
   const accountBusy = useTaskStore((s) => s.accountBusy);
   const accountAutoState = useTaskStore((s) => s.accountAutomationState);
@@ -354,6 +356,69 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     message.success(enabled ? '手动 15 秒脚本已开启' : '手动 15 秒脚本已关闭');
   };
 
+  const handleExtractCurrentVideo = async (): Promise<void> => {
+    if (!activeAccount) return;
+    const accountId = activeAccount.id;
+    const webview = registryRef.current.get(accountId);
+    if (!webview) {
+      message.error('当前账号页面尚未就绪');
+      return;
+    }
+    if (accountBusy[accountId]) {
+      message.warning('当前账号正在执行自动化任务，请等待完成或暂停任务后再提取');
+      return;
+    }
+
+    setManualVideoExtracting(true);
+    useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在提取当前对话的视频地址...');
+    try {
+      const result = await manualResolveVideoArtifact(webview, {
+        conversationUrl: webview.getURL(),
+        timeoutMs: 30_000,
+        isManual: true,
+      });
+      const outputs = result.status === 'resolved' && result.url
+        ? normalizeVideoUrls([result.url])
+        : [];
+      if (outputs.length === 0) {
+        message.warning(`暂未提取到视频地址：${formatResolutionMessage(result)}`);
+        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+        return;
+      }
+
+      const manualTaskId = `manual-${Date.now().toString(36)}`;
+      const download = await window.electronAPI.tasks.downloadOutputs([
+        {
+          taskId: manualTaskId,
+          prompt: '手动对话视频',
+          outputs,
+          accountId,
+          mode: 'video',
+        },
+      ]);
+      if (!download.success) {
+        throw new Error(download.error || '视频地址已提取，但下载失败');
+      }
+
+      // 同一会话产物在本次应用会话内只计入一次，避免重复点击让额度预测虚减。
+      const usageKey = `${accountId}:${result.vid || outputs[0]}`;
+      if (!manualVideoUsageRef.current.has(usageKey)) {
+        manualVideoUsageRef.current.add(usageKey);
+        await useAccountStore.getState().recordSeedanceUsage(accountId, 1);
+      }
+      await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
+      useTaskStore.getState().setAccountAutomationState(accountId, 'completed', `视频已下载（来源：${result.source || 'unknown'}）`);
+      message.success(`已下载 ${download.count} 个视频，并更新 Seedance 额度预测`);
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err.message : String(err);
+      console.error('[BrowserPanel] 手动视频提取失败：', err);
+      message.error(`提取或下载失败：${error}`);
+      useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+    } finally {
+      setManualVideoExtracting(false);
+    }
+  };
+
   // ---- 立即终止自动化等待；可携带新提示词，在终止后重新排队 ----
   useEffect(() => {
     const handleCancelAutomation = (event: Event) => {
@@ -415,6 +480,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           const outputs = normalizeVideoUrls([result.url]);
           if (outputs.length > 0) {
             await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
+            // 自动流程在成功完成时已记账；仅为此前未完成、现在由人工补提取成功的任务补记一次额度。
+            if (task.status !== 'done') {
+              const usageKey = `${accountId}:${task.id}:${result.vid || outputs[0]}`;
+              if (!manualVideoUsageRef.current.has(usageKey)) {
+                manualVideoUsageRef.current.add(usageKey);
+                const units = task.videoConfig?.model === 'seedance-2.0' ? 2 : 1;
+                await useAccountStore.getState().recordSeedanceUsage(accountId, units);
+              }
+            }
             useTaskStore.getState().setAccountAutomationState(accountId, 'completed', `视频地址已提取（来源：${result.source}）`);
             message.success(`已为该任务绑定视频地址（来源：${result.source}）`);
             return;
@@ -887,6 +961,26 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         <div className="browser-url-bar">
           <span className="browser-url-text">doubao.com</span>
         </div>
+        <Tooltip title="提取并下载当前对话视频，同时更新额度预测">
+          <button
+            onClick={() => void handleExtractCurrentVideo()}
+            title="提取当前对话视频"
+            disabled={manualVideoExtracting || !!accountBusy[activeAccount.id]}
+            style={{
+              width: 30,
+              height: 30,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: '#b8b4ff',
+              opacity: manualVideoExtracting || accountBusy[activeAccount.id] ? 0.45 : 1,
+            }}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </Tooltip>
         <Tooltip title="开启后，当前账号在页面中手动提交的视频请求会被改为 15 秒">
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
             <Switch
