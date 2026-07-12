@@ -32,3 +32,75 @@ export type {
   Project,
   LogEntry,
 } from './domain';
+
+// ==================== IPC DTO ====================
+
+export type {
+  AccountOperationResult,
+  AccountResult,
+  AccountAddParams,
+  AccountUpdateParams,
+  AccountIdParams,
+  AccountSetStatusParams,
+  AccountSetPinnedParams,
+  AccountUpdateSeedanceQuotaParams,
+  AccountHealthAction,
+  AccountUpdateHealthParams,
+  AccountUpdateSchedulingParams,
+} from './dto/accounts';
+
+export type {
+  TaskOperationResult,
+  TaskResult,
+  TaskAddResult,
+  TaskAddParams,
+  TaskAssignParams,
+  TaskUpdateStatusParams,
+  TaskUpdateRuntimeParams,
+  TaskAcquireLockParams,
+  TaskReleaseLockParams,
+  TaskImportCsvParams,
+  TaskUpdateInput,
+  TaskUpdateParams,
+  TaskIdParams,
+  CsvImportResult,
+  CompletedOutput,
+  TaskDownloadOutputsParams,
+  TaskDownloadOutputsResult,
+  FileSelectResult,
+  AudioSelectResult,
+  ReadFileAsBase64Result,
+  SelectSaveDirResult,
+  TaskValidateArtifactParams,
+  TaskValidateArtifactResult,
+  TaskSaveAdapterReportParams,
+  TaskSelectAdapterRulesResult,
+  AdapterSelfCheckItem,
+  AdapterSelfCheckReport,
+  AdapterRuleBundle,
+  ExportDiagnosticsResult,
+} from './dto/tasks';
+
+export type {
+  ProjectOperationResult,
+  ProjectResult,
+  ProjectAddParams,
+  ProjectUpdateParams,
+  ProjectIdParams,
+} from './dto/projects';
+
+export type {
+  IntegrityCheckResult,
+  ExportBackupResult,
+  RestoreBackupResult,
+  ExportProjectResult,
+  CheckUpdateResult,
+} from './dto/system';
+
+export type {
+  LogOperationResult,
+  LogAppendParams,
+  LogListResult,
+} from './dto/logs';
+
+export type { ElectronAPI } from './dto/electron-api';

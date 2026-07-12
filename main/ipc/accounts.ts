@@ -7,11 +7,21 @@
 import { ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { v4 as uuidv4 } from 'uuid';
-import type { AccountStatus, Account } from '@doubao-studio/contracts';
+import type {
+  Account,
+  AccountAddParams,
+  AccountUpdateParams,
+  AccountIdParams,
+  AccountSetStatusParams,
+  AccountSetPinnedParams,
+  AccountUpdateSeedanceQuotaParams,
+  AccountUpdateHealthParams,
+  AccountUpdateSchedulingParams,
+} from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-// 枚举/联合类型和领域模型接口已迁移至 @doubao-studio/contracts。
+// 枚举/联合类型、领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
 
 export type { Account };
@@ -139,7 +149,7 @@ export function registerAccountIPC(): void {
   // ---- 添加账号 ----
   ipcMain.handle(
     'accounts:add',
-    async (_event, params: { name: string }): Promise<{ success: boolean; account?: Account; error?: string }> => {
+    async (_event, params: AccountAddParams): Promise<{ success: boolean; account?: Account; error?: string }> => {
       try {
         const trimmedName = params.name?.trim();
         if (!trimmedName) {
@@ -197,7 +207,7 @@ export function registerAccountIPC(): void {
   // ---- 编辑账号名称 ----
   ipcMain.handle(
     'accounts:update',
-    async (_event, params: { id: string; name: string }): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: AccountUpdateParams): Promise<{ success: boolean; error?: string }> => {
       const trimmedName = params.name?.trim();
       if (!trimmedName) {
         return { success: false, error: '账号名称不能为空' };
@@ -227,7 +237,7 @@ export function registerAccountIPC(): void {
   // ---- 删除账号 ----
   ipcMain.handle(
     'accounts:delete',
-    async (_event, params: { id: string }): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: AccountIdParams): Promise<{ success: boolean; error?: string }> => {
       const accounts = loadAccounts();
       const idx = accounts.findIndex((a) => a.id === params.id);
       if (idx === -1) {
@@ -255,7 +265,7 @@ export function registerAccountIPC(): void {
   // ---- 刷新账号（清除 Session 后重新加载） ----
   ipcMain.handle(
     'accounts:refresh',
-    async (_event, params: { id: string }): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: AccountIdParams): Promise<{ success: boolean; error?: string }> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
       if (!account) {
@@ -278,7 +288,7 @@ export function registerAccountIPC(): void {
   // ---- 更新账号状态 ----
   ipcMain.handle(
     'accounts:setStatus',
-    async (_event, params: { id: string; status: AccountStatus }): Promise<{ success: boolean }> => {
+    async (_event, params: AccountSetStatusParams): Promise<{ success: boolean }> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
       if (!account) return { success: false };
@@ -294,7 +304,7 @@ export function registerAccountIPC(): void {
   // ---- 切换置顶状态 ----
   ipcMain.handle(
     'accounts:setPinned',
-    async (_event, params: { id: string; pinned: boolean }): Promise<{ success: boolean }> => {
+    async (_event, params: AccountSetPinnedParams): Promise<{ success: boolean }> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
       if (!account) return { success: false };
@@ -307,7 +317,7 @@ export function registerAccountIPC(): void {
     }
   );
 
-  ipcMain.handle('accounts:updateScheduling', async (_event, params: { id: string; updates: Partial<Account['scheduling']> }) => {
+  ipcMain.handle('accounts:updateScheduling', async (_event, params: AccountUpdateSchedulingParams) => {
     const accounts = loadAccounts();
     const account = accounts.find((item) => item.id === params.id);
     if (!account) return { success: false };
@@ -323,11 +333,7 @@ export function registerAccountIPC(): void {
 
   ipcMain.handle(
     'accounts:updateHealth',
-    async (_event, params: {
-      id: string;
-      action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear';
-      errorCode?: string;
-    }): Promise<{ success: boolean; account?: Account; error?: string }> => {
+    async (_event, params: AccountUpdateHealthParams): Promise<{ success: boolean; account?: Account; error?: string }> => {
       const accounts = loadAccounts();
       const account = accounts.find((item) => item.id === params.id);
       if (!account) return { success: false };
@@ -375,7 +381,7 @@ export function registerAccountIPC(): void {
   // ---- 更新 Seedance 每日额度预测 ----
   ipcMain.handle(
     'accounts:updateSeedanceQuota',
-    async (_event, params: { id: string; action: 'consume' | 'exhausted'; units?: number }): Promise<{ success: boolean; account?: Account; error?: string }> => {
+    async (_event, params: AccountUpdateSeedanceQuotaParams): Promise<{ success: boolean; account?: Account; error?: string }> => {
       const accounts = loadAccounts();
       const account = accounts.find((item) => item.id === params.id);
       if (!account) return { success: false };
@@ -400,7 +406,7 @@ export function registerAccountIPC(): void {
   // ---- 获取账号 Session 信息 ----
   ipcMain.handle(
     'accounts:getPartition',
-    async (_event, params: { id: string }): Promise<string | null> => {
+    async (_event, params: AccountIdParams): Promise<string | null> => {
       const accounts = loadAccounts();
       const account = accounts.find((a) => a.id === params.id);
       return account ? account.partition : null;

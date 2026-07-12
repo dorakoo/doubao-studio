@@ -5,50 +5,11 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
-
-// ==================== 类型定义 ====================
-
-export interface Account {
-  id: string;
-  name: string;
-  avatar: string;
-  partition: string;
-  status: 'idle' | 'busy' | 'error';
-  pinned: boolean;
-  seedanceQuota?: {
-    date: string;
-    usedUnits: number;
-    estimatedTotalUnits: number;
-    exhausted: boolean;
-    updatedAt: string;
-  };
-  health?: any;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
-
-export interface Task {
-  id: string;
-  prompt: string;
-  assignedAccountId: string | null;
-  status: 'queued' | 'executing' | 'generating' | 'waiting_verification' | 'paused' | 'done' | 'fail' | 'cancelled';
-  mode: GenerationMode;
-  videoConfig?: any;
-  attachments?: string[];
-  audioAttachment?: string;
-  result: string | null;
-  outputs: string[];
-  runtime?: any;
-  errorInfo?: any;
-  createdAt: string;
-  updatedAt: string;
-}
+import type { ElectronAPI, Account, Task, GenerationMode } from '@doubao-studio/contracts';
 
 // ==================== 暴露 API ====================
 
-contextBridge.exposeInMainWorld('electronAPI', {
+const electronAPI = {
   projects: {
     list: (): Promise<any[]> => ipcRenderer.invoke('projects:list'),
     add: (name: string, description?: string, color?: string): Promise<any> => ipcRenderer.invoke('projects:add', { name, description, color }),
@@ -167,4 +128,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     toggleMaximize: (): void => ipcRenderer.send('window:toggleMaximize'),
     close: (): void => ipcRenderer.send('window:close'),
   },
-});
+} satisfies ElectronAPI;
+
+contextBridge.exposeInMainWorld('electronAPI', electronAPI);

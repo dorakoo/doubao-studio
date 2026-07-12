@@ -22,11 +22,24 @@ import type {
   TaskLock,
   TaskArtifact,
   DownloadJob,
+  TaskAddParams,
+  TaskAssignParams,
+  TaskUpdateStatusParams,
+  TaskUpdateRuntimeParams,
+  TaskAcquireLockParams,
+  TaskReleaseLockParams,
+  TaskImportCsvParams,
+  TaskUpdateInput,
+  TaskIdParams,
+  CompletedOutput,
+  TaskDownloadOutputsParams,
+  TaskValidateArtifactParams,
+  TaskSaveAdapterReportParams,
 } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
 
-// 枚举/联合类型和领域模型接口已迁移至 @doubao-studio/contracts。
+// 枚举/联合类型、领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
 
 export type {
@@ -211,14 +224,7 @@ export function registerTaskIPC(): void {
   // ---- 添加任务（支持批量 + 指定模式 + 视频配置 + 附件） ----
   ipcMain.handle(
     'tasks:add',
-    async (_event, params: {
-      prompts: string[];
-      mode?: GenerationMode;
-      videoConfig?: Task['videoConfig'];
-      attachments?: string[];
-      audioAttachment?: string;
-      projectId?: string;
-    }): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
+    async (_event, params: TaskAddParams): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
       try {
         if (!params.prompts || params.prompts.length === 0) {
           return { success: false, error: '请输入至少一条提示词' };
@@ -263,7 +269,7 @@ export function registerTaskIPC(): void {
   // ---- 指派任务给账号 ----
   ipcMain.handle(
     'tasks:assign',
-    async (_event, params: { taskId: string; accountId: string }): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: TaskAssignParams): Promise<{ success: boolean; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((t) => t.id === params.taskId);
       if (!task) {
@@ -287,7 +293,7 @@ export function registerTaskIPC(): void {
     'tasks:updateStatus',
     async (
       _event,
-      params: { taskId: string; status: TaskStatus; result?: string; outputs?: string[] }
+      params: TaskUpdateStatusParams
     ): Promise<{ success: boolean; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((t) => t.id === params.taskId);
@@ -316,12 +322,7 @@ export function registerTaskIPC(): void {
       _event,
       params: {
         taskId: string;
-        updates: {
-          prompt: string;
-          videoConfig?: Task['videoConfig'];
-          attachments?: string[];
-          audioAttachment?: string;
-        };
+        updates: TaskUpdateInput;
       }
     ): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const tasks = loadTasks();
@@ -350,7 +351,7 @@ export function registerTaskIPC(): void {
   // ---- 删除任务 ----
   ipcMain.handle(
     'tasks:delete',
-    async (_event, params: { taskId: string }): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: TaskIdParams): Promise<{ success: boolean; error?: string }> => {
       const tasks = loadTasks();
       const idx = tasks.findIndex((t) => t.id === params.taskId);
       if (idx === -1) {
@@ -375,7 +376,7 @@ export function registerTaskIPC(): void {
   // ---- 重试任务（失败/已完成任务重置为排队状态） ----
   ipcMain.handle(
     'tasks:retry',
-    async (_event, params: { taskId: string }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+    async (_event, params: TaskIdParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((t) => t.id === params.taskId);
       if (!task) {
@@ -418,13 +419,7 @@ export function registerTaskIPC(): void {
   // ---- 持久化运行阶段、心跳与结构化错误 ----
   ipcMain.handle(
     'tasks:updateRuntime',
-    async (_event, params: {
-      taskId: string;
-      status?: TaskStatus;
-      runtime?: Partial<TaskRunSnapshot>;
-      errorInfo?: TaskErrorInfo | null;
-      result?: string;
-    }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+    async (_event, params: TaskUpdateRuntimeParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((item) => item.id === params.taskId);
       if (!task) return { success: false, error: '任务不存在' };
@@ -463,7 +458,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:acquireLock',
-    async (_event, params: { taskId: string; ownerId: string }): Promise<{ success: boolean; task?: Task; error?: string }> => {
+    async (_event, params: TaskAcquireLockParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((item) => item.id === params.taskId);
       if (!task) return { success: false, error: '任务不存在' };
@@ -491,7 +486,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:importCsv',
-    async (_event, params?: { projectId?: string }): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
+    async (_event, params?: TaskImportCsvParams): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
       try {
         const selected = await dialog.showOpenDialog({
           title: '导入 CSV 任务',
@@ -576,7 +571,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:releaseLock',
-    async (_event, params: { taskId: string; ownerId?: string }): Promise<{ success: boolean }> => {
+    async (_event, params: TaskReleaseLockParams): Promise<{ success: boolean }> => {
       const tasks = loadTasks();
       const task = tasks.find((item) => item.id === params.taskId);
       if (task?.lock && (!params.ownerId || task.lock.ownerId === params.ownerId)) {
@@ -591,7 +586,7 @@ export function registerTaskIPC(): void {
   // ---- 批量获取已完成任务的产物 ----
   ipcMain.handle(
     'tasks:getCompletedOutputs',
-    async (): Promise<Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>> => {
+    async (): Promise<CompletedOutput[]> => {
       const tasks = loadTasks();
       return tasks
         .filter((t) => t.status === 'done' && t.outputs.length > 0)
@@ -685,10 +680,7 @@ export function registerTaskIPC(): void {
     'tasks:downloadOutputs',
     async (
       _event,
-      params: {
-        outputs: Array<{ taskId: string; prompt: string; outputs: string[]; accountId: string | null; mode: GenerationMode }>;
-        saveDir?: string;
-      }
+      params: TaskDownloadOutputsParams
     ): Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }> => {
       try {
         const fs = require('fs');
@@ -877,7 +869,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:validateArtifact',
-    async (_event, params: { taskId: string; artifactId: string }): Promise<{ success: boolean; artifact?: TaskArtifact; error?: string }> => {
+    async (_event, params: TaskValidateArtifactParams): Promise<{ success: boolean; artifact?: TaskArtifact; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((item) => item.id === params.taskId);
       const artifact = task?.artifacts?.find((item) => item.id === params.artifactId);
@@ -919,7 +911,7 @@ export function registerTaskIPC(): void {
 
   ipcMain.handle(
     'tasks:saveAdapterReport',
-    async (_event, params: { accountId: string; report: Record<string, any> }): Promise<{ success: boolean }> => {
+    async (_event, params: TaskSaveAdapterReportParams): Promise<{ success: boolean }> => {
       const reports = readJSON<Array<Record<string, any>>>('adapter-diagnostics.json', []);
       reports.push({ ...params.report, accountId: params.accountId, savedAt: new Date().toISOString() });
       writeJSON('adapter-diagnostics.json', reports.slice(-50));

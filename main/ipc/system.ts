@@ -2,9 +2,9 @@ import { app, dialog, ipcMain } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { getDataDir, readJSON, writeJSON } from '../utils/store';
-import type { LogEntry } from '@doubao-studio/contracts';
+import type { LogEntry, LogAppendParams } from '@doubao-studio/contracts';
 
-// 领域模型接口已迁移至 @doubao-studio/contracts。
+// 领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
 
 const DATA_FILES = ['schema.json', 'projects.json', 'accounts.json', 'tasks.json', 'downloads.json', 'adapter-diagnostics.json'];
@@ -14,7 +14,7 @@ import { compareVersions } from '../utils/version';
 
 export function registerSystemIPC(): void {
   ipcMain.handle('logs:list', async () => readJSON<LogEntry[]>('logs.json', []));
-  ipcMain.handle('logs:append', async (_event, entry: Omit<LogEntry, 'id' | 'createdAt'>) => {
+  ipcMain.handle('logs:append', async (_event, entry: LogAppendParams) => {
     const logs = readJSON<LogEntry[]>('logs.json', []);
     logs.push({ ...entry, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: new Date().toISOString() });
     writeJSON('logs.json', logs.slice(-5000));

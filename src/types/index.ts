@@ -30,6 +30,12 @@ import type {
   Task,
   Project,
   LogEntry,
+  // IPC DTO（从 contracts re-export，保持渲染进程旧导入路径可用）
+  TaskUpdateInput,
+  CsvImportResult,
+  AdapterSelfCheckItem,
+  AdapterSelfCheckReport,
+  AdapterRuleBundle,
 } from '@doubao-studio/contracts';
 
 // 兼容性 re-export：保持渲染进程旧导入路径可用
@@ -56,54 +62,14 @@ export type {
   Task,
   Project,
   LogEntry,
+  TaskUpdateInput,
+  CsvImportResult,
+  AdapterSelfCheckItem,
+  AdapterSelfCheckReport,
+  AdapterRuleBundle,
 };
 
 // ==================== 渲染端专属类型 ====================
-
-/** 编辑并重新运行任务时可更新的完整输入。 */
-export interface TaskUpdateInput {
-  prompt: string;
-  videoConfig?: Task['videoConfig'];
-  attachments?: string[];
-  audioAttachment?: string;
-}
-
-export interface CsvImportResult {
-  success: boolean;
-  tasks?: Task[];
-  batchId?: string;
-  imported?: number;
-  skipped?: number;
-  errors?: string[];
-  error?: string;
-}
-
-export interface AdapterSelfCheckItem {
-  key: string;
-  label: string;
-  ok: boolean;
-  detail: string;
-}
-
-export interface AdapterSelfCheckReport {
-  adapterVersion: string;
-  pageUrl: string;
-  checkedAt: string;
-  score: number;
-  items: AdapterSelfCheckItem[];
-}
-
-export interface AdapterRuleBundle {
-  version: string;
-  createdAt: string;
-  rules: {
-    input: string[];
-    submit: string[];
-    dialogs: string[];
-    uploads: string[];
-    media: string[];
-  };
-}
 
 // ==================== 渲染端专属常量 ====================
 

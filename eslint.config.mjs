@@ -27,6 +27,8 @@ export default tseslint.config(
       'release/**',
       'node_modules/**',
       'data/**',
+      // contracts 构建产物（.d.ts）由 tsc 生成，不参与 lint
+      'packages/contracts/dist/**',
       // 根级 doubaoBridge.ts 是历史游离文件，不在任何 tsconfig include 中
       'doubaoBridge.ts',
       // contracts 边界检查 fixture 文件包含故意违规的 import，不参与 lint
@@ -147,6 +149,17 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': 'off',
+    },
+  },
+
+  // ==================== contracts 包源文件 ====================
+  {
+    files: ['packages/contracts/src/**/*.ts'],
+    rules: {
+      // contracts 是纯类型包，Record<string, any> 用于 IPC DTO 包络，
+      // 与 .d.ts 类似，不触发 no-explicit-any
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
     },
   },
 );

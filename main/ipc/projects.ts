@@ -1,9 +1,9 @@
 import { ipcMain } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { readJSON, writeJSON } from '../utils/store';
-import type { Project } from '@doubao-studio/contracts';
+import type { Project, ProjectAddParams, ProjectUpdateParams, ProjectIdParams } from '@doubao-studio/contracts';
 
-// 领域模型接口已迁移至 @doubao-studio/contracts。
+// 领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
 
 export type { Project };
@@ -29,7 +29,7 @@ export function getDefaultProjectId(): string {
 export function registerProjectIPC(): void {
   loadProjects();
   ipcMain.handle('projects:list', async () => loadProjects());
-  ipcMain.handle('projects:add', async (_event, params: { name: string; description?: string; color?: string }) => {
+  ipcMain.handle('projects:add', async (_event, params: ProjectAddParams) => {
     if (!params.name?.trim()) return { success: false, error: '项目名称不能为空' };
     const projects = loadProjects();
     const now = new Date().toISOString();
@@ -38,7 +38,7 @@ export function registerProjectIPC(): void {
     writeJSON(STORE_FILE, projects);
     return { success: true, project };
   });
-  ipcMain.handle('projects:update', async (_event, params: { id: string; updates: Partial<Pick<Project, 'name' | 'description' | 'color' | 'archived'>> }) => {
+  ipcMain.handle('projects:update', async (_event, params: ProjectUpdateParams) => {
     const projects = loadProjects();
     const project = projects.find((item) => item.id === params.id);
     if (!project) return { success: false, error: '项目不存在' };
@@ -46,7 +46,7 @@ export function registerProjectIPC(): void {
     writeJSON(STORE_FILE, projects);
     return { success: true, project };
   });
-  ipcMain.handle('projects:delete', async (_event, params: { id: string }) => {
+  ipcMain.handle('projects:delete', async (_event, params: ProjectIdParams) => {
     if (params.id === DEFAULT_PROJECT_ID) return { success: false, error: '默认项目不能删除' };
     const projects = loadProjects();
     const next = projects.filter((project) => project.id !== params.id);
