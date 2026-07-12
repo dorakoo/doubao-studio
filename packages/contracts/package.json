@@ -1,0 +1,16 @@
+{
+  "name": "@doubao-studio/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "sideEffects": false,
+  "description": "豆包工作室跨进程共享类型契约包 — 仅类型声明，不含运行时 JS",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  }
+}

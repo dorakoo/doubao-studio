@@ -3,8 +3,30 @@
  * 全局类型定义（渲染进程侧）
  */
 
-/** 账号状态 */
-export type AccountStatus = 'idle' | 'busy' | 'error';
+import type {
+  GenerationMode,
+  AccountStatus,
+  TaskStatus,
+  TaskStage,
+  TaskErrorCode,
+  VideoModel,
+  VideoDuration,
+  VideoAspectRatio,
+  DependencyPolicy,
+} from '@doubao-studio/contracts';
+
+// 兼容性 re-export：保持渲染进程旧导入路径可用
+export type {
+  GenerationMode,
+  AccountStatus,
+  TaskStatus,
+  TaskStage,
+  TaskErrorCode,
+  VideoModel,
+  VideoDuration,
+  VideoAspectRatio,
+  DependencyPolicy,
+};
 
 export interface SeedanceQuota {
   date: string;
@@ -48,17 +70,13 @@ export interface Account {
   updatedAt: string;
 }
 
-/** 豆包生成模式 */
-export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
+// GenerationMode 已迁移至 @doubao-studio/contracts
 
-/** 视频生成模型 */
-export type VideoModel = 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
+// VideoModel 已迁移至 @doubao-studio/contracts
 
-/** 视频时长 */
-export type VideoDuration = '5s' | '10s' | '15s';
+// VideoDuration 已迁移至 @doubao-studio/contracts
 
-/** 视频比例 */
-export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
+// VideoAspectRatio 已迁移至 @doubao-studio/contracts
 
 /** 视频配置默认值 */
 export const DEFAULT_VIDEO_CONFIG = {
@@ -120,47 +138,11 @@ export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
 };
 
 /** 任务的队列级状态。具体执行位置记录在 runtime.stage。 */
-export type TaskStatus =
-  | 'queued'
-  | 'executing'
-  | 'generating'
-  | 'waiting_verification'
-  | 'paused'
-  | 'done'
-  | 'fail'
-  | 'cancelled';
+// TaskStatus 已迁移至 @doubao-studio/contracts
 
-export type TaskStage =
-  | 'queued'
-  | 'preparing_account'
-  | 'new_conversation'
-  | 'switching_mode'
-  | 'configuring'
-  | 'uploading_assets'
-  | 'injecting_prompt'
-  | 'submitting'
-  | 'waiting_verification'
-  | 'generating'
-  | 'extracting_outputs'
-  | 'completed'
-  | 'paused'
-  | 'failed'
-  | 'cancelled';
+// TaskStage 已迁移至 @doubao-studio/contracts
 
-export type TaskErrorCode =
-  | 'cancelled'
-  | 'verification'
-  | 'quota_exhausted'
-  | 'membership_required'
-  | 'face_restricted'
-  | 'content_rejected'
-  | 'network'
-  | 'timeout'
-  | 'page_changed'
-  | 'submission_failed'
-  | 'generation_failed'
-  | 'output_missing'
-  | 'unknown';
+// TaskErrorCode 已迁移至 @doubao-studio/contracts
 
 export interface TaskErrorInfo {
   code: TaskErrorCode;
@@ -280,7 +262,7 @@ export interface Task {
   batchId?: string;
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
-  dependencyPolicy?: 'all_done' | 'all_finished';
+  dependencyPolicy?: DependencyPolicy;
   projectId?: string;
   createdAt: string;
   updatedAt: string;

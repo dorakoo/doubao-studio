@@ -9,7 +9,8 @@
     "dev": "node scripts/dev.mjs",
     "dev:renderer": "node node_modules/vite/bin/vite.js",
     "dev:main": "wait-on http://localhost:5173 && pnpm run build:main && electron .",
-    "build:main": "tsc -p tsconfig.main.json",
+    "build:contracts": "tsc -p packages/contracts/tsconfig.json",
+    "build:main": "pnpm run build:contracts && tsc -p tsconfig.main.json",
     "build:renderer": "node node_modules/vite/bin/vite.js build",
     "build": "pnpm run build:renderer && pnpm run build:main",
     "start": "electron .",
@@ -17,8 +18,8 @@
     "dist": "pnpm run build && electron-builder",
     "dist:win": "pnpm run build && electron-builder --win",
     "lint": "eslint . --max-warnings 149",
-    "ts-check": "tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.test.json",
-    "check:project": "node scripts/fixtures/run-fixture-tests.mjs && node scripts/check-project.mjs",
+    "ts-check": "pnpm run build:contracts && tsc --noEmit -p tsconfig.main.json && tsc --noEmit -p tsconfig.renderer.json && tsc --noEmit -p tsconfig.test.json",
+    "check:project": "node scripts/fixtures/run-fixture-tests.mjs && node scripts/check-project.mjs && node scripts/check-contracts-boundary.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -33,6 +34,7 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@doubao-studio/contracts": "workspace:*",
     "@eslint/js": "^9.39.4",
     "@types/node": "26.0.0",
     "@types/react": "^18.3.12",
