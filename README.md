@@ -111,6 +111,14 @@ flowchart LR
 - 显示产物是否已经下载到本地。
 - 支持预览、重新下载和返回产物对应的豆包对话。
 
+### 视频产物解析与下载增强
+
+- 视频产物解析支持多策略回退：捕获响应、播放信息、平台下载信息、对话结构化扫描和页面回退。
+- 对话扫描发现新视频 ID 后，会在剩余等待预算内回补 API 查询，减少“页面已生成但未找到产物”的情况。
+- 候选产物按任务会话和视频 ID 进行绑定，无法证明归属时不会误绑定旧视频，并支持手动提取兜底。
+- 自动解析和手动提取均支持取消；下载前校验 HTTP 状态、响应内容和媒体类型，并对常见失败原因分类提示。
+- 原始地址与普通播放地址分开标记，不把普通播放地址误报为无水印原始文件。
+
 ### CSV 批次与基础工作流
 
 - 从 CSV 批量导入提示词、模式、视频模型、时长、比例、素材和账号。
@@ -138,6 +146,15 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 - 支持备份恢复与 JSON 数据完整性检查。
 - 应用内可查询 GitHub 最新 Release。
 - GitHub Actions 自动执行类型检查、构建和 Windows 标签发布。
+
+### Agent 能力协议与平台化接口
+
+- 新增 Capability API Schema v1，统一描述能力清单、异步任务、任务事件、产物和结构化错误。
+- 为未来的 Agent、CLI 和 MCP 接入定义稳定边界，外部调用可围绕不透明的 `taskId`、`requestId`、事件序号和 `artifactId` 进行集成。
+- `requestId` 支持当前服务进程内幂等；响应丢失时可按 requestId 查询任务，避免盲目重复提交。
+- 公共协议不暴露 Cookie、Session、Webview、DOM、Zustand、豆包内部 URL 或本地绝对路径。
+- v1 Schema 使用开放字符串枚举，客户端应忽略无法识别的新状态，为后续能力扩展保留兼容性。
+- Schema 文件位于 `schemas/capability/v1/`，设计说明见 [`docs/architecture/capability-api-schema.md`](docs/architecture/capability-api-schema.md)。
 
 ## 界面结构
 
