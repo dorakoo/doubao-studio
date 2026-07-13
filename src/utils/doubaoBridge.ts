@@ -3822,14 +3822,61 @@ export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<vo
 }
 
 /**
+ * 视频生成阻断短语列表。
+ *
+ * 设计原则：
+ * - 不使用孤立的泛化词（如"暂不支持""违规""无法生成"），防止用户提示词或页面说明被误判
+ * - 会员/权益类短语必须带"会员"或"权益"上下文
+ * - 真人脸类短语必须带"真人脸""人脸""肖像"上下文
+ *
+ * 导出以便单元测试验证不含泛化词。
+ */
+export const VIDEO_BLOCKER_PHRASES: readonly string[] = [
+  // 额度耗尽
+  '今日视频生成免费次数用完了', '今日视频生成免费次数已用完',
+  '次数已用完', '次数不足', '余额不足',
+  // 会员/权益限制（不使用孤立的"暂不支持"，防止误判）
+  '当前模型仅限会员', '会员专享', '仅限会员', '仅会员可用',
+  '开通会员', '升级会员', '权益不足',
+  // 真人脸限制（带上下文的组合短语）
+  '暂不支持上传真人脸素材', '不支持真人脸', '人脸素材无法作为参考', '肖像保护',
+  // 内容审核（不使用孤立的"违规""无法生成"）
+  '内容未通过', '审核未通过',
+  // 生成失败
+  '视频生成失败', '生成视频失败', '生成失败', '生成异常',
+  '豆包已停止生成',
+];
+
+/**
+ * 视频生成阻断检测的 DOM 选择器。
+ *
+ * 设计原则：
+ * - 只扫描可见的弹出提示层（dialog/alert/toast/notice/error）
+ * - 不扫描聊天消息容器 [class*="message"]，防止历史消息误判
+ *
+ * 导出以便单元测试验证不含消息容器选择器。
+ */
+export const VIDEO_BLOCKER_SELECTORS: readonly string[] = [
+  '[role="dialog"]', '[role="alert"]',
+  '[class*="toast"]', '[class*="Toast"]',
+  '[class*="notice"]', '[class*="Notice"]',
+  '[class*="error"]', '[class*="Error"]',
+];
+
+/**
  * 识别豆包页面已经明确给出的失败、权限或安全限制提示。
  *
  * 覆盖的信号类别：
  * - 额度耗尽：免费次数用完、次数不足、余额不足
- * - 会员/权益限制：会员专享、仅限会员、开通会员、升级会员、权益不足、暂不支持、仅会员可用
- * - 真人脸限制：真人脸素材、肖像保护、人脸素材
- * - 内容审核：内容未通过、审核未通过、违规
+ * - 会员/权益限制：会员专享、仅限会员、开通会员、升级会员、权益不足、仅会员可用
+ * - 真人脸限制：暂不支持上传真人脸素材、不支持真人脸、肖像保护
+ * - 内容审核：内容未通过、审核未通过
  * - 生成失败：生成失败、生成异常、豆包已停止生成
+ *
+ * 检测策略：
+ * - 只扫描可见的弹出提示层（dialog/alert/toast/notice/error），不扫描聊天消息容器
+ * - 增量文本仅检查 baseline 之后新增的内容，避免历史消息误判
+ * - 不使用孤立的泛化词（如"暂不支持""违规""无法生成"），防止用户提示词或页面说明被误判
  *
  * 一旦检测到明确限制，调用方应立即结束视频等待与产物轮询，
  * 不继续等到长超时，且不得扣减 Seedance 额度。
@@ -3837,27 +3884,9 @@ export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<vo
 export async function detectVideoGenerationBlocker(webview: WebviewHandle): Promise<string | null> {
   const code = `
     (function() {
-      var phrases = [
-        // 额度耗尽
-        '今日视频生成免费次数用完了', '今日视频生成免费次数已用完',
-        '次数已用完', '次数不足', '余额不足',
-        // 会员/权益限制
-        '当前模型仅限会员', '会员专享', '仅限会员', '仅会员可用',
-        '开通会员', '升级会员', '权益不足', '暂不支持',
-        // 真人脸限制
-        '暂不支持上传真人脸素材', '不支持真人脸', '人脸素材无法作为参考', '肖像保护',
-        // 内容审核
-        '内容未通过', '审核未通过', '违规', '无法生成',
-        // 生成失败
-        '视频生成失败', '生成视频失败', '生成失败', '生成异常',
-        '豆包已停止生成'
-      ];
+      var phrases = ${JSON.stringify(VIDEO_BLOCKER_PHRASES)};
       var parts = [];
-      var selectors = [
-        '[role="dialog"]', '[role="alert"]',
-        '[class*="toast"]', '[class*="Toast"]',
-        '[class*="message"]', '[class*="notice"]', '[class*="error"]'
-      ];
+      var selectors = ${JSON.stringify(VIDEO_BLOCKER_SELECTORS)};
       for (var i = 0; i < selectors.length; i++) {
         var nodes = document.querySelectorAll(selectors[i]);
         for (var j = 0; j < nodes.length; j++) {
@@ -3865,6 +3894,7 @@ export async function detectVideoGenerationBlocker(webview: WebviewHandle): Prom
           if (rect.width > 0 && rect.height > 0) parts.push(nodes[j].innerText || '');
         }
       }
+      // 增量文本：只检查 baseline 之后新增的内容
       var bodyText = document.body ? (document.body.innerText || '') : '';
       var baseline = Number(window.__doubaoVideoBlockerBaselineLength || 0);
       parts.push(bodyText.length >= baseline ? bodyText.slice(baseline) : bodyText.slice(-2000));

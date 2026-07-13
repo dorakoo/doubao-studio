@@ -39,16 +39,28 @@ describe('classifyTaskError', () => {
     expect(result.recoverable).toBe(false);
   });
 
+  it('匹配 membership_required — 权益不足（回归：不能误判为 quota_exhausted）', () => {
+    const result = classifyTaskError('权益不足，请开通会员', FIXED_TIME);
+    expect(result.code).toBe('membership_required');
+    expect(result.recoverable).toBe(false);
+  });
+
   it('匹配 membership_required — 仅会员可用', () => {
     const result = classifyTaskError('仅会员可用', FIXED_TIME);
     expect(result.code).toBe('membership_required');
     expect(result.recoverable).toBe(false);
   });
 
-  it('匹配 membership_required — 暂不支持', () => {
-    const result = classifyTaskError('暂不支持此功能', FIXED_TIME);
+  it('匹配 membership_required — 开通会员', () => {
+    const result = classifyTaskError('请开通会员后使用', FIXED_TIME);
     expect(result.code).toBe('membership_required');
     expect(result.recoverable).toBe(false);
+  });
+
+  it('回归：权益不足不匹配 quota_exhausted', () => {
+    const result = classifyTaskError('权益不足', FIXED_TIME);
+    expect(result.code).not.toBe('quota_exhausted');
+    expect(result.code).toBe('membership_required');
   });
 
   it('匹配 face_restricted', () => {

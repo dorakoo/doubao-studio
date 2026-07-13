@@ -805,7 +805,7 @@ const TaskConsole: React.FC = () => {
               style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
             />
 
-            {/* 视频能力预检提示 */}
+            {/* 视频能力预检提示（新任务仅展示风险，不阻止提交；实际执行账号可能由调度器分配） */}
             {(() => {
               const selectedAccount = useAccountStore.getState().accounts.find(a => a.id === useAccountStore.getState().selectedAccountId);
               if (!selectedAccount) return null;
@@ -820,21 +820,26 @@ const TaskConsole: React.FC = () => {
                 accountStatus: selectedAccount.status,
               });
               if (capability.state === 'allowed') return null;
-              const isBlocked = capability.state === 'blocked';
+              // 新任务仅展示风险提示，不阻止提交（实际执行账号可能由调度器分配）
               return (
                 <div style={{
                   padding: '8px 12px',
                   marginBottom: 12,
                   borderRadius: 8,
                   fontSize: 12,
-                  background: isBlocked ? 'rgba(255,77,79,0.1)' : 'rgba(250,173,20,0.1)',
-                  border: `1px solid ${isBlocked ? 'rgba(255,77,79,0.3)' : 'rgba(250,173,20,0.3)'}`,
-                  color: isBlocked ? '#ff6b6b' : '#faad14',
+                  background: 'rgba(250,173,20,0.1)',
+                  border: '1px solid rgba(250,173,20,0.3)',
+                  color: '#faad14',
                 }}>
-                  {capability.userMessage}
+                  {`[当前选中账号：${selectedAccount.name}] ${capability.userMessage}`}
                   {capability.suggestion && (
                     <div style={{ marginTop: 4, color: '#9898b8' }}>
                       建议：{capability.suggestion.reason}
+                    </div>
+                  )}
+                  {capability.state === 'blocked' && (
+                    <div style={{ marginTop: 4, color: '#9898b8' }}>
+                      提示：自动指派模式下调度器将选择可用账号执行
                     </div>
                   )}
                 </div>
@@ -1068,6 +1073,27 @@ const TaskConsole: React.FC = () => {
         okText="保存并重新运行"
         cancelText="取消"
         width={620}
+        okButtonProps={{
+          // 已绑定账号且预检 blocked 时禁用确认按钮
+          disabled: (() => {
+            if (!editingTask || editingTask.mode !== 'video') return false;
+            const boundAccountId = editingTask.assignedAccountId;
+            if (!boundAccountId) return false;
+            const boundAccount = useAccountStore.getState().accounts.find(a => a.id === boundAccountId);
+            if (!boundAccount) return false;
+            const capability = evaluateVideoCapability({
+              model: editingVideoConfig.model,
+              duration: editingVideoConfig.duration,
+              aspectRatio: editingVideoConfig.aspectRatio,
+              manual15sEnabled: false,
+              seedanceQuota: boundAccount.seedanceQuota,
+              health: boundAccount.health,
+              scheduling: boundAccount.scheduling,
+              accountStatus: boundAccount.status,
+            });
+            return !capability.canSubmit;
+          })(),
+        }}
       >
         <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>提示词</div>
         <TextArea
@@ -1120,19 +1146,39 @@ const TaskConsole: React.FC = () => {
               style={{ background: '#1a1a24', padding: 4 }}
             />
 
-            {/* 视频能力预检提示 */}
+            {/* 视频能力预检提示（使用任务已绑定账号，非 selectedAccountId） */}
             {(() => {
-              const selectedAccount = useAccountStore.getState().accounts.find(a => a.id === useAccountStore.getState().selectedAccountId);
-              if (!selectedAccount) return null;
+              const boundAccountId = editingTask?.assignedAccountId;
+              if (!boundAccountId) {
+                // 未绑定账号时仅展示风险提示
+                if (editingVideoConfig.duration === '15s') {
+                  return (
+                    <div style={{
+                      marginTop: 12,
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      fontSize: 12,
+                      background: 'rgba(250,173,20,0.1)',
+                      border: '1px solid rgba(250,173,20,0.3)',
+                      color: '#faad14',
+                    }}>
+                      15 秒时长可能受账号会员权益限制，提交后若被拒绝请更换配置重试
+                    </div>
+                  );
+                }
+                return null;
+              }
+              const boundAccount = useAccountStore.getState().accounts.find(a => a.id === boundAccountId);
+              if (!boundAccount) return null;
               const capability = evaluateVideoCapability({
                 model: editingVideoConfig.model,
                 duration: editingVideoConfig.duration,
                 aspectRatio: editingVideoConfig.aspectRatio,
                 manual15sEnabled: false,
-                seedanceQuota: selectedAccount.seedanceQuota,
-                health: selectedAccount.health,
-                scheduling: selectedAccount.scheduling,
-                accountStatus: selectedAccount.status,
+                seedanceQuota: boundAccount.seedanceQuota,
+                health: boundAccount.health,
+                scheduling: boundAccount.scheduling,
+                accountStatus: boundAccount.status,
               });
               if (capability.state === 'allowed') return null;
               const isBlocked = capability.state === 'blocked';
@@ -1146,10 +1192,15 @@ const TaskConsole: React.FC = () => {
                   border: `1px solid ${isBlocked ? 'rgba(255,77,79,0.3)' : 'rgba(250,173,20,0.3)'}`,
                   color: isBlocked ? '#ff6b6b' : '#faad14',
                 }}>
-                  {capability.userMessage}
+                  {`[绑定账号：${boundAccount.name}] ${capability.userMessage}`}
                   {capability.suggestion && (
                     <div style={{ marginTop: 4, color: '#9898b8' }}>
                       建议：{capability.suggestion.reason}
+                    </div>
+                  )}
+                  {isBlocked && (
+                    <div style={{ marginTop: 4, color: '#9898b8' }}>
+                      该账号当前不可用，请先解决上述问题或更换绑定账号
                     </div>
                   )}
                 </div>
