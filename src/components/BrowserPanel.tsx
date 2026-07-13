@@ -32,6 +32,7 @@ import {
   inject15sVideoPatch,
   set15sVideoPatchEnabled,
   resetVideoCaptureCache,
+  refreshBlockerBaseline,
   detectVideoGenerationBlocker,
   injectGenerationMonitor,
   getCachedVideoUrl,
@@ -727,6 +728,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
       ]);
       if (!submitted) throw new Error('提交失败');
+
+      // 提交成功后刷新阻断检测基线。
+      // resetVideoCaptureCache 在注入提示词前设置基线，此时用户消息尚未渲染。
+      // 提交成功后用户消息已写入页面，需要重新设置基线，否则
+      // detectVideoGenerationBlocker 的增量文本会包含用户提示词内容，
+      // 导致提示词中含"生成失败""会员专享"等词时被误判为平台限制。
+      if (mode === 'video') {
+        await pause(800); // 等待用户消息渲染完成
+        await refreshBlockerBaseline(webview);
+      }
 
       let verificationDetected = false;
       for (let check = 0; check < 12; check++) {

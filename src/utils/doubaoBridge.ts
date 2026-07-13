@@ -3822,6 +3822,32 @@ export async function resetVideoCaptureCache(webview: WebviewHandle): Promise<vo
 }
 
 /**
+ * 在成功提交提示词后刷新阻断检测基线。
+ *
+ * resetVideoCaptureCache 在注入提示词前设置基线，此时用户消息尚未渲染。
+ * 提交成功后，用户消息已写入页面，需要重新设置基线，否则
+ * detectVideoGenerationBlocker 的增量文本会包含用户提示词内容，
+ * 导致提示词中含"生成失败""会员专享"等词时被误判为平台限制。
+ *
+ * 此函数不清空视频缓存，仅更新基线长度。
+ */
+export async function refreshBlockerBaseline(webview: WebviewHandle): Promise<void> {
+  try {
+    await safeExecuteJS(
+      webview,
+      `(function() {
+        window.__doubaoVideoBlockerBaselineLength = document.body ? (document.body.innerText || '').length : 0;
+        return true;
+      })();`,
+      5000,
+      'refreshBlockerBaseline'
+    );
+  } catch (err: any) {
+    console.warn('[doubaoBridge] 刷新阻断基线失败:', err.message);
+  }
+}
+
+/**
  * 视频生成阻断短语列表。
  *
  * 设计原则：
@@ -3881,6 +3907,40 @@ export const VIDEO_BLOCKER_SELECTORS: readonly string[] = [
  * 一旦检测到明确限制，调用方应立即结束视频等待与产物轮询，
  * 不继续等到长超时，且不得扣减 Seedance 额度。
  */
+/**
+ * 纯函数：在给定文本中匹配阻断短语。
+ *
+ * 按短语列表顺序检查，返回第一个命中的短语；未命中返回 null。
+ * 导出以便单元测试覆盖时序场景（基线设置 → 注入提示词 → 刷新基线 → 检测）。
+ *
+ * @param text 要检查的文本（通常是可见提示层文本 + 增量页面文本）
+ * @returns 匹配到的阻断短语，或 null
+ */
+export function matchBlockerPhrase(text: string): string | null {
+  for (const phrase of VIDEO_BLOCKER_PHRASES) {
+    if (text.includes(phrase)) return phrase;
+  }
+  return null;
+}
+
+/**
+ * 纯函数：模拟 detectVideoGenerationBlocker 的文本匹配逻辑。
+ *
+ * 给定可见提示层文本列表和增量页面文本，拼接后检查是否包含阻断短语。
+ * 用于单元测试验证时序场景下不会误判用户提示词。
+ *
+ * @param visibleLayerTexts 可见提示层的文本列表（dialog/alert/toast 等）
+ * @param incrementalBodyText baseline 之后的增量页面文本
+ * @returns 匹配到的阻断短语，或 null
+ */
+export function matchBlockerFromLayers(
+  visibleLayerTexts: string[],
+  incrementalBodyText: string,
+): string | null {
+  const allText = [...visibleLayerTexts, incrementalBodyText].join('\n');
+  return matchBlockerPhrase(allText);
+}
+
 export async function detectVideoGenerationBlocker(webview: WebviewHandle): Promise<string | null> {
   const code = `
     (function() {
