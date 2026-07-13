@@ -15,6 +15,7 @@ import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import type { AutomationState } from '../store/useTaskStore';
 import { classifyTaskError } from '../utils/taskRuntime';
+import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
 import { automationEngine } from '../automation/AutomationEngine';
 import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
 import {
@@ -592,6 +593,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
     try {
       console.log(`[Automation:${accountId}] 开始`);
+
+      // 视频能力预检：在提交前基于本地已知状态判断是否允许提交
+      if (mode === 'video' && videoConfig) {
+        const account = useAccountStore.getState().accounts.find((a) => a.id === accountId);
+        if (account) {
+          const capability = evaluateVideoCapability({
+            model: videoConfig.model,
+            duration: videoConfig.duration,
+            aspectRatio: videoConfig.aspectRatio,
+            manual15sEnabled: !!manual15sRef.current[accountId],
+            seedanceQuota: account.seedanceQuota,
+            health: account.health,
+            scheduling: account.scheduling,
+            accountStatus: account.status,
+          });
+          if (!capability.canSubmit) {
+            // 本地已知阻塞条件，直接终止，不进入页面操作
+            throw new Error(capability.userMessage);
+          }
+          if (capability.state === 'unknown') {
+            // 有风险提示但允许提交，记录日志
+            console.warn(`[Automation:${accountId}] 视频能力预检提示: ${capability.userMessage}`);
+          }
+        }
+      }
+
       let taskConversationUrl: string | undefined;
       for (let submissionAttempt = 0; submissionAttempt < 3; submissionAttempt++) {
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
@@ -870,6 +897,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const cancelled = err?.name === 'AbortError';
       const errorMessage = cancelled ? '用户已取消等待' : (err.message || String(err));
       const errorInfo = classifyTaskError(errorMessage);
+      // 限制类失败（会员/额度/真人脸/内容审核）不扣减 Seedance 额度，
+      // 也不应继续等待视频产物。recordSeedanceUsage 仅在成功路径调用。
+      if (mode === 'video' && isRestrictionFailure(errorInfo.code)) {
+        console.warn(`[Automation:${accountId}] 检测到限制类失败(${errorInfo.code})，不扣减额度`);
+      }
       if (mode === 'video' && errorInfo.code === 'quota_exhausted') {
         await useAccountStore.getState().markSeedanceExhausted(accountId);
       }

@@ -48,6 +48,7 @@ import {
   type VideoDuration,
   type VideoAspectRatio,
 } from '../types';
+import { evaluateVideoCapability } from '../utils/videoCapability';
 
 const { TextArea } = Input;
 
@@ -803,6 +804,42 @@ const TaskConsole: React.FC = () => {
               block
               style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
             />
+
+            {/* 视频能力预检提示 */}
+            {(() => {
+              const selectedAccount = useAccountStore.getState().accounts.find(a => a.id === useAccountStore.getState().selectedAccountId);
+              if (!selectedAccount) return null;
+              const capability = evaluateVideoCapability({
+                model: videoConfig.model,
+                duration: videoConfig.duration,
+                aspectRatio: videoConfig.aspectRatio,
+                manual15sEnabled: false,
+                seedanceQuota: selectedAccount.seedanceQuota,
+                health: selectedAccount.health,
+                scheduling: selectedAccount.scheduling,
+                accountStatus: selectedAccount.status,
+              });
+              if (capability.state === 'allowed') return null;
+              const isBlocked = capability.state === 'blocked';
+              return (
+                <div style={{
+                  padding: '8px 12px',
+                  marginBottom: 12,
+                  borderRadius: 8,
+                  fontSize: 12,
+                  background: isBlocked ? 'rgba(255,77,79,0.1)' : 'rgba(250,173,20,0.1)',
+                  border: `1px solid ${isBlocked ? 'rgba(255,77,79,0.3)' : 'rgba(250,173,20,0.3)'}`,
+                  color: isBlocked ? '#ff6b6b' : '#faad14',
+                }}>
+                  {capability.userMessage}
+                  {capability.suggestion && (
+                    <div style={{ marginTop: 4, color: '#9898b8' }}>
+                      建议：{capability.suggestion.reason}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -1082,6 +1119,42 @@ const TaskConsole: React.FC = () => {
               block
               style={{ background: '#1a1a24', padding: 4 }}
             />
+
+            {/* 视频能力预检提示 */}
+            {(() => {
+              const selectedAccount = useAccountStore.getState().accounts.find(a => a.id === useAccountStore.getState().selectedAccountId);
+              if (!selectedAccount) return null;
+              const capability = evaluateVideoCapability({
+                model: editingVideoConfig.model,
+                duration: editingVideoConfig.duration,
+                aspectRatio: editingVideoConfig.aspectRatio,
+                manual15sEnabled: false,
+                seedanceQuota: selectedAccount.seedanceQuota,
+                health: selectedAccount.health,
+                scheduling: selectedAccount.scheduling,
+                accountStatus: selectedAccount.status,
+              });
+              if (capability.state === 'allowed') return null;
+              const isBlocked = capability.state === 'blocked';
+              return (
+                <div style={{
+                  marginTop: 12,
+                  padding: '8px 12px',
+                  borderRadius: 8,
+                  fontSize: 12,
+                  background: isBlocked ? 'rgba(255,77,79,0.1)' : 'rgba(250,173,20,0.1)',
+                  border: `1px solid ${isBlocked ? 'rgba(255,77,79,0.3)' : 'rgba(250,173,20,0.3)'}`,
+                  color: isBlocked ? '#ff6b6b' : '#faad14',
+                }}>
+                  {capability.userMessage}
+                  {capability.suggestion && (
+                    <div style={{ marginTop: 4, color: '#9898b8' }}>
+                      建议：{capability.suggestion.reason}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         )}
 

@@ -33,10 +33,22 @@ describe('classifyTaskError', () => {
     expect(result.recoverable).toBe(false);
   });
 
-  it('匹配 membership_required', () => {
+  it('匹配 membership_required（不可恢复）', () => {
     const result = classifyTaskError('此功能仅限会员', FIXED_TIME);
     expect(result.code).toBe('membership_required');
-    expect(result.recoverable).toBe(true);
+    expect(result.recoverable).toBe(false);
+  });
+
+  it('匹配 membership_required — 仅会员可用', () => {
+    const result = classifyTaskError('仅会员可用', FIXED_TIME);
+    expect(result.code).toBe('membership_required');
+    expect(result.recoverable).toBe(false);
+  });
+
+  it('匹配 membership_required — 暂不支持', () => {
+    const result = classifyTaskError('暂不支持此功能', FIXED_TIME);
+    expect(result.code).toBe('membership_required');
+    expect(result.recoverable).toBe(false);
   });
 
   it('匹配 face_restricted', () => {

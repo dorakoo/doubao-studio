@@ -8,7 +8,8 @@ import type { TaskErrorCode, TaskErrorInfo } from '../types';
 const ERROR_RULES: Array<{ code: TaskErrorCode; recoverable: boolean; pattern: RegExp }> = [
   { code: 'cancelled', recoverable: true, pattern: /取消|中止|abort/i },
   { code: 'quota_exhausted', recoverable: false, pattern: /免费次数.*用完|次数已用完|次数不足|余额不足|权益不足/ },
-  { code: 'membership_required', recoverable: true, pattern: /会员专享|仅限会员|开通会员|升级会员/ },
+  // 会员限制不可恢复：同一账号同一配置重试仍会被拒绝，需更换配置或升级会员。
+  { code: 'membership_required', recoverable: false, pattern: /会员专享|仅限会员|仅会员可用|开通会员|升级会员|当前模型仅限会员|暂不支持/ },
   // 同一批真人脸素材再次提交通常仍会被平台拦截，需修改素材或提示词后再重新运行。
   { code: 'face_restricted', recoverable: false, pattern: /真人脸|人脸素材|肖像保护|人物面部/ },
   { code: 'content_rejected', recoverable: true, pattern: /内容未通过|审核未通过|违规|无法生成/ },
