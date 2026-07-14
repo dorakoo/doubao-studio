@@ -6,6 +6,7 @@
 
 import { ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
+import { normalizeTasks, normalizeDownloadJobs } from '../utils/persistenceNormalization';
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
@@ -58,25 +59,19 @@ const STORE_FILE = 'tasks.json';
 const DOWNLOAD_STORE_FILE = 'downloads.json';
 let downloadRecoveryApplied = false;
 
+/** 读取所有任务（含运行时归一化） */
 function loadTasks(): Task[] {
   const defaultProjectId = getDefaultProjectId();
-  const rawTasks = readJSON<Task[]>(STORE_FILE, []);
-  let migrated = false;
-  const tasks = rawTasks.map((task) => {
-    if (!task.projectId) migrated = true;
-    return ({
-    ...task,
-    mode: task.mode || 'chat',
-    outputs: Array.isArray(task.outputs) ? task.outputs : [],
-    artifacts: Array.isArray(task.artifacts) ? task.artifacts : [],
-    runHistory: Array.isArray(task.runHistory) ? task.runHistory : [],
-    source: task.source || 'manual',
-    dependsOnTaskIds: Array.isArray(task.dependsOnTaskIds) ? task.dependsOnTaskIds : [],
-    projectId: task.projectId || defaultProjectId,
-  });
-  });
-  if (migrated) writeJSON(STORE_FILE, tasks);
-  return tasks;
+  const raw = readJSON<unknown>(STORE_FILE, []);
+  const result = normalizeTasks(raw, defaultProjectId);
+  // 仅在归一化确实改变数据时写回磁盘
+  if (result.changed) {
+    writeJSON(STORE_FILE, result.data);
+  }
+  if (result.warnings.length > 0) {
+    console.warn('[Tasks] 数据归一化告警:', result.warnings);
+  }
+  return result.data;
 }
 
 function artifactId(url: string): string {
@@ -115,8 +110,19 @@ function saveTasksOrError(tasks: Task[]): { success: true } | { success: false; 
     : { success: false, error: '任务数据写入失败，请检查磁盘空间和数据目录权限' };
 }
 
+/** 读取下载记录（含运行时归一化 + 中断恢复） */
 function loadDownloadJobs(): DownloadJob[] {
-  const jobs = readJSON<DownloadJob[]>(DOWNLOAD_STORE_FILE, []);
+  const raw = readJSON<unknown>(DOWNLOAD_STORE_FILE, []);
+  const result = normalizeDownloadJobs(raw);
+  // 仅在归一化确实改变数据时写回磁盘
+  if (result.changed) {
+    writeJSON(DOWNLOAD_STORE_FILE, result.data);
+  }
+  if (result.warnings.length > 0) {
+    console.warn('[Downloads] 数据归一化告警:', result.warnings);
+  }
+  const jobs = result.data;
+  // 下载中断恢复：将上次进程遗留的 'downloading' 状态标记为 'failed'
   if (!downloadRecoveryApplied) {
     downloadRecoveryApplied = true;
     let changed = false;

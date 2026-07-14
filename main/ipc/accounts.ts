@@ -6,6 +6,7 @@
 
 import { ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
+import { normalizeAccounts } from '../utils/persistenceNormalization';
 import { v4 as uuidv4 } from 'uuid';
 import type {
   Account,
@@ -82,9 +83,18 @@ function normalizeScheduling(account: Account): void {
   }
 }
 
-/** 读取所有账号 */
+/** 读取所有账号（含运行时归一化） */
 function loadAccounts(): Account[] {
-  return readJSON<Account[]>(STORE_FILE, []);
+  const raw = readJSON<unknown>(STORE_FILE, []);
+  const result = normalizeAccounts(raw);
+  // 仅在归一化确实改变数据时写回磁盘，避免每次读取产生无意义磁盘 IO
+  if (result.changed) {
+    saveAccounts(result.data);
+  }
+  if (result.warnings.length > 0) {
+    console.warn('[Accounts] 数据归一化告警:', result.warnings);
+  }
+  return result.data;
 }
 
 /** 保存所有账号 */
@@ -133,17 +143,8 @@ async function clearAccountSession(partition: string): Promise<void> {
 export function registerAccountIPC(): void {
   // ---- 获取所有账号 ----
   ipcMain.handle('accounts:list', async (): Promise<Account[]> => {
-    const accounts = loadAccounts();
-    // 规范化前快照，用于判断是否真正产生了字段补全或额度重置
-    const before = JSON.stringify(accounts);
-    accounts.forEach(normalizeQuota);
-    accounts.forEach(normalizeHealth);
-    accounts.forEach(normalizeScheduling);
-    // 仅在规范化确实改变了数据时写盘，避免每次 list 都产生无意义磁盘 IO
-    if (JSON.stringify(accounts) !== before) {
-      saveAccounts(accounts);
-    }
-    return accounts;
+    // loadAccounts 已内置运行时归一化（额度日期重置、健康/调度补全、重复 ID 去重）
+    return loadAccounts();
   });
 
   // ---- 添加账号 ----
