@@ -1,6 +1,6 @@
 # 豆包工作室 Doubao Studio
 
-[![Version](https://img.shields.io/badge/version-2.1.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
+[![Version](https://img.shields.io/badge/version-2.2.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-149eca?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript)](https://www.typescriptlang.org/)
