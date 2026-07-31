@@ -1,11 +1,12 @@
 import type { AdapterRuleBundle, AdapterSelfCheckReport } from '../types';
 import type { WebviewHandle } from '../utils/doubaoBridge';
+import { buildDoubaoCapabilitySnapshot, DOUBAO_CAPABILITY_ADAPTER_VERSION } from './doubaoCapability';
 
-export const DOUBAO_ADAPTER_VERSION = '1.5.0-20260711';
+export const DOUBAO_ADAPTER_VERSION = DOUBAO_CAPABILITY_ADAPTER_VERSION;
 
 export const DEFAULT_ADAPTER_BUNDLE: AdapterRuleBundle = {
   version: DOUBAO_ADAPTER_VERSION,
-  createdAt: '2026-07-11T00:00:00.000Z',
+  createdAt: '2026-07-31T00:00:00.000Z',
   rules: {
     input: ['textarea', '[contenteditable="true"]'],
     submit: ['button[aria-label*="发送"]', 'button[aria-label*="send" i]', 'button[type="submit"]'],
@@ -67,22 +68,60 @@ export async function runAdapterSelfCheck(webview: WebviewHandle): Promise<Adapt
         return false;
       }
       var bodyText = document.body ? (document.body.innerText || '') : '';
+      var membershipText = '';
+      var dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]');
+      for (var d = 0; d < dialogs.length; d++) {
+        var dialogText = (dialogs[d].innerText || '').trim();
+        if (/购买会员|开通会员|升级会员|会员专享|仅限会员|权益不足/.test(dialogText)) {
+          membershipText = dialogText.slice(0, 500);
+          break;
+        }
+      }
+      var accountTier = 'unknown';
+      var tierMatch = bodyText.match(/(?:当前套餐|当前会员|会员等级)[:：\\s]*(免费|标准|加强|高级)(?:会员)?/);
+      if (tierMatch) accountTier = tierMatch[1];
       var checks = [
         { key: 'page', label: '豆包页面', ok: location.hostname.indexOf('doubao.com') >= 0, detail: location.pathname },
         { key: 'input', label: '提示词输入框', ok: any(rules.input), detail: any(rules.input) ? '已找到可见输入框' : '未找到 textarea/contenteditable' },
         { key: 'submit', label: '提交控件', ok: any(rules.submit) || bodyText.indexOf('发送') >= 0, detail: '按钮或发送文本检测' },
         { key: 'video_mode', label: '视频模式入口', ok: bodyText.indexOf('视频生成') >= 0 || bodyText.indexOf('生成视频') >= 0, detail: '页面文本能力检测' },
         { key: 'model', label: '模型配置', ok: bodyText.indexOf('Seedance') >= 0 || bodyText.indexOf('模型') >= 0, detail: '模型触发器检测' },
-        { key: 'duration', label: '时长配置', ok: /5s|10s|15s|5秒|10秒|15秒/.test(bodyText), detail: '时长选项检测' },
+        { key: 'duration', label: '时长配置', ok: /(?:1[0-5]|[4-9])\\s*(?:s|秒)/i.test(bodyText), detail: '4–15 秒页面选项检测' },
         { key: 'ratio', label: '比例配置', ok: /1:1|9:16|16:9|3:4|4:3|21:9/.test(bodyText), detail: '比例选项检测' },
         { key: 'upload', label: '素材上传', ok: document.querySelectorAll(rules.uploads[0]).length > 0 || bodyText.indexOf('参考图片') >= 0, detail: '文件输入控件检测' },
         { key: 'verification', label: '验证识别', ok: true, detail: '验证码 iframe、弹窗和关键词策略已加载' },
         { key: 'artifact', label: '产物识别', ok: true, detail: document.querySelectorAll('video, img').length + ' 个媒体节点可供扫描' }
       ];
-      return checks;
+      return { checks: checks, bodyText: bodyText.slice(0, 20000), membershipText: membershipText, accountTier: accountTier };
     })();
   `;
-  const items = await webview.executeJavaScript(code) as AdapterSelfCheckReport['items'];
+  const result = await webview.executeJavaScript(code) as {
+    checks: AdapterSelfCheckReport['items'];
+    bodyText: string;
+    membershipText: string;
+    accountTier: string;
+  };
+  const snapshot = buildDoubaoCapabilitySnapshot({
+    pageUrl: webview.getURL(),
+    bodyText: result.bodyText,
+    membershipDialogText: result.membershipText,
+    accountTier: result.accountTier,
+  });
+  const items = [
+    ...result.checks,
+    {
+      key: 'capability_snapshot',
+      label: '只读能力快照',
+      ok: snapshot.status !== 'unknown',
+      detail: JSON.stringify(snapshot),
+    },
+    {
+      key: 'final_submit',
+      label: '最终生成提交',
+      ok: true,
+      detail: 'dry-run：未点击最终生成、购买或升级控件',
+    },
+  ];
   const passed = items.filter((item) => item.ok).length;
   return {
     adapterVersion: bundle.version,

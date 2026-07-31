@@ -545,8 +545,8 @@ export function registerTaskIPC(): void {
           imported.push({
             id: uuidv4(), prompt, assignedAccountId: account?.id || null, status: 'queued', mode,
             videoConfig: mode === 'video' ? {
-              model: ['seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(model) ? model : 'seedance-2.0',
-              duration: ['5s', '10s', '15s'].includes(duration) ? duration : '10s',
+              model: ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(model) ? model : 'seedance-2.0',
+              duration: /^(?:[4-9]|1[0-5])s$/.test(duration) ? duration : '10s',
               aspectRatio: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(aspectRatio) ? aspectRatio : '16:9',
             } : undefined,
             attachments: attachmentsIndex >= 0 ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean) : undefined,

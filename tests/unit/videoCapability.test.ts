@@ -12,6 +12,8 @@ import {
 } from '../../src/utils/videoCapability';
 import type { VideoCapabilityInput } from '../../src/utils/videoCapability';
 import type { SeedanceQuota, AccountHealth, AccountScheduling, AccountStatus } from '../../src/types';
+import { buildDoubaoCapabilitySnapshot, evaluateDryRunSelection } from '../../src/automation/doubaoCapability';
+import { inject15sVideoPatch, set15sVideoPatchEnabled } from '../../src/utils/doubaoBridge';
 
 // ==================== 测试数据工厂 ====================
 
@@ -136,9 +138,8 @@ describe('evaluateVideoCapability', () => {
     });
   });
 
-  // ---- 测试 3: 15s + Seedance 2.0 Fast 在未知会员状态下返回可提交但带风险提示 ----
-  describe('15s + Seedance 2.0 Fast 风险提示', () => {
-    it('15s + seedance-2.0-fast 在健康账号下返回 unknown（可提交）', () => {
+  describe('11–15s 页面实时能力门禁', () => {
+    it('15s + seedance-2.0-fast 缺少实时证据时 fail-closed', () => {
       const input = makeBaseInput({
         model: 'seedance-2.0-fast',
         duration: '15s',
@@ -148,10 +149,9 @@ describe('evaluateVideoCapability', () => {
         accountStatus: healthyAccountStatus,
       });
       const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('unknown');
-      expect(result.canSubmit).toBe(true);
-      expect(result.issues.some(i => i.code === 'membership_risk' && !i.blocking)).toBe(true);
-      expect(result.userMessage).toContain('会员权益限制');
+      expect(result.state).toBe('blocked');
+      expect(result.canSubmit).toBe(false);
+      expect(result.issues.some(i => i.code === 'membership_required' && i.blocking)).toBe(true);
     });
 
     it('15s + seedance-2.0-fast 提供建议配置但不改变原始配置', () => {
@@ -165,14 +165,14 @@ describe('evaluateVideoCapability', () => {
       });
       const result = evaluateVideoCapability(input);
       expect(result.suggestion).toBeDefined();
-      expect(result.suggestion!.model).toBe('seedance-2.0');
+      expect(result.suggestion!.model).toBe('seedance-2.0-fast');
       expect(result.suggestion!.duration).toBe('10s');
       // 原始输入不被修改
       expect(input.model).toBe('seedance-2.0-fast');
       expect(input.duration).toBe('15s');
     });
 
-    it('15s + 非 Fast 模型在健康账号下返回 unknown', () => {
+    it('页面明确出现会员动作时返回 blocked', () => {
       const input = makeBaseInput({
         model: 'seedance-2.0',
         duration: '15s',
@@ -180,11 +180,17 @@ describe('evaluateVideoCapability', () => {
         health: healthyHealth,
         scheduling: healthyScheduling,
         accountStatus: healthyAccountStatus,
+        platformAvailability: 'membership_required',
       });
       const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('unknown');
+      expect(result.state).toBe('blocked');
+      expect(result.canSubmit).toBe(false);
+    });
+
+    it('只有页面实时确认 selectable 时允许 11s', () => {
+      const result = evaluateVideoCapability(makeBaseInput({ duration: '11s', platformAvailability: 'selectable' }));
+      expect(result.state).toBe('allowed');
       expect(result.canSubmit).toBe(true);
-      expect(result.issues.some(i => i.code === 'membership_risk')).toBe(true);
     });
   });
 
@@ -272,16 +278,16 @@ describe('evaluateVideoCapability', () => {
     it('15s + seedance-2.0-fast 返回建议配置', () => {
       const suggestion = suggestCompatibleVideoConfig('seedance-2.0-fast', '15s');
       expect(suggestion).toBeDefined();
-      expect(suggestion!.model).toBe('seedance-2.0');
+      expect(suggestion!.model).toBe('seedance-2.0-fast');
       expect(suggestion!.duration).toBe('10s');
-      expect(suggestion!.reason).toContain('会员权益限制');
+      expect(suggestion!.reason).toContain('实时能力证据');
     });
 
     it('15s + 其他模型返回建议配置', () => {
       const suggestion = suggestCompatibleVideoConfig('seedance-2.0', '15s');
       expect(suggestion).toBeDefined();
       expect(suggestion!.duration).toBe('10s');
-      expect(suggestion!.reason).toContain('15 秒时长');
+      expect(suggestion!.reason).toContain('实时能力证据');
     });
 
     it('非 15s 配置不返回建议', () => {
@@ -305,9 +311,8 @@ describe('evaluateVideoCapability', () => {
     });
   });
 
-  // ---- 测试 8: 15s 补丁开启不改变平台会员限制的判断 ----
-  describe('15s 补丁不影响会员限制判断', () => {
-    it('manual15sEnabled = true 时 15s + Fast 仍返回 unknown（不声称一定不可用）', () => {
+  describe('旧补丁标记不能绕过会员门禁', () => {
+    it('manual15sEnabled = true 时 15s 仍 blocked', () => {
       const input = makeBaseInput({
         model: 'seedance-2.0-fast',
         duration: '15s',
@@ -318,11 +323,11 @@ describe('evaluateVideoCapability', () => {
         accountStatus: healthyAccountStatus,
       });
       const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('unknown');
-      expect(result.canSubmit).toBe(true);
+      expect(result.state).toBe('blocked');
+      expect(result.canSubmit).toBe(false);
     });
 
-    it('manual15sEnabled = false 时 15s + Fast 也返回 unknown', () => {
+    it('manual15sEnabled = false 时 15s 也 blocked', () => {
       const input = makeBaseInput({
         model: 'seedance-2.0-fast',
         duration: '15s',
@@ -333,8 +338,8 @@ describe('evaluateVideoCapability', () => {
         accountStatus: healthyAccountStatus,
       });
       const result = evaluateVideoCapability(input);
-      expect(result.state).toBe('unknown');
-      expect(result.canSubmit).toBe(true);
+      expect(result.state).toBe('blocked');
+      expect(result.canSubmit).toBe(false);
     });
 
     it('manual15sEnabled = true 时额度耗尽仍返回 blocked', () => {
@@ -426,5 +431,76 @@ describe('evaluateVideoCapability', () => {
       const result = evaluateVideoCapability(input);
       expect(result.state).not.toBe('blocked');
     });
+  });
+});
+
+describe('豆包新 UI 只读能力快照与 dry-run', () => {
+  const pageText = [
+    '快速 视频生成 图像生成 PPT 写作 翻译 深入研究 录音转写 更多',
+    'Seedance 2.5 Seedance 2.0 Seedance 2.0 Fast Seedance 2.0 Mini',
+    'Seedream 5.0 Pro Seedream 5.0 Lite Seedream 4.5 Seedream 4.0',
+    '4秒 5秒 10秒 11秒 15秒 3:4 4:3 9:16 16:9 1:1 21:9 2:3 3:2',
+  ].join(' ');
+
+  it('记录时间、账户层级、页面来源和适配器版本', () => {
+    const snapshot = buildDoubaoCapabilitySnapshot({
+      pageUrl: 'https://www.doubao.com/chat/create-video/',
+      bodyText: pageText,
+      observedAt: '2026-07-31T10:00:00.000Z',
+      accountTier: '免费',
+    });
+    expect(snapshot.observed_at).toBe('2026-07-31T10:00:00.000Z');
+    expect(snapshot.account_tier).toBe('免费');
+    expect(snapshot.source.kind).toBe('page');
+    expect(snapshot.adapter_version).toMatch(/^2\./);
+  });
+
+  it('从页面文字识别新模型、入口、比例和 4–15 秒范围', () => {
+    const snapshot = buildDoubaoCapabilitySnapshot({ pageUrl: 'https://www.doubao.com/', bodyText: pageText });
+    expect(snapshot.entries).toContain('视频生成');
+    expect(snapshot.video.models).toContain('Seedance 2.5');
+    expect(snapshot.image.models).toContain('Seedream 5.0 Pro');
+    expect(snapshot.video.durations).toEqual([4, 5, 10, 11, 15]);
+    expect(snapshot.image.aspect_ratios).toContain('2:3');
+  });
+
+  it('元素缺失时返回 unknown，不猜测能力', () => {
+    const snapshot = buildDoubaoCapabilitySnapshot({ pageUrl: 'https://www.doubao.com/', bodyText: '' });
+    expect(snapshot.status).toBe('unknown');
+    expect(snapshot.video.models).toEqual([]);
+    expect(snapshot.account_tier).toBe('unknown');
+  });
+
+  it('会员窗口记录为 action_required，dry-run 返回 membership_required', () => {
+    const snapshot = buildDoubaoCapabilitySnapshot({
+      pageUrl: 'https://www.doubao.com/',
+      bodyText: pageText,
+      membershipDialogText: '升级会员后可使用更长视频',
+    });
+    expect(snapshot.membership.availability).toBe('action_required');
+    expect(evaluateDryRunSelection(snapshot, { model: 'Seedance 2.5', duration: 11, aspectRatio: '16:9' }))
+      .toEqual({ ok: false, code: 'membership_required', finalSubmit: false });
+  });
+
+  it.each([
+    ['unknown', false, 'membership_required'],
+    ['selectable', true, 'ready'],
+  ] as const)('11 秒 availability=%s 时按实时证据门禁', (availability, ok, code) => {
+    const snapshot = buildDoubaoCapabilitySnapshot({ pageUrl: 'https://www.doubao.com/', bodyText: pageText });
+    snapshot.membership.availability = availability;
+    expect(evaluateDryRunSelection(snapshot, { model: 'Seedance 2.5', duration: 11, aspectRatio: '16:9' }))
+      .toEqual({ ok, code, finalSubmit: false });
+  });
+
+  it('dry-run 只验证可见配置，永不提交最终生成', () => {
+    const snapshot = buildDoubaoCapabilitySnapshot({ pageUrl: 'https://www.doubao.com/', bodyText: pageText });
+    expect(evaluateDryRunSelection(snapshot, { model: 'Seedance 2.5', duration: 10, aspectRatio: '16:9' }))
+      .toEqual({ ok: true, code: 'ready', finalSubmit: false });
+  });
+
+  it('历史 15 秒请求改写入口固定拒绝启用', async () => {
+    const forbiddenWebview = new Proxy({}, { get: () => { throw new Error('不得访问 webview'); } });
+    expect(await inject15sVideoPatch(forbiddenWebview as never)).toBe(false);
+    expect(await set15sVideoPatchEnabled(forbiddenWebview as never, true)).toBe(false);
   });
 });

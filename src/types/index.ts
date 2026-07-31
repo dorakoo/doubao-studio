@@ -76,12 +76,13 @@ export type {
 /** 视频配置默认值 */
 export const DEFAULT_VIDEO_CONFIG = {
   model: 'seedance-2.0' as VideoModel,
-  duration: '15s' as VideoDuration,
+  duration: '10s' as VideoDuration,
   aspectRatio: '16:9' as VideoAspectRatio,
 };
 
 /** 视频模型显示名映射 */
 export const VIDEO_MODEL_LABELS: Record<VideoModel, string> = {
+  'seedance-2.5': 'Seedance 2.5',
   'seedance-2.0': 'Seedance 2.0',
   'seedance-2.0-fast': 'Seedance 2.0 Fast',
   'seedance-2.0-mini': 'Seedance 2.0 Mini',
@@ -89,6 +90,7 @@ export const VIDEO_MODEL_LABELS: Record<VideoModel, string> = {
 
 /** 视频模型消耗说明 */
 export const VIDEO_MODEL_COST: Record<VideoModel, string> = {
+  'seedance-2.5': '页面实时显示',
   'seedance-2.0': '2 倍消耗',
   'seedance-2.0-fast': '快速出片',
   'seedance-2.0-mini': '日常使用',

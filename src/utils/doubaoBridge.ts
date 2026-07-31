@@ -2636,6 +2636,7 @@ export async function configureVideoOptions(
 ): Promise<void> {
   // 模型名称映射（豆包页面显示的文本）
   const modelLabels: Record<string, string[]> = {
+    'seedance-2.5': ['Seedance 2.5', '2.5'],
     'seedance-2.0': ['Seedance 2.0', '2.0', '2.0 标准版', '标准', 'Standard'],
     'seedance-2.0-fast': ['Seedance 2.0 Fast', '2.0 Fast', 'Fast', '2.0 极速', '极速', '极速版', '2.0 Fast 极速'],
     'seedance-2.0-mini': ['Seedance 2.0 Mini', '2.0 Mini', 'Mini', '2.0 轻量', '轻量', '轻量版'],
@@ -3138,22 +3139,17 @@ export async function configureVideoOptions(
 
   // 1. 选择模型
   console.log(`[doubaoBridge] 配置视频模型: ${config.model}`);
-  const modelTriggers = ['模型', 'Mini', 'Fast', '2.0'];
+  const modelTriggers = ['模型', 'Mini', 'Fast', '2.5', '2.0'];
   if (!await selectDropdownOption(modelTriggers, modelTexts, '视频模型')) {
     throw new Error(`视频模型配置失败: ${config.model}`);
   }
   await sleep(400);
 
   // 2. 选择时长
-  const is15sPatch = config.duration === '15s';
-  if (is15sPatch) {
-    console.log(`[doubaoBridge] 配置视频时长: 15s（通过请求拦截实现，UI 跳过）`);
-  } else {
-    console.log(`[doubaoBridge] 配置视频时长: ${config.duration}`);
-    const durationTriggers = ['5s', '10s', '时长'];
-    if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
-      throw new Error(`视频时长配置失败: ${config.duration}`);
-    }
+  console.log(`[doubaoBridge] 配置视频时长: ${config.duration}（仅使用页面可见控件）`);
+  const durationTriggers = ['4s', '5s', '10s', '15s', '时长'];
+  if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
+    throw new Error(`视频时长配置失败: ${config.duration}`);
   }
   await sleep(300);
 
@@ -3433,6 +3429,10 @@ export async function uploadReferenceAudio(
  * 同时拦截 SSE 响应，提取 vid 和无水印视频地址存入 window.__doubaoVideoCache
  */
 export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boolean> {
+  void webview;
+  console.warn('[doubaoBridge] 15 秒请求改写能力已永久禁用；必须使用页面实时控件');
+  return false;
+  /* istanbul ignore next -- 历史实现不可达，待独立清理包删除。 */
   const injectCode = `
     (function() {
       if (window.__doubao15sPatched) return;
@@ -3785,6 +3785,10 @@ export async function detectRobotVerification(webview: WebviewHandle): Promise<b
 
 /** 启用或关闭已经注入的 15 秒请求补丁。 */
 export async function set15sVideoPatchEnabled(webview: WebviewHandle, enabled: boolean): Promise<boolean> {
+  void webview;
+  void enabled;
+  return false;
+  /* istanbul ignore next -- 历史实现不可达。 */
   try {
     const result = await safeExecuteJS<boolean>(
       webview,

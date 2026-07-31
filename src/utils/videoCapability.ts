@@ -4,7 +4,7 @@
  *
  * 职责：
  * 1. 在提交视频任务前，基于本地已知状态判断是否允许提交
- * 2. 对 15s + Seedance 2.0 Fast 等可能触发会员限制的配置给出中性风险提示
+ * 2. 对 11–15 秒配置要求页面实时能力证据，无法确认时 fail-closed
  * 3. 提供建议配置，但绝不自动替换用户配置
  *
  * 合规约束：
@@ -33,7 +33,7 @@ export type VideoCapabilityIssueCode =
   | 'verification_required'
   | 'scheduling_paused'
   | 'cooldown_active'
-  | 'membership_risk'
+  | 'membership_required'
   | 'account_error';
 
 /** 能力预检问题项 */
@@ -54,6 +54,8 @@ export interface VideoCapabilityInput {
   aspectRatio: VideoAspectRatio;
   /** 是否启用手动 15 秒补丁 */
   manual15sEnabled: boolean;
+  /** 页面实时观察结果；只有 selectable 能授权 11–15 秒继续配置。 */
+  platformAvailability?: 'selectable' | 'membership_required' | 'unknown';
   /** 账号本地额度状态（来自 Account.seedanceQuota） */
   seedanceQuota?: Account['seedanceQuota'];
   /** 账号健康状态（来自 Account.health） */
@@ -99,11 +101,10 @@ export interface VideoCapabilityResult {
  * 4. 调度暂停 → blocked
  * 5. 冷却中 → blocked
  * 6. 额度耗尽 → blocked
- * 7. 15s + Seedance 2.0 Fast → unknown（风险提示，不阻止提交）
+ * 7. 11–15 秒缺少页面可选证据或出现会员窗口 → blocked
  * 8. 其他情况 → allowed
  *
- * 会员资格不能仅凭本地推断为"可用"。未能确认时保持 unknown，允许正常提交，
- * 但提交后进入快速限制检测。
+ * 会员资格不能仅凭本地推断为"可用"。未能确认时必须 fail-closed。
  */
 export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapabilityResult {
   const now = input.now ?? Date.now();
@@ -176,12 +177,18 @@ export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapab
     });
   }
 
-  // ---- 7. 15s 时长风险提示 ----
-  // 15s 是本地注入能力，不能代表当前账号一定有平台侧生成资格。
-  // 特别是 15s + Seedance 2.0 Fast 组合可能触发会员/权益限制。
-  // 此处不阻止提交，仅给出中性风险提示。
-  const isFastRisk = input.duration === '15s' && input.model === 'seedance-2.0-fast';
-  const is15sRisk = input.duration === '15s';
+  // ---- 7. 11–15 秒实时能力门禁 ----
+  const durationSeconds = Number.parseInt(input.duration, 10);
+  const requiresLiveEntitlement = durationSeconds >= 11;
+  if (requiresLiveEntitlement && input.platformAvailability !== 'selectable') {
+    issues.push({
+      code: 'membership_required',
+      message: input.platformAvailability === 'membership_required'
+        ? '当前页面要求会员操作，已停止提交'
+        : '11–15 秒可能需要会员权益，缺少当前页面实时可选证据时禁止提交',
+      blocking: true,
+    });
+  }
 
   // ---- 确定最终状态 ----
   const blockingIssues = issues.filter((i) => i.blocking);
@@ -196,59 +203,13 @@ export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapab
       userMessage,
       canSubmit: false,
       // 提供建议配置（仅作为建议）
-      suggestion: is15sRisk
+      suggestion: requiresLiveEntitlement
         ? {
-            model: isFastRisk ? 'seedance-2.0' : input.model,
+            model: input.model,
             duration: '10s',
-            reason: isFastRisk
-              ? '当前配置可能受会员权益限制，可尝试使用 Seedance 2.0 + 10s 作为替代方案'
-              : '15 秒时长可能受部分账号会员权益限制，10 秒通常兼容性更好',
+            reason: '当前账户观察到 10 秒兼容性更好；仍应以页面实时能力为准',
           }
         : undefined,
-    };
-  }
-
-  if (isFastRisk) {
-    // 15s + Seedance 2.0 Fast：最高风险组合
-    return {
-      state: 'unknown',
-      issues: [
-        ...issues,
-        {
-          code: 'membership_risk',
-          message: '15 秒 + Seedance 2.0 Fast 组合可能受账号会员权益限制，提交后若被拒绝请更换配置重试',
-          blocking: false,
-        },
-      ],
-      userMessage: '15 秒 + Seedance 2.0 Fast 组合可能受账号会员权益限制，提交后若被拒绝请更换配置重试',
-      canSubmit: true,
-      suggestion: {
-        model: 'seedance-2.0',
-        duration: '10s',
-        reason: '如遇会员限制，可尝试使用 Seedance 2.0 + 10s 作为替代方案',
-      },
-    };
-  }
-
-  if (is15sRisk) {
-    // 15s + 其他模型：一般风险
-    return {
-      state: 'unknown',
-      issues: [
-        ...issues,
-        {
-          code: 'membership_risk',
-          message: '15 秒时长是本地注入能力，可能受账号会员权益限制，提交后若被拒绝请更换配置重试',
-          blocking: false,
-        },
-      ],
-      userMessage: '15 秒时长是本地注入能力，可能受账号会员权益限制，提交后若被拒绝请更换配置重试',
-      canSubmit: true,
-      suggestion: {
-        model: input.model,
-        duration: '10s',
-        reason: '15 秒时长可能受部分账号会员权益限制，10 秒通常兼容性更好',
-      },
     };
   }
 
@@ -269,21 +230,11 @@ export function suggestCompatibleVideoConfig(
   model: VideoModel,
   duration: VideoDuration,
 ): SuggestedVideoConfig | undefined {
-  // 15s + Seedance 2.0 Fast 是已知的高风险组合
-  if (duration === '15s' && model === 'seedance-2.0-fast') {
-    return {
-      model: 'seedance-2.0',
-      duration: '10s',
-      reason: '15 秒 + Seedance 2.0 Fast 可能受会员权益限制，Seedance 2.0 + 10s 通常兼容性更好',
-    };
-  }
-
-  // 15s + 任何模型在未知会员状态下都有一定风险
-  if (duration === '15s') {
+  if (Number.parseInt(duration, 10) >= 11) {
     return {
       model,
       duration: '10s',
-      reason: '15 秒时长可能受部分账号会员权益限制，10 秒通常兼容性更好',
+      reason: '11–15 秒需要页面实时能力证据；当前账户观察到 10 秒兼容性更好',
     };
   }
 

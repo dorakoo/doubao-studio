@@ -67,8 +67,8 @@ const VALID_ARTIFACT_SOURCES = ['network', 'page', 'manual'] as const;
 const VALID_LOGIN_STATES = ['unknown', 'ok', 'expired'] as const;
 const VALID_RUN_OUTCOMES = ['done', 'failed', 'paused', 'cancelled'] as const;
 const VALID_TASK_SOURCES = ['manual', 'csv', 'workflow'] as const;
-const VALID_VIDEO_MODELS = ['seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'] as const;
-const VALID_VIDEO_DURATIONS = ['5s', '10s', '15s'] as const;
+const VALID_VIDEO_MODELS = ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'] as const;
+const VALID_VIDEO_DURATIONS = ['4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s', '13s', '14s', '15s'] as const;
 const VALID_VIDEO_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'] as const;
 const VALID_VALIDATION_STATES = ['unknown', 'valid', 'expired', 'invalid'] as const;
 
