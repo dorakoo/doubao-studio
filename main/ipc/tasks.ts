@@ -13,6 +13,8 @@ import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
 import { acquireTaskLease, canReleaseTaskLease, renewTaskLease } from '../utils/taskLease';
 import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/downloadRecovery';
+import { TaskEventStream } from '../core/TaskEventStream';
+import { TaskRepository } from '../core/TaskRepository';
 import type {
   GenerationMode,
   VideoModel,
@@ -59,23 +61,21 @@ export type {
 
 // ==================== 数据持久化 ====================
 
-const STORE_FILE = 'tasks.json';
 const DOWNLOAD_STORE_FILE = 'downloads.json';
 let downloadRecoveryApplied = false;
+export const taskEventStream = new TaskEventStream();
+const taskRepository = new TaskRepository({
+  read: (filename, fallback) => readJSON(filename, fallback),
+  write: (filename, data) => writeJSON(filename, data),
+  normalize: normalizeTasks,
+  defaultProjectId: getDefaultProjectId,
+  events: taskEventStream,
+  warn: (message, details) => console.warn(message, details),
+});
 
 /** 读取所有任务（含运行时归一化） */
 function loadTasks(): Task[] {
-  const defaultProjectId = getDefaultProjectId();
-  const raw = readJSON<unknown>(STORE_FILE, []);
-  const result = normalizeTasks(raw, defaultProjectId);
-  // 仅在归一化确实改变数据时写回磁盘
-  if (result.changed) {
-    writeJSON(STORE_FILE, result.data);
-  }
-  if (result.warnings.length > 0) {
-    console.warn('[Tasks] 数据归一化告警:', result.warnings);
-  }
-  return result.data;
+  return taskRepository.read();
 }
 
 function artifactId(url: string): string {
@@ -105,7 +105,7 @@ function appendArtifacts(task: Task, outputs: string[], source: TaskArtifact['so
 import { parseCsv, normalizeCsvMode } from '../utils/csv';
 
 function saveTasks(tasks: Task[]): boolean {
-  return writeJSON(STORE_FILE, tasks);
+  return taskRepository.replace(tasks);
 }
 
 function saveTasksOrError(tasks: Task[]): { success: true } | { success: false; error: string } {
