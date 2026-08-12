@@ -155,7 +155,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             errorInfo: { code: 'cancelled', message: '应用界面重新载入，任务已安全暂停', recoverable: true, detectedAt: now },
             runtime: task.runtime ? { stage: 'paused', message: '应用界面重新载入，任务已安全暂停', stageStartedAt: now, lastHeartbeatAt: now } : undefined,
           });
-          await window.electronAPI.tasks.releaseLock(task.id);
+          if (task.lock?.ownerId) {
+            await window.electronAPI.tasks.releaseLock(task.id, task.lock.ownerId);
+          }
         }
         if (activeTasks.length > 0) tasks = await window.electronAPI.tasks.list();
       }
