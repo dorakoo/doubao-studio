@@ -23,6 +23,7 @@ import type { WebviewHandle } from '../../src/utils/doubaoBridge';
 function createMockWebview(responses: {
   cache?: { found: boolean; vid?: string; videoUrl?: string; fieldSource?: string } | null;
   playInfo?: { status: number; data: unknown } | null;
+  withoutWatermark?: { status: number; data: unknown } | null;
   creationList?: { found: boolean; resourceId: string | null; status: number } | null;
   downloadInfo?: { status: number; data: unknown } | null;
   structuredData?: unknown[] | null;
@@ -49,6 +50,11 @@ function createMockWebview(responses: {
       if (code.includes('get_play_info')) {
         if (responses.playInfo === null) return { status: 0, data: null, error: 'timeout' };
         return responses.playInfo;
+      }
+
+      if (code.includes('get_without_watermark')) {
+        if (responses.withoutWatermark === null) return { status: 0, data: null, error: 'timeout' };
+        return responses.withoutWatermark;
       }
 
       // fetchCreationDownloadInfo step 1 — 检测 get_creation_list
@@ -317,9 +323,9 @@ describe('resolveVideoArtifact 集成测试', () => {
     expect(webview.executeJavaScript).not.toHaveBeenCalled();
   });
 
-  // ---- 7. 创作空间三步解析 ----
+  // ---- 7. 官方无水印能力解析 ----
 
-  it('创作空间三步解析成功时返回 download_infos 中的地址', async () => {
+  it('官方无水印接口明确开放时返回对应 vid 的下载地址', async () => {
     const webview = createMockWebview({
       cache: {
         found: true,
@@ -328,14 +334,15 @@ describe('resolveVideoArtifact 集成测试', () => {
         fieldSource: '',
       },
       playInfo: { status: 200, data: { data: {} } }, // play_info 无有效 URL
-      creationList: { found: true, resourceId: 'res_001', status: 200 },
-      downloadInfo: {
+      withoutWatermark: {
         status: 200,
         data: {
+          code: 0,
           data: {
-            download_infos: [
-              { main_url: 'https://vod.example.com/video/aispace_no_wm.mp4' },
-            ],
+            without_watermark: true,
+            download_video: {
+              vid_aispace_001: { download_url: 'https://vod.example.com/video/aispace_no_wm.mp4' },
+            },
           },
         },
       },
@@ -431,19 +438,121 @@ describe('resolveVideoArtifact 集成测试', () => {
     expect(playInfoCalls.length).toBeGreaterThan(0);
   });
 
+  it('新播放器 React video props 中的 vid 会回补官方无水印接口', async () => {
+    const executeJavaScript = vi.fn(async (code: string): Promise<unknown> => {
+      if (code.includes('window.__doubaoVideoCache')) return { found: false };
+      if (code.includes('__reactFiber$')) {
+        return [{ video: { vid: 'vid_react_player_001', creation_task_id: 'task_001' } }];
+      }
+      if (code.includes('get_play_info')) {
+        return {
+          status: 200,
+          data: {
+            data: {
+              original_media_info: {
+                main_url: 'https://vod.example.com/video/react_player_original.mp4',
+              },
+            },
+          },
+        };
+      }
+      if (code.includes('get_without_watermark')) {
+        return {
+          status: 200,
+          data: {
+            code: 0,
+            data: {
+              without_watermark: true,
+              download_video: {
+                vid_react_player_001: {
+                  download_url: 'https://vod.example.com/video/react_player_without_watermark.mp4',
+                },
+              },
+            },
+          },
+        };
+      }
+      if (code.includes("querySelectorAll('video')")) return [];
+      if (code.includes('JSON.stringify(urls)')) return '[]';
+      return null;
+    });
+    const webview: WebviewHandle = {
+      executeJavaScript,
+      loadURL: vi.fn(),
+      getURL: vi.fn(() => 'https://www.doubao.com/chat/38437390431449858'),
+    };
+
+    const result = await manualResolveVideoArtifact(webview, {
+      conversationUrl: webview.getURL(),
+      timeoutMs: 5000,
+    });
+
+    expect(result).toMatchObject({
+      status: 'resolved',
+      source: 'platform_download_info',
+      vid: 'vid_react_player_001',
+      url: 'https://vod.example.com/video/react_player_without_watermark.mp4',
+    });
+    expect(executeJavaScript).toHaveBeenCalledWith(
+      expect.stringContaining('__reactFiber$'),
+    );
+  });
+
+  it('官方明确无水印不可用时手动入口不回退普通源媒体', async () => {
+    const webview = createMockWebview({
+      cache: {
+        found: true,
+        vid: 'vid_watermark_denied_001',
+        videoUrl: 'https://vod.example.com/video/captured_original.mp4',
+        fieldSource: 'original_media_info',
+      },
+      playInfo: {
+        status: 200,
+        data: {
+          data: {
+            original_media_info: {
+              main_url: 'https://vod.example.com/video/play_info_original.mp4',
+            },
+          },
+        },
+      },
+      withoutWatermark: {
+        status: 200,
+        data: { code: 0, data: { without_watermark: false } },
+      },
+      structuredData: [],
+      domUrls: [],
+      resultUrl: '[]',
+    });
+
+    const result = await manualResolveVideoArtifact(webview, {
+      conversationUrl: 'https://www.doubao.com/chat/denied',
+      timeoutMs: 5000,
+    });
+
+    expect(result.status).toBe('unavailable');
+    expect(result.url).toBeUndefined();
+    expect(result.reason).toContain('without_watermark=false');
+    expect(result.attempts).toContainEqual(expect.objectContaining({
+      strategy: 'platform_download_info',
+      result: 'fail',
+    }));
+  });
+
   it('扫描仅得到 vid 后回补 platform_download_info 成功解析', async () => {
     const webview = createMockWebview({
       cache: { found: false },
       // play_info 回补时返回空数据（无有效 URL）
       playInfo: { status: 200, data: { data: {} } },
-      creationList: { found: true, resourceId: 'res_retry_002', status: 200 },
-      downloadInfo: {
+      withoutWatermark: {
         status: 200,
         data: {
+          code: 0,
           data: {
-            download_infos: [
-              { main_url: 'https://vod.example.com/video/scan_vid_retry_dl.mp4' },
-            ],
+            without_watermark: true,
+            download_video: {
+              vid_scan_only_002: { download_url: 'https://vod.example.com/video/scan_vid_retry_dl.mp4' },
+            },
           },
         },
       },
