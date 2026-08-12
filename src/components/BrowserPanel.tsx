@@ -9,7 +9,7 @@
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { message, Switch, Tooltip } from 'antd';
+import { message, Tooltip } from 'antd';
 import type { Account, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -29,8 +29,6 @@ import {
   configureVideoOptions,
   uploadReferenceImages,
   uploadReferenceAudio,
-  inject15sVideoPatch,
-  set15sVideoPatchEnabled,
   resetVideoCaptureCache,
   refreshBlockerBaseline,
   detectVideoGenerationBlocker,
@@ -83,14 +81,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const runningRef = useRef<Set<string>>(new Set());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
-  const manual15sRef = useRef<Record<string, boolean>>({});
   const manualVideoUsageRef = useRef<Set<string>>(new Set());
   /** 每个账号的定时器集合，用于组件卸载或账号删除时统一清理 */
   const timersRef = useRef<Map<string, Set<ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>>>(new Map());
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
-  const [manual15sByAccount, setManual15sByAccount] = useState<Record<string, boolean>>({});
   const [manualVideoExtracting, setManualVideoExtracting] = useState(false);
 
   const accountBusy = useTaskStore((s) => s.accountBusy);
@@ -250,9 +246,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
     webview.addEventListener('dom-ready', () => {
       markLoaded('dom-ready');
-      if (manual15sRef.current[accId]) {
-        void inject15sVideoPatch(webview).then(() => set15sVideoPatchEnabled(webview, true));
-      }
     });
     webview.addEventListener('did-fail-load', () => {
       loadingMapRef.current.set(accId, false);
@@ -334,29 +327,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
   }, [activeAccount?.id]);
-
-  const handleManual15sToggle = async (enabled: boolean) => {
-    if (!activeAccount) return;
-    const accountId = activeAccount.id;
-    const webview = registryRef.current.get(accountId);
-    if (!webview) {
-      message.error('当前账号页面尚未就绪');
-      return;
-    }
-
-    if (enabled) {
-      await inject15sVideoPatch(webview);
-    }
-    const ok = await set15sVideoPatchEnabled(webview, enabled);
-    if (!ok) {
-      message.error('15 秒脚本开关设置失败，请刷新页面后重试');
-      return;
-    }
-
-    manual15sRef.current[accountId] = enabled;
-    setManual15sByAccount((current) => ({ ...current, [accountId]: enabled }));
-    message.success(enabled ? '手动 15 秒脚本已开启' : '手动 15 秒脚本已关闭');
-  };
 
   const handleExtractCurrentVideo = async (): Promise<void> => {
     if (!activeAccount) return;
@@ -603,7 +573,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             model: videoConfig.model,
             duration: videoConfig.duration,
             aspectRatio: videoConfig.aspectRatio,
-            manual15sEnabled: !!manual15sRef.current[accountId],
+            manual15sEnabled: false,
             seedanceQuota: account.seedanceQuota,
             health: account.health,
             scheduling: account.scheduling,
@@ -642,16 +612,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           await pause(1500); // 等待 Tab 切换动画
         }
 
-        // 视频模式：配置参数 + 按需注入 15s 补丁
+        // 视频模式：只使用页面可见控件配置，禁止请求改写绕过会员门槛。
         if (mode === 'video') {
-          // 所有视频任务均安装网络监听；是否改写为 15 秒由独立开关控制。
-          const need15sPatch = videoConfig?.duration === '15s';
-          await inject15sVideoPatch(webview);
-          await set15sVideoPatchEnabled(webview, need15sPatch);
-          if (need15sPatch) {
-            setAccountAutomationState(accountId, 'injecting', '注入 15s 时长补丁...', 'configuring');
-            await pause(500);
-          }
           if (videoConfig) {
             setAccountAutomationState(accountId, 'injecting', '配置视频参数...', 'configuring');
             await configureVideoOptions(webview, videoConfig);
@@ -936,9 +898,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } finally {
       abortControllersRef.current.delete(taskId);
       pendingRestartTasksRef.current.delete(taskId);
-      if (mode === 'video') {
-        await set15sVideoPatchEnabled(webview, !!manual15sRef.current[accountId]);
-      }
       runningRef.current.delete(accountId);
       await automationEngine.release(taskId);
       setTimeout(() => useTaskStore.getState().processQueue(), 0);
@@ -1023,17 +982,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-        </Tooltip>
-        <Tooltip title="开启后，当前账号在页面中手动提交的视频请求会被改为 15 秒">
-          <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexShrink: 0 }}>
-            <Switch
-              size="small"
-              checked={!!manual15sByAccount[activeAccount.id]}
-              disabled={!!accountBusy[activeAccount.id]}
-              onChange={handleManual15sToggle}
-            />
-            <span style={{ color: '#9898b8', fontSize: 12, whiteSpace: 'nowrap' }}>手动 15s</span>
-          </div>
         </Tooltip>
       </div>
 

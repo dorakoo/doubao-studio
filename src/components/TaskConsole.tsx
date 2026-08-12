@@ -783,11 +783,10 @@ const TaskConsole: React.FC = () => {
             <Segmented
               value={videoConfig.duration}
               onChange={(val) => setVideoConfig({ ...videoConfig, duration: val as VideoDuration })}
-              options={[
-                { label: '5 秒', value: '5s' },
-                { label: '10 秒', value: '10s' },
-                { label: '15 秒', value: '15s' },
-              ]}
+              options={Array.from({ length: 12 }, (_, index) => {
+                const seconds = index + 4;
+                return { label: `${seconds} 秒`, value: `${seconds}s` };
+              })}
               block
               style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
             />
@@ -1129,11 +1128,10 @@ const TaskConsole: React.FC = () => {
             <Segmented
               value={editingVideoConfig.duration}
               onChange={(value) => setEditingVideoConfig({ ...editingVideoConfig, duration: value as VideoDuration })}
-              options={[
-                { label: '5 秒', value: '5s' },
-                { label: '10 秒', value: '10s' },
-                { label: '15 秒', value: '15s' },
-              ]}
+              options={Array.from({ length: 12 }, (_, index) => {
+                const seconds = index + 4;
+                return { label: `${seconds} 秒`, value: `${seconds}s` };
+              })}
               block
               style={{ background: '#1a1a24', padding: 4, marginBottom: 12 }}
             />
@@ -1151,7 +1149,7 @@ const TaskConsole: React.FC = () => {
               const boundAccountId = editingTask?.assignedAccountId;
               if (!boundAccountId) {
                 // 未绑定账号时仅展示风险提示
-                if (editingVideoConfig.duration === '15s') {
+                if (Number.parseInt(editingVideoConfig.duration, 10) >= 11) {
                   return (
                     <div style={{
                       marginTop: 12,
@@ -1162,7 +1160,7 @@ const TaskConsole: React.FC = () => {
                       border: '1px solid rgba(250,173,20,0.3)',
                       color: '#faad14',
                     }}>
-                      15 秒时长可能受账号会员权益限制，提交后若被拒绝请更换配置重试
+                      11–15 秒必须在执行时取得页面实时可选证据；出现会员窗口或无法确认时将停止提交
                     </div>
                   );
                 }

@@ -63,10 +63,10 @@ export type TaskErrorCode =
   | 'unknown';
 
 /** 视频生成模型 */
-export type VideoModel = 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
+export type VideoModel = 'seedance-2.5' | 'seedance-2.0' | 'seedance-2.0-fast' | 'seedance-2.0-mini';
 
 /** 视频时长 */
-export type VideoDuration = '5s' | '10s' | '15s';
+export type VideoDuration = '4s' | '5s' | '6s' | '7s' | '8s' | '9s' | '10s' | '11s' | '12s' | '13s' | '14s' | '15s';
 
 /** 视频比例 */
 export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
