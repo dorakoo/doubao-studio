@@ -34,6 +34,10 @@
 - 修改文件 ESLint：0 error（既有 warnings 未扩项清理）
 - `git diff --check`：通过
 
+### CI R1
+
+首轮 GitHub CI 仅因本包滑杆识别正则新增 5 个 `no-useless-escape` warnings，使全局 warning 数达到 150、超过上限 149。R1 将数字和空格匹配改为等价的字符类表达，不修改全局阈值、不清理无关旧债；等待新 HEAD CI 复验。
+
 ## 状态
 
 代码候选已实现并通过自动化门禁，等待总架构师复验。未部署。

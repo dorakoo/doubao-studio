@@ -2672,7 +2672,7 @@ export async function configureVideoOptions(
             var trigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(function(el) {
               var r = el.getBoundingClientRect();
               var text = (el.innerText || '').trim();
-              return r.width > 0 && r.height > 0 && /(?:自动|\d+:\d+)\s*·\s*\d+s/.test(text);
+              return r.width > 0 && r.height > 0 && /(?:自动|[0-9]+:[0-9]+)[ ]*·[ ]*[0-9]+s/.test(text);
             });
             if (!trigger) return { ok: false };
             var tr = trigger.getBoundingClientRect();
