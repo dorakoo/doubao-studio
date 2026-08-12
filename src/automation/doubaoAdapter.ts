@@ -77,6 +77,19 @@ export async function runAdapterSelfCheck(webview: WebviewHandle): Promise<Adapt
           break;
         }
       }
+      // 当前购买会员界面是跨域订阅 iframe，父页面无法读取正文；
+      // 只能使用平台提供的 iframe title/src 作为机器可读动作证据。
+      if (!membershipText) {
+        var frames = document.querySelectorAll('iframe');
+        for (var f = 0; f < frames.length; f++) {
+          var frameTitle = (frames[f].getAttribute('title') || '').trim();
+          var frameSrc = frames[f].getAttribute('src') || '';
+          if (frameTitle.indexOf('订阅') >= 0 || /subscribe|subscription|membership|upgrade/i.test(frameSrc)) {
+            membershipText = '升级会员';
+            break;
+          }
+        }
+      }
       var accountTier = 'unknown';
       var tierMatch = bodyText.match(/(?:当前套餐|当前会员|会员等级)[:：\\s]*(免费|标准|加强|高级)(?:会员)?/);
       if (tierMatch) accountTier = tierMatch[1];

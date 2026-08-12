@@ -482,6 +482,17 @@ describe('豆包新 UI 只读能力快照与 dry-run', () => {
       .toEqual({ ok: false, code: 'membership_required', finalSubmit: false });
   });
 
+  it.each(['购买会员', '升级会员', '会员专享'])('真实会员动作证据 %s 均 fail-closed', (membershipDialogText) => {
+    const snapshot = buildDoubaoCapabilitySnapshot({
+      pageUrl: 'https://www.doubao.com/',
+      bodyText: pageText,
+      membershipDialogText,
+    });
+    expect(snapshot.membership.availability).toBe('action_required');
+    expect(evaluateDryRunSelection(snapshot, { model: 'Seedance 2.0 Fast', duration: 15, aspectRatio: '9:16' }))
+      .toEqual({ ok: false, code: 'membership_required', finalSubmit: false });
+  });
+
   it.each([
     ['unknown', false, 'membership_required'],
     ['selectable', true, 'ready'],

@@ -2647,6 +2647,111 @@ export async function configureVideoOptions(
   const durationTexts = [durationSec + ' 秒', durationSec + '秒', config.duration];
 
   /**
+   * 当前豆包视频时长使用 Radix slider：aria-valuemin=0 对应 4 秒，
+   * aria-valuemax=11 对应 15 秒。必须使用真实键盘事件操作控件，不能改写请求。
+   */
+  const selectDurationSlider = async (): Promise<'selected' | 'membership_required' | 'not_found'> => {
+    if (typeof webview.sendInputEvent !== 'function') return 'not_found';
+    const targetSeconds = Number(durationSec);
+    if (!Number.isInteger(targetSeconds) || targetSeconds < 4 || targetSeconds > 15) return 'not_found';
+
+    const findSlider = async (): Promise<{ ok: boolean; clickPos?: string; triggerClickPos?: string }> => safeExecuteJS<{
+      ok: boolean;
+      clickPos?: string;
+      triggerClickPos?: string;
+    }>(webview, `
+        (function() {
+          var sliders = Array.from(document.querySelectorAll('[role="slider"]'));
+          var slider = sliders.find(function(el) {
+            var r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0
+              && el.getAttribute('aria-valuemin') === '0'
+              && el.getAttribute('aria-valuemax') === '11';
+          });
+          if (!slider) {
+            var trigger = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find(function(el) {
+              var r = el.getBoundingClientRect();
+              var text = (el.innerText || '').trim();
+              return r.width > 0 && r.height > 0 && /(?:自动|\d+:\d+)\s*·\s*\d+s/.test(text);
+            });
+            if (!trigger) return { ok: false };
+            var tr = trigger.getBoundingClientRect();
+            return {
+              ok: false,
+              triggerClickPos: Math.round(tr.left + tr.width / 2) + ',' + Math.round(tr.top + tr.height / 2)
+            };
+          }
+          var r = slider.getBoundingClientRect();
+          slider.focus();
+          return {
+            ok: true,
+            clickPos: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2)
+          };
+        })()
+      `,
+      3000,
+      'find_video_duration_slider',
+    ).catch((): { ok: boolean } => ({ ok: false }));
+
+    let slider = await findSlider();
+    if (!slider.ok && slider.triggerClickPos) {
+      const [triggerX, triggerY] = slider.triggerClickPos.split(',').map(Number);
+      if (Number.isFinite(triggerX) && Number.isFinite(triggerY)) {
+        webview.sendInputEvent({ type: 'mouseMove', x: triggerX, y: triggerY });
+        webview.sendInputEvent({ type: 'mouseDown', x: triggerX, y: triggerY, button: 'left', clickCount: 1 });
+        webview.sendInputEvent({ type: 'mouseUp', x: triggerX, y: triggerY, button: 'left', clickCount: 1 });
+        await sleep(350);
+        slider = await findSlider();
+      }
+    }
+    if (!slider.ok || !slider.clickPos) return 'not_found';
+
+    const [x, y] = slider.clickPos.split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return 'not_found';
+    webview.sendInputEvent({ type: 'mouseMove', x, y });
+    webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
+    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
+    for (let step = 0; step < targetSeconds - 4; step += 1) {
+      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
+      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
+    }
+    await sleep(500);
+
+    const result = await safeExecuteJS<{ selected: boolean; membershipRequired: boolean }>(
+      webview,
+      `
+        (function() {
+          var expected = ${JSON.stringify(targetSeconds - 4)};
+          var slider = Array.from(document.querySelectorAll('[role="slider"]')).find(function(el) {
+            return el.getAttribute('aria-valuemin') === '0' && el.getAttribute('aria-valuemax') === '11';
+          });
+          var subscription = Array.from(document.querySelectorAll('iframe')).some(function(frame) {
+            var title = (frame.getAttribute('title') || '').trim();
+            var src = frame.getAttribute('src') || '';
+            return title.indexOf('订阅') >= 0 || /subscribe|subscription|membership|upgrade/i.test(src);
+          });
+          return {
+            selected: !!slider && Number(slider.getAttribute('aria-valuenow')) === expected,
+            membershipRequired: subscription
+          };
+        })()
+      `,
+      3000,
+      'verify_video_duration_slider',
+    );
+
+    if (result.membershipRequired) {
+      // 关闭本次参数探测触发的订阅窗口，确保失败后不遗留购买界面。
+      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+      return 'membership_required';
+    }
+    return result.selected ? 'selected' : 'not_found';
+  };
+
+  /**
    * 点击下拉选项：先点击触发按钮展开下拉，再选择目标选项
    * triggerTexts: 触发按钮的文本关键词（用于找到并点击展开）
    * optionTexts: 下拉选项的文本
@@ -3147,9 +3252,16 @@ export async function configureVideoOptions(
 
   // 2. 选择时长
   console.log(`[doubaoBridge] 配置视频时长: ${config.duration}（仅使用页面可见控件）`);
-  const durationTriggers = ['4s', '5s', '10s', '15s', '时长'];
-  if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
-    throw new Error(`视频时长配置失败: ${config.duration}`);
+  const sliderResult = await selectDurationSlider();
+  if (sliderResult === 'membership_required') {
+    throw new Error(`membership_required: ${config.duration} 需要会员操作，已停止提交`);
+  }
+  if (sliderResult === 'not_found') {
+    // 兼容尚未切换到滑杆 UI 的旧页面；仍只允许页面可见控件。
+    const durationTriggers = ['4s', '5s', '10s', '15s', '时长'];
+    if (!await selectDropdownOption(durationTriggers, durationTexts, '视频时长')) {
+      throw new Error(`视频时长配置失败: ${config.duration}`);
+    }
   }
   await sleep(300);
 
