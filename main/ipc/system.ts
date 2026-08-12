@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getDataDir, readJSON, writeJSON } from '../utils/store';
 import type { LogEntry, LogAppendParams } from '@doubao-studio/contracts';
+import { replaceIpcHandlers } from './lifecycle';
 
 // 领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
@@ -12,7 +13,13 @@ const ARRAY_DATA_FILES = new Set(['projects.json', 'accounts.json', 'tasks.json'
 
 import { compareVersions } from '../utils/version';
 
-export function registerSystemIPC(): void {
+const SYSTEM_IPC_CHANNELS = [
+  'logs:list', 'logs:append', 'logs:clear', 'system:checkIntegrity',
+  'system:exportBackup', 'system:restoreBackup', 'system:exportProject', 'system:checkUpdate',
+] as const;
+
+export function registerSystemIPC(): () => void {
+  const dispose = replaceIpcHandlers(ipcMain, SYSTEM_IPC_CHANNELS);
   ipcMain.handle('logs:list', async () => readJSON<LogEntry[]>('logs.json', []));
   ipcMain.handle('logs:append', async (_event, entry: LogAppendParams) => {
     const logs = readJSON<LogEntry[]>('logs.json', []);
@@ -142,4 +149,5 @@ export function registerSystemIPC(): void {
       return { success: true, currentVersion, latestVersion, hasUpdate: compareVersions(latestVersion, currentVersion) > 0, url: release.html_url, name: release.name };
     } catch (error: any) { return { success: false, error: error.message }; }
   });
+  return dispose;
 }
