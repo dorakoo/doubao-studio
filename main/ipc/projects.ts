@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import { v4 as uuidv4 } from 'uuid';
 import { readJSON, writeJSON } from '../utils/store';
 import type { Project, ProjectAddParams, ProjectUpdateParams, ProjectIdParams } from '@doubao-studio/contracts';
+import { replaceIpcHandlers } from './lifecycle';
 
 // 领域模型接口和 IPC DTO 已迁移至 @doubao-studio/contracts。
 // 此处通过 import type 引用，不产生运行时依赖。
@@ -26,7 +27,10 @@ export function getDefaultProjectId(): string {
   return DEFAULT_PROJECT_ID;
 }
 
-export function registerProjectIPC(): void {
+const PROJECT_IPC_CHANNELS = ['projects:list', 'projects:add', 'projects:update', 'projects:delete'] as const;
+
+export function registerProjectIPC(): () => void {
+  const dispose = replaceIpcHandlers(ipcMain, PROJECT_IPC_CHANNELS);
   loadProjects();
   ipcMain.handle('projects:list', async () => loadProjects());
   ipcMain.handle('projects:add', async (_event, params: ProjectAddParams) => {
@@ -58,4 +62,5 @@ export function registerProjectIPC(): void {
     return { success: true };
   });
   console.log('[IPC] 项目管理模块已注册');
+  return dispose;
 }

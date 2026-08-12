@@ -16,6 +16,7 @@ import { registerTaskIPC } from './ipc/tasks';
 import { registerProjectIPC } from './ipc/projects';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
+import { replaceIpcHandlers } from './ipc/lifecycle';
 
 // ==================== 常量 ====================
 
@@ -30,6 +31,7 @@ const DOUBAO_URL = 'https://www.doubao.com';
 let mainWindow: BrowserWindow | null = null;
 /** 应用是否正在退出，防止退出过程中创建新窗口或重新调度任务 */
 let isQuitting = false;
+let unregisterIPC: (() => void) | null = null;
 
 // ==================== 窗口创建 ====================
 
@@ -88,11 +90,16 @@ function createMainWindow(): BrowserWindow {
 // ==================== IPC 注册 ====================
 
 function registerIPC(): void {
+  unregisterIPC?.();
   // 注册业务模块 IPC
-  registerAccountIPC();
-  registerProjectIPC();
-  registerTaskIPC();
-  registerSystemIPC();
+  const disposers = [
+    registerAccountIPC(),
+    registerProjectIPC(),
+    registerTaskIPC(),
+    registerSystemIPC(),
+  ];
+
+  disposers.push(replaceIpcHandlers(ipcMain, ['system:getVersion']));
 
   // ---- 系统级 IPC ----
 
@@ -102,21 +109,33 @@ function registerIPC(): void {
   });
 
   // 窗口控制
-  ipcMain.on('window:minimize', () => {
+  const minimizeWindow = (): void => {
     mainWindow?.minimize();
-  });
+  };
 
-  ipcMain.on('window:toggleMaximize', () => {
+  const toggleMaximizeWindow = (): void => {
     if (mainWindow?.isMaximized()) {
       mainWindow.unmaximize();
     } else {
       mainWindow?.maximize();
     }
-  });
+  };
 
-  ipcMain.on('window:close', () => {
+  const closeWindow = (): void => {
     mainWindow?.close();
-  });
+  };
+
+  ipcMain.on('window:minimize', minimizeWindow);
+  ipcMain.on('window:toggleMaximize', toggleMaximizeWindow);
+  ipcMain.on('window:close', closeWindow);
+
+  unregisterIPC = () => {
+    for (const dispose of disposers.reverse()) dispose();
+    ipcMain.removeListener('window:minimize', minimizeWindow);
+    ipcMain.removeListener('window:toggleMaximize', toggleMaximizeWindow);
+    ipcMain.removeListener('window:close', closeWindow);
+    unregisterIPC = null;
+  };
 
   console.log('[Main] IPC 模块全部注册完成');
 }
@@ -206,6 +225,7 @@ if (!gotLock) {
   // 应用退出前清理：标记退出状态，防止退出过程中创建新窗口
   app.on('before-quit', () => {
     isQuitting = true;
+    unregisterIPC?.();
     mainWindow = null;
   });
 }

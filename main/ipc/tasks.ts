@@ -10,6 +10,7 @@ import { normalizeTasks, normalizeDownloadJobs } from '../utils/persistenceNorma
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
+import { replaceIpcHandlers } from './lifecycle';
 import type {
   GenerationMode,
   VideoModel,
@@ -218,7 +219,18 @@ function recoverInterruptedTasks(): void {
 
 // ==================== IPC 处理器注册 ====================
 
-export function registerTaskIPC(): void {
+const TASK_IPC_CHANNELS = [
+  'tasks:list', 'tasks:add', 'tasks:assign', 'tasks:updateStatus', 'tasks:update',
+  'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime',
+  'tasks:acquireLock', 'tasks:importCsv', 'tasks:releaseLock',
+  'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
+  'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:listDownloads',
+  'tasks:exportDiagnostics', 'tasks:validateArtifact', 'tasks:saveAdapterReport',
+  'tasks:selectAdapterRules', 'settings:get', 'settings:save', 'tasks:selectSaveDir',
+] as const;
+
+export function registerTaskIPC(): () => void {
+  const dispose = replaceIpcHandlers(ipcMain, TASK_IPC_CHANNELS);
   recoverInterruptedTasks();
   // 在任何新下载开始前，仅恢复上次进程遗留的下载状态。
   loadDownloadJobs();
@@ -1004,4 +1016,5 @@ export function registerTaskIPC(): void {
   );
 
   console.log('[IPC] 任务调度模块已注册');
+  return dispose;
 }

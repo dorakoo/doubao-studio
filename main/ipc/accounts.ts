@@ -8,6 +8,7 @@ import { ipcMain, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { normalizeAccounts } from '../utils/persistenceNormalization';
 import { v4 as uuidv4 } from 'uuid';
+import { replaceIpcHandlers } from './lifecycle';
 import type {
   Account,
   AccountAddParams,
@@ -140,7 +141,15 @@ async function clearAccountSession(partition: string): Promise<void> {
 
 // ==================== IPC 处理器注册 ====================
 
-export function registerAccountIPC(): void {
+const ACCOUNT_IPC_CHANNELS = [
+  'accounts:list', 'accounts:add', 'accounts:update', 'accounts:delete',
+  'accounts:refresh', 'accounts:setStatus', 'accounts:setPinned',
+  'accounts:updateScheduling', 'accounts:updateHealth',
+  'accounts:updateSeedanceQuota', 'accounts:getPartition',
+] as const;
+
+export function registerAccountIPC(): () => void {
+  const dispose = replaceIpcHandlers(ipcMain, ACCOUNT_IPC_CHANNELS);
   // ---- 获取所有账号 ----
   ipcMain.handle('accounts:list', async (): Promise<Account[]> => {
     // loadAccounts 已内置运行时归一化（额度日期重置、健康/调度补全、重复 ID 去重）
@@ -415,4 +424,5 @@ export function registerAccountIPC(): void {
   );
 
   console.log('[IPC] 账号管理模块已注册');
+  return dispose;
 }
