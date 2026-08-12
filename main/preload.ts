@@ -63,7 +63,9 @@ const electronAPI = {
       ipcRenderer.invoke('tasks:updateRuntime', { taskId, ...patch }),
     acquireLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:acquireLock', { taskId, ownerId }),
-    releaseLock: (taskId: string, ownerId?: string): Promise<{ success: boolean }> =>
+    renewLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:renewLock', { taskId, ownerId }),
+    releaseLock: (taskId: string, ownerId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:releaseLock', { taskId, ownerId }),
     importCsv: (projectId?: string): Promise<any> => ipcRenderer.invoke('tasks:importCsv', { projectId }),
     update: (taskId: string, updates: {

@@ -74,9 +74,14 @@ export interface TaskAcquireLockParams {
   ownerId: string;
 }
 
+export interface TaskRenewLockParams {
+  taskId: string;
+  ownerId: string;
+}
+
 export interface TaskReleaseLockParams {
   taskId: string;
-  ownerId?: string;
+  ownerId: string;
 }
 
 export interface TaskImportCsvParams {

@@ -58,6 +58,7 @@ export type {
   TaskUpdateStatusParams,
   TaskUpdateRuntimeParams,
   TaskAcquireLockParams,
+  TaskRenewLockParams,
   TaskReleaseLockParams,
   TaskImportCsvParams,
   TaskUpdateInput,

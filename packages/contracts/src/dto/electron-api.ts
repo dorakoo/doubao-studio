@@ -121,7 +121,8 @@ export interface ElectronAPI {
       result?: string;
     }) => Promise<TaskResult>;
     acquireLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
-    releaseLock: (taskId: string, ownerId?: string) => Promise<{ success: boolean }>;
+    renewLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
+    releaseLock: (taskId: string, ownerId: string) => Promise<TaskOperationResult>;
     importCsv: (projectId?: string) => Promise<CsvImportResult>;
     update: (taskId: string, updates: TaskUpdateInput) => Promise<TaskResult>;
     delete: (taskId: string) => Promise<TaskOperationResult>;

@@ -11,6 +11,7 @@ import { validateDownloadResponse, classifyDownloadException } from '../utils/do
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
+import { acquireTaskLease, canReleaseTaskLease, renewTaskLease } from '../utils/taskLease';
 import type {
   GenerationMode,
   VideoModel,
@@ -29,6 +30,7 @@ import type {
   TaskUpdateStatusParams,
   TaskUpdateRuntimeParams,
   TaskAcquireLockParams,
+  TaskRenewLockParams,
   TaskReleaseLockParams,
   TaskImportCsvParams,
   TaskUpdateInput,
@@ -222,7 +224,7 @@ function recoverInterruptedTasks(): void {
 const TASK_IPC_CHANNELS = [
   'tasks:list', 'tasks:add', 'tasks:assign', 'tasks:updateStatus', 'tasks:update',
   'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime',
-  'tasks:acquireLock', 'tasks:importCsv', 'tasks:releaseLock',
+  'tasks:acquireLock', 'tasks:renewLock', 'tasks:importCsv', 'tasks:releaseLock',
   'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
   'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:listDownloads',
   'tasks:exportDiagnostics', 'tasks:validateArtifact', 'tasks:saveAdapterReport',
@@ -490,16 +492,26 @@ export function registerTaskIPC(): () => void {
         new Date(item.lock.expiresAt).getTime() > now
       );
       if (accountConflict) return { success: false, error: '该账号已经被其他任务锁定' };
-      if (task.lock && task.lock.ownerId !== params.ownerId && new Date(task.lock.expiresAt).getTime() > now) {
-        return { success: false, error: '任务已经被其他执行器锁定' };
-      }
-      task.lock = {
-        ownerId: params.ownerId,
-        acquiredAt: new Date(now).toISOString(),
-        expiresAt: new Date(now + 4 * 60 * 60 * 1000).toISOString(),
-      };
+      const decision = acquireTaskLease(task.lock, params.ownerId, now);
+      if (!decision.success) return decision;
+      task.lock = decision.lock;
       task.updatedAt = new Date().toISOString();
       saveTasks(tasks);
+      return { success: true, task };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:renewLock',
+    async (_event, params: TaskRenewLockParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const tasks = loadTasks();
+      const task = tasks.find((item) => item.id === params.taskId);
+      if (!task) return { success: false, error: '任务不存在' };
+      const decision = renewTaskLease(task.lock, params.ownerId, Date.now());
+      if (!decision.success) return decision;
+      task.lock = decision.lock;
+      task.updatedAt = new Date().toISOString();
+      if (!saveTasks(tasks)) return { success: false, error: '任务锁续租写入失败' };
       return { success: true, task };
     }
   );
@@ -591,14 +603,16 @@ export function registerTaskIPC(): () => void {
 
   ipcMain.handle(
     'tasks:releaseLock',
-    async (_event, params: TaskReleaseLockParams): Promise<{ success: boolean }> => {
+    async (_event, params: TaskReleaseLockParams): Promise<{ success: boolean; error?: string }> => {
       const tasks = loadTasks();
       const task = tasks.find((item) => item.id === params.taskId);
-      if (task?.lock && (!params.ownerId || task.lock.ownerId === params.ownerId)) {
-        task.lock = undefined;
-        task.updatedAt = new Date().toISOString();
-        saveTasks(tasks);
+      if (!task) return { success: false, error: '任务不存在' };
+      if (!canReleaseTaskLease(task.lock, params.ownerId)) {
+        return { success: false, error: '任务锁 owner 不匹配' };
       }
+      task.lock = undefined;
+      task.updatedAt = new Date().toISOString();
+      if (!saveTasks(tasks)) return { success: false, error: '任务锁释放写入失败' };
       return { success: true };
     }
   );
