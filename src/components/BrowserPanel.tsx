@@ -41,6 +41,8 @@ import {
   manualResolveVideoArtifact,
 } from '../utils/doubaoBridge';
 import type { VideoArtifactResolution } from '../utils/videoArtifactResolver';
+import { createWebviewResourceScope } from '../utils/webviewLifecycle';
+import type { WebviewResourceScope } from '../utils/webviewLifecycle';
 
 /** 将解析结果转换为用户可读的消息 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -82,8 +84,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
   const manualVideoUsageRef = useRef<Set<string>>(new Set());
-  /** 每个账号的定时器集合，用于组件卸载或账号删除时统一清理 */
-  const timersRef = useRef<Map<string, Set<ReturnType<typeof setInterval> | ReturnType<typeof setTimeout>>>>(new Map());
+  /** 每个账号的 webview 监听器与定时器作用域。 */
+  const resourceScopesRef = useRef<Map<string, WebviewResourceScope>>(new Map());
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
@@ -143,19 +145,50 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     : undefined;
   const activeAutoMsg = activeAccount ? (accountAutoMsg[activeAccount.id] || '') : '';
 
-  // ---- 组件卸载时清理所有定时器，防止泄漏 ----
+  // ---- 组件卸载时清理所有 webview 资源与执行控制器 ----
   useEffect(() => {
+    const resourceScopes = resourceScopesRef.current;
+    const registry = registryRef.current;
+    const loadingMap = loadingMapRef.current;
+    const controllers = abortControllersRef.current;
+    const runningAccounts = runningRef.current;
     return () => {
-      timersRef.current.forEach((timers, accountId) => {
-        timers.forEach((t) => {
-          clearInterval(t);
-          clearTimeout(t);
-        });
-        console.log(`[BrowserPanel] 组件卸载，清理账号 ${accountId} 的定时器`);
-      });
-      timersRef.current.clear();
+      resourceScopes.forEach((scope) => scope.dispose());
+      resourceScopes.clear();
+      registry.forEach((webview) => webview.remove());
+      registry.clear();
+      loadingMap.clear();
+      controllers.forEach((controller) => controller.abort());
+      controllers.clear();
+      runningAccounts.clear();
+      console.log('[BrowserPanel] 组件卸载，已清理全部 webview 资源');
     };
   }, []);
+
+  /** 幂等释放指定账号的 webview、监听器和定时器。 */
+  const disposeAccountWebview = (accountId: string): void => {
+    resourceScopesRef.current.get(accountId)?.dispose();
+    resourceScopesRef.current.delete(accountId);
+    const webview = registryRef.current.get(accountId);
+    if (webview) {
+      webview.remove();
+      registryRef.current.delete(accountId);
+    }
+    loadingMapRef.current.delete(accountId);
+    const state = useTaskStore.getState();
+    const taskIds = new Set(
+      state.tasks
+        .filter((task) => task.assignedAccountId === accountId)
+        .map((task) => task.id),
+    );
+    const executingTaskId = state.executingTasks[accountId];
+    if (executingTaskId) taskIds.add(executingTaskId);
+    for (const taskId of taskIds) {
+      abortControllersRef.current.get(taskId)?.abort();
+      abortControllersRef.current.delete(taskId);
+    }
+    runningRef.current.delete(accountId);
+  };
 
   // ---- webview 池动态管理（账号增删同步） ----
   const accountsKey = accounts.map(a => a.id).join(',');
@@ -168,10 +201,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     // 清理已删除账号的 webview 和定时器
     registryRef.current.forEach((webview, accountId) => {
       if (!accountIds.has(accountId)) {
-        clearAccountTimers(accountId);
-        container.removeChild(webview);
-        registryRef.current.delete(accountId);
-        loadingMapRef.current.delete(accountId);
+        disposeAccountWebview(accountId);
         console.log(`[BrowserPanel] 已移除账号 ${accountId} 的 webview`);
       }
     });
@@ -197,6 +227,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     if (registryRef.current.has(account.id)) return;
 
     const accId = account.id;
+    const scope = createWebviewResourceScope();
+    resourceScopesRef.current.set(accId, scope);
     loadingMapRef.current.set(accId, true);
 
     const webview = document.createElement('webview') as HTMLWebViewElement;
@@ -212,16 +244,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 统一加载完成处理
     const markLoaded = (evt: string) => {
+      if (!scope.active) return;
       if (!loadingMapRef.current.get(accId)) return; // 已标记完成，不重复处理
       loadingMapRef.current.set(accId, false);
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        timersRef.current.get(accId)?.delete(pollInterval);
-      }
-      if (timeoutId) {
-        clearTimeout(timeoutId);
-        timersRef.current.get(accId)?.delete(timeoutId);
-      }
+      scope.clearTimer(pollInterval);
+      scope.clearTimer(timeoutId);
       console.log(`[BrowserPanel] markLoaded: ${accId} via ${evt}`);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
@@ -230,7 +257,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     };
 
-    webview.addEventListener('did-start-loading', () => {
+    scope.listen(webview, 'did-start-loading', () => {
+      if (!scope.active) return;
       loadingMapRef.current.set(accId, true);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
@@ -239,16 +267,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
 
-    webview.addEventListener('did-finish-load', () => markLoaded('did-finish-load'));
-    webview.addEventListener('did-stop-loading', () => markLoaded('did-stop-loading'));
-    webview.addEventListener('did-navigate', () => markLoaded('did-navigate'));
-    webview.addEventListener('did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
-    webview.addEventListener('dom-ready', () => {
+    scope.listen(webview, 'did-finish-load', () => markLoaded('did-finish-load'));
+    scope.listen(webview, 'did-stop-loading', () => markLoaded('did-stop-loading'));
+    scope.listen(webview, 'did-navigate', () => markLoaded('did-navigate'));
+    scope.listen(webview, 'did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
+    scope.listen(webview, 'dom-ready', () => {
       markLoaded('dom-ready');
     });
-    webview.addEventListener('did-fail-load', () => {
+    scope.listen(webview, 'did-fail-load', () => {
+      if (!scope.active) return;
       loadingMapRef.current.set(accId, false);
-      clearAccountTimers(accId);
+      scope.clearTimers();
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
         setActiveLoading(false);
@@ -265,7 +294,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     pollInterval = setInterval(() => {
       const wv = registryRef.current.get(accId);
       if (!wv) {
-        clearAccountTimers(accId);
+        scope.clearTimers();
         return;
       }
       
@@ -277,37 +306,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         markLoaded('poll');
       }
     }, 2000);
+    scope.trackTimer(pollInterval);
 
     // 60s 后停止轮询
     timeoutId = setTimeout(() => {
-      if (pollInterval) clearInterval(pollInterval);
+      scope.clearTimer(pollInterval);
+      if (!scope.active) return;
       if (loadingMapRef.current.get(accId)) {
         console.warn(`[BrowserPanel] 60s 超时，强制清除加载状态: ${accId}`);
         markLoaded('timeout');
       }
-      if (timeoutId) timersRef.current.get(accId)?.delete(timeoutId);
-      if (pollInterval) timersRef.current.get(accId)?.delete(pollInterval);
+      scope.clearTimer(timeoutId);
+      scope.clearTimer(pollInterval);
     }, 60000);
-
-    // 注册定时器，用于账号删除或组件卸载时统一清理
-    if (!timersRef.current.has(accId)) {
-      timersRef.current.set(accId, new Set());
-    }
-    timersRef.current.get(accId)!.add(pollInterval);
-    timersRef.current.get(accId)!.add(timeoutId);
-  };
-
-  /** 清理指定账号的所有定时器 */
-  const clearAccountTimers = (accountId: string) => {
-    const timers = timersRef.current.get(accountId);
-    if (timers) {
-      timers.forEach((t) => {
-        clearInterval(t);
-        clearTimeout(t);
-      });
-      timers.clear();
-      timersRef.current.delete(accountId);
-    }
+    scope.trackTimer(timeoutId);
   };
 
   // ---- 切换可见性 ----
