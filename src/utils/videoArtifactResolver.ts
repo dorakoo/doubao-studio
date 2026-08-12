@@ -55,7 +55,7 @@ export interface VideoCandidate {
 
 /**
  * 从 get_play_info 接口响应中提取视频地址。
- * 优先使用 original_media_info，其次 download_url / no_watermark_url，最后 play_info。
+ * 解析普通播放媒体。该接口中的字段不能证明平台已开放无水印下载。
  */
 export function parsePlayInfoResponse(raw: unknown): VideoCandidate | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -69,18 +69,18 @@ export function parsePlayInfoResponse(raw: unknown): VideoCandidate | null {
     const om = originalMedia as Record<string, unknown>;
     const url = extractUrlFromFields(om, ['main_url', 'main', 'url', 'download_url']);
     if (url) {
-      return { url, source: 'play_info', isOriginal: true };
+      return { url, source: 'play_info', isOriginal: false };
     }
   }
 
   // 2. download_url
   if (typeof obj.download_url === 'string' && isValidVideoUrl(obj.download_url)) {
-    return { url: obj.download_url, source: 'play_info', isOriginal: true };
+    return { url: obj.download_url, source: 'play_info', isOriginal: false };
   }
 
   // 3. no_watermark_url
   if (typeof obj.no_watermark_url === 'string' && isValidVideoUrl(obj.no_watermark_url)) {
-    return { url: obj.no_watermark_url, source: 'play_info', isOriginal: true };
+    return { url: obj.no_watermark_url, source: 'play_info', isOriginal: false };
   }
 
   // 4. play_info.main
@@ -180,12 +180,12 @@ export function parseCapturedResponse(raw: unknown): VideoCandidate | null {
   if (!raw || typeof raw !== 'object') return null;
   const obj = raw as Record<string, unknown>;
 
-  // 优先找 original_media_info
+  // original_media_info 仅表示源媒体，不能证明无水印权限
   const originalMedia = obj.original_media_info;
   if (originalMedia && typeof originalMedia === 'object') {
     const url = extractUrlFromFields(originalMedia as Record<string, unknown>, ['main_url', 'main', 'url']);
     if (url) {
-      return { url, source: 'captured_response', isOriginal: true, vid: findVidDeep(obj, 0) };
+      return { url, source: 'captured_response', isOriginal: false, vid: findVidDeep(obj, 0) };
     }
   }
 
@@ -201,7 +201,7 @@ export function parseCapturedResponse(raw: unknown): VideoCandidate | null {
 
   // 直接的 download_url
   if (typeof obj.download_url === 'string' && isValidVideoUrl(obj.download_url)) {
-    return { url: obj.download_url, source: 'captured_response', isOriginal: true, vid: findVidDeep(obj, 0) };
+    return { url: obj.download_url, source: 'captured_response', isOriginal: false, vid: findVidDeep(obj, 0) };
   }
 
   return null;
@@ -233,30 +233,30 @@ export function parseConversationScanData(raw: unknown): ConversationScanResult 
   const vid = findVidDeep(obj, 0);
   const foundUrls = new Set<string>();
 
-  // 1. 从 original_media_info 对象内部提取 URL（保证同一对象 → isOriginal: true）
+  // 1. original_media_info 仅代表源媒体，不代表无水印授权
   const originalUrls = collectUrlsFromKey(obj, 'original_media_info');
   for (const url of originalUrls) {
     if (!foundUrls.has(url)) {
       foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: true });
+      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
     }
   }
 
-  // 2. 从 download_url 字段提取（字段本身就是 URL → isOriginal: true）
+  // 2. 普通结构化 download_url 也不能证明无水印授权
   const downloadUrls = collectUrlsFromKey(obj, 'download_url');
   for (const url of downloadUrls) {
     if (!foundUrls.has(url)) {
       foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: true });
+      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
     }
   }
 
-  // 3. 从 no_watermark_url 字段提取（明确无水印 → isOriginal: true）
+  // 3. 页面结构化字段不是当前权威能力接口，仍保守标记
   const noWmUrls = collectUrlsFromKey(obj, 'no_watermark_url');
   for (const url of noWmUrls) {
     if (!foundUrls.has(url)) {
       foundUrls.add(url);
-      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: true });
+      candidates.push({ url, source: 'conversation_scan', vid, isOriginal: false });
     }
   }
 

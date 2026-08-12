@@ -4125,7 +4125,6 @@ import type{
 } from './videoArtifactResolver';
 import {
   parsePlayInfoResponse,
-  parseDownloadInfoResponse,
   parseConversationScanData,
   sortCandidatesByTrust,
   filterCandidatesByContext,
@@ -4149,6 +4148,8 @@ export interface ResolveVideoArtifactContext {
   timeoutMs?: number;
   /** 是否为手动提取（影响重试次数和日志） */
   isManual?: boolean;
+  /** 仅接受豆包官方明确确认的无水印下载地址 */
+  requireWithoutWatermark?: boolean;
   /** 可选的中断信号，取消后立即停止解析 */
   signal?: AbortSignal;
 }
@@ -4332,14 +4333,41 @@ async function executeDownloadInfoStrategy(
   signal: AbortSignal | undefined,
 ): Promise<{ candidate?: VideoCandidate; attempt: ArtifactAttempt; succeeded: boolean }> {
   try {
-    const downloadResult = await fetchCreationDownloadInfo(webview, vid, timeoutMs, signal);
+    const downloadResult = await fetchWithoutWatermarkInfo(webview, vid, timeoutMs, signal);
     if (downloadResult) {
-      const candidate = parseDownloadInfoResponse(downloadResult.data);
-      if (candidate) {
+      const response = downloadResult.data as {
+        code?: unknown;
+        data?: {
+          without_watermark?: unknown;
+          download_video?: Record<string, { download_url?: unknown }>;
+        };
+      } | null;
+      const downloadUrl = response?.data?.download_video?.[vid]?.download_url;
+      if (
+        downloadResult.status === 200
+        && response?.code === 0
+        && response?.data?.without_watermark === true
+        && isValidVideoUrl(downloadUrl)
+      ) {
         return {
-          candidate: { ...candidate, vid },
+          candidate: {
+            url: downloadUrl,
+            source: 'platform_download_info',
+            isOriginal: true,
+            vid,
+          },
           attempt: { strategy: 'platform_download_info', result: 'success' },
           succeeded: true,
+        };
+      }
+      if (downloadResult.status === 200 && response?.code === 0 && response?.data?.without_watermark === false) {
+        return {
+          attempt: {
+            strategy: 'platform_download_info',
+            result: 'fail',
+            reason: '豆包官方未向当前账号或该视频开放无水印下载（without_watermark=false）',
+          },
+          succeeded: false,
         };
       }
       const status = classifyVideoResolutionError(downloadResult.status, downloadResult.data);
@@ -4382,8 +4410,8 @@ async function retryApiStrategiesAfterScan(
   attempts.push(piResult.attempt);
   if (piResult.succeeded) succeeded = true;
 
-  // 4b-2: 重试创作空间下载信息接口
-  if (!isAborted() && !succeeded) {
+  // 4b-2: 无论普通播放地址是否存在，都必须查询官方无水印能力。
+  if (!isAborted()) {
     const dlResult = await executeDownloadInfoStrategy(webview, vid, remainingMs(), signal);
     if (dlResult.candidate) candidates.push(dlResult.candidate);
     attempts.push(dlResult.attempt);
@@ -4424,8 +4452,7 @@ async function tryPageFallbackStrategy(
 /**
  * 策略 1: 从已拦截的 SSE 响应缓存中提取视频地址。
  * 根据 fieldSource 判定是否为原始地址：
- * - original_media_info / download_url → isOriginal: true
- * - play_info / 未知 → isOriginal: false
+ * 缓存来自普通播放/SSE 链，不能证明平台已开放无水印下载。
  */
 async function tryCapturedResponseStrategy(
   webview: WebviewHandle,
@@ -4436,10 +4463,9 @@ async function tryCapturedResponseStrategy(
       return { attempt: { strategy: 'captured_response', result: 'skip', reason: '无缓存' } };
     }
     if (cache.videoUrl && isValidVideoUrl(cache.videoUrl)) {
-      const isOriginal = cache.fieldSource === 'original_media_info' || cache.fieldSource === 'download_url';
       return {
         vid: cache.vid,
-        candidate: { url: cache.videoUrl, source: 'captured_response', vid: cache.vid, isOriginal },
+        candidate: { url: cache.videoUrl, source: 'captured_response', vid: cache.vid, isOriginal: false },
         attempt: { strategy: 'captured_response', result: 'success', reason: `fieldSource=${cache.fieldSource || 'unknown'}` },
       };
     }
@@ -4463,7 +4489,12 @@ function selectBestCandidate(
     conversationUrl: ctx.conversationUrl,
     runId: ctx.runId,
   };
-  const filtered = filterCandidatesByContext(candidates, filterCtx);
+  const contextMatched = filterCandidatesByContext(candidates, filterCtx);
+  const filtered = ctx.requireWithoutWatermark
+    ? contextMatched.filter((candidate) => (
+      candidate.source === 'platform_download_info' && candidate.isOriginal
+    ))
+    : contextMatched;
   const sorted = sortCandidatesByTrust(filtered);
 
   // 如果有多个原始地址候选且无法唯一匹配，标记需要人工选择
@@ -4482,7 +4513,7 @@ function selectBestCandidate(
   }
 
   // 过滤后有候选被排除且提供了 conversationUrl → 无法可靠归属
-  if (candidates.length > 0 && filtered.length === 0 && ctx.conversationUrl) {
+  if (!ctx.requireWithoutWatermark && candidates.length > 0 && filtered.length === 0 && ctx.conversationUrl) {
     return createFailedResolution(
       'needs_manual_selection',
       '存在候选但无法可靠匹配到当前会话，需人工确认',
@@ -4492,7 +4523,14 @@ function selectBestCandidate(
   }
 
   // ---- 判断最终失败原因 ----
-  const lastError = attempts.filter((a) => a.result === 'fail').pop();
+  const officialWatermarkError = ctx.requireWithoutWatermark
+    ? attempts.find((attempt) => (
+      attempt.strategy === 'platform_download_info'
+      && attempt.result === 'fail'
+      && attempt.reason?.includes('without_watermark=false')
+    ))
+    : undefined;
+  const lastError = officialWatermarkError ?? attempts.filter((a) => a.result === 'fail').pop();
   const reason = lastError?.reason || '所有策略均未获取到视频地址';
   return createFailedResolution('unavailable', reason, attempts, resolvedVid);
 }
@@ -4574,133 +4612,31 @@ async function fetchPlayInfoRaw(
 }
 
 /**
- * 创作空间三步下载信息解析：
- * 1. 获取创作空间列表（aispace/get_creation_list）
- * 2. 在列表中查找 vid 匹配的创作节点，提取 resource_id
- * 3. 用 resource_id 调用 aispace/get_download_info 获取无水印下载地址
- *
- * 超时预算在两步之间拆分（40% / 60%），每步使用页内 AbortController
- * 确保超时后 fetch 被真正中止，不会泄漏到下一策略。
+ * 调用豆包网页当前使用的官方无水印能力接口。
+ * 上层仅在响应明确给出 without_watermark=true 时接受下载地址。
  */
-async function fetchCreationDownloadInfo(
+async function fetchWithoutWatermarkInfo(
   webview: WebviewHandle,
   vid: string,
   timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<PlayInfoRawResult | null> {
-  // 拆分预算：第一步 40%，第二步 60%（至少各 1 秒）
-  const listTimeout = Math.max(1000, Math.floor(timeoutMs * 0.4));
-  const dlTimeout = Math.max(1000, timeoutMs - listTimeout);
-
-  // ---- Step 1+2: 获取创作列表并查找匹配 vid 的节点 ----
   if (signal?.aborted) return null;
-  const nodeCode = `
+  const code = `
     (function() {
       var vid = ${JSON.stringify(vid)};
-      var timeoutMs = ${listTimeout};
-      var uuid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-      var deviceId = (function() {
-        var stored = sessionStorage.getItem('__ds_device_id');
-        if (stored) return stored;
-        var id = String(Date.now()) + String(Math.floor(Math.random() * 1000000));
-        sessionStorage.setItem('__ds_device_id', id);
-        return id;
-      })();
-      var params = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=' + deviceId + '&pc_version=3.20.2&web_id=&tea_uuid=&region=CN&sys_region=CN&samantha_web=1&web_platform=browser&use-olympus-account=1&web_tab_id=' + uuid;
-      var url = '/samantha/aispace/get_creation_list?' + params;
+      var timeoutMs = ${timeoutMs};
       var controller = new AbortController();
       var timeoutId = setTimeout(function() { controller.abort(); }, timeoutMs);
-      return fetch(url, {
+      return fetch('/creativity/resource/get_without_watermark', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'agw-js-conv': 'str',
           'origin': location.origin,
           'referer': location.href,
         },
         credentials: 'include',
-        body: JSON.stringify({ cursor: '', count: 50, type: 'video' }),
-        signal: controller.signal,
-      }).then(function(r) {
-        return r.text().then(function(text) {
-          var data = null;
-          try { data = JSON.parse(text); } catch(e) {}
-          // 在列表中查找 vid 匹配的创作节点
-          var resourceId = null;
-          if (data && data.data) {
-            var items = data.data.creation_list || data.data.items || data.data.list || [];
-            if (Array.isArray(items)) {
-              for (var i = 0; i < items.length; i++) {
-                var item = items[i];
-                if (!item || typeof item !== 'object') continue;
-                // 匹配 vid（可能在 item.vid / item.video_id / item.resource.vid 等位置）
-                var itemVid = item.vid || item.video_id || item.videoId ||
-                  (item.resource && (item.resource.vid || item.resource.video_id)) || '';
-                if (itemVid === vid) {
-                  resourceId = item.resource_id || item.node_id || item.id ||
-                    (item.resource && (item.resource.resource_id || item.resource.id)) || null;
-                  break;
-                }
-              }
-            }
-          }
-          return { found: !!resourceId, resourceId: resourceId, status: r.status };
-        });
-      }).catch(function(e) {
-        return { found: false, resourceId: null, status: 0, error: e.message };
-      }).finally(function() {
-        clearTimeout(timeoutId);
-      });
-    })();
-  `;
-
-  let resourceId: string | null = null;
-  try {
-    const nodeResult = await raceWithAbort(
-      safeExecuteJS<{ found: boolean; resourceId: string | null; status: number; error?: string }>(
-        webview, nodeCode, listTimeout, 'fetchCreationList'
-      ),
-      signal,
-      null,
-    );
-    if (!nodeResult || !nodeResult.found || !nodeResult.resourceId) {
-      return null;
-    }
-    resourceId = nodeResult.resourceId;
-  } catch {
-    return null;
-  }
-
-  // 两步之间检查取消信号
-  if (signal?.aborted) return null;
-
-  // ---- Step 3: 用 resource_id 调用 aispace/get_download_info ----
-  const dlCode = `
-    (function() {
-      var resourceId = ${JSON.stringify(resourceId)};
-      var timeoutMs = ${dlTimeout};
-      var uuid = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString();
-      var deviceId = (function() {
-        var stored = sessionStorage.getItem('__ds_device_id');
-        if (stored) return stored;
-        var id = String(Date.now()) + String(Math.floor(Math.random() * 1000000));
-        sessionStorage.setItem('__ds_device_id', id);
-        return id;
-      })();
-      var params = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=' + deviceId + '&pc_version=3.20.2&web_id=&tea_uuid=&region=CN&sys_region=CN&samantha_web=1&web_platform=browser&use-olympus-account=1&web_tab_id=' + uuid;
-      var url = '/samantha/aispace/get_download_info?' + params;
-      var controller = new AbortController();
-      var timeoutId = setTimeout(function() { controller.abort(); }, timeoutMs);
-      return fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'agw-js-conv': 'str',
-          'origin': location.origin,
-          'referer': location.href,
-        },
-        credentials: 'include',
-        body: JSON.stringify({ resource_id: resourceId }),
+        body: JSON.stringify({ vid: [vid] }),
         signal: controller.signal,
       }).then(function(r) {
         return r.text().then(function(text) {
@@ -4719,18 +4655,18 @@ async function fetchCreationDownloadInfo(
   try {
     const result = await raceWithAbort(
       safeExecuteJS<{ status: number; data: unknown; error?: string }>(
-        webview, dlCode, dlTimeout, 'fetchAispaceDownloadInfo'
+        webview, code, timeoutMs, 'fetchWithoutWatermarkInfo'
       ),
       signal,
       null,
     );
-    if (result && result.status > 0) {
-      return { status: result.status, data: result.data };
-    }
-    return null;
+    return result && result.status > 0
+      ? { status: result.status, data: result.data }
+      : null;
   } catch {
     return null;
   }
+
 }
 
 /**
@@ -4803,6 +4739,45 @@ async function scanConversationStructured(
           if (scripts[s].textContent) results.push(JSON.parse(scripts[s].textContent));
         } catch(e) {}
       }
+      // 4. 当前豆包播放器不再渲染 <video>，而是把 vid 保存在
+      // React 组件的 video props 中。这里只读取当前已挂载的视频卡片，
+      // 不读取 Cookie/Token，也不直接使用带水印封面 URL。
+      var videoBlocks = document.querySelectorAll('[class*="block-video"]');
+      for (var v = 0; v < videoBlocks.length && v < 20; v++) {
+        try {
+          var node = videoBlocks[v];
+          var propertyNames = Object.getOwnPropertyNames(node);
+          var fiberKey = '';
+          for (var p = 0; p < propertyNames.length; p++) {
+            if (propertyNames[p].indexOf('__reactFiber$') === 0) {
+              fiberKey = propertyNames[p];
+              break;
+            }
+          }
+          if (!fiberKey) continue;
+          var fiber = node[fiberKey];
+          var videoData = null;
+          for (var depth = 0; fiber && depth < 12; depth++) {
+            var pendingVideo = fiber.pendingProps && fiber.pendingProps.video;
+            var memoizedVideo = fiber.memoizedProps && fiber.memoizedProps.video;
+            var candidateVideo = pendingVideo || memoizedVideo;
+            if (candidateVideo && typeof candidateVideo.vid === 'string' && candidateVideo.vid.trim()) {
+              videoData = {
+                vid: candidateVideo.vid.trim(),
+                creation_task_id: typeof candidateVideo.creation_task_id === 'string'
+                  ? candidateVideo.creation_task_id
+                  : undefined,
+                message_id: typeof candidateVideo.messageId === 'string'
+                  ? candidateVideo.messageId
+                  : undefined
+              };
+              break;
+            }
+            fiber = fiber.return;
+          }
+          if (videoData) results.push({ video: videoData });
+        } catch(e) {}
+      }
       return results;
     })();
   `;
@@ -4839,6 +4814,7 @@ export async function manualResolveVideoArtifact(
   return resolveVideoArtifact(webview, {
     ...ctx,
     isManual: true,
+    requireWithoutWatermark: true,
     timeoutMs,
   });
 }

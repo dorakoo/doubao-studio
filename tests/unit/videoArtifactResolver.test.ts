@@ -35,7 +35,7 @@ import type { VideoCandidate } from '../../src/utils/videoArtifactResolver';
 // ==================== parsePlayInfoResponse ====================
 
 describe('parsePlayInfoResponse', () => {
-  it('解析 original_media_info.main_url（原始地址）', () => {
+  it('解析 original_media_info.main_url（普通源媒体）', () => {
     const raw = {
       data: {
         original_media_info: {
@@ -47,10 +47,10 @@ describe('parsePlayInfoResponse', () => {
     expect(result).not.toBeNull();
     expect(result!.url).toBe('https://vod.example.com/video/original123.mp4');
     expect(result!.source).toBe('play_info');
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
   });
 
-  it('解析 original_media_info.main（原始地址）', () => {
+  it('解析 original_media_info.main（普通源媒体）', () => {
     const raw = {
       data: {
         original_media_info: {
@@ -61,10 +61,10 @@ describe('parsePlayInfoResponse', () => {
     const result = parsePlayInfoResponse(raw);
     expect(result).not.toBeNull();
     expect(result!.url).toBe('https://vod.example.com/video/main456.mp4');
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
   });
 
-  it('解析 download_url（原始地址）', () => {
+  it('解析 download_url（普通播放接口字段）', () => {
     const raw = {
       data: {
         download_url: 'https://vod.example.com/video/download789.mp4',
@@ -73,10 +73,10 @@ describe('parsePlayInfoResponse', () => {
     const result = parsePlayInfoResponse(raw);
     expect(result).not.toBeNull();
     expect(result!.url).toBe('https://vod.example.com/video/download789.mp4');
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
   });
 
-  it('解析 no_watermark_url（原始地址）', () => {
+  it('非权威接口中的 no_watermark_url 不视为已授权', () => {
     const raw = {
       data: {
         no_watermark_url: 'https://vod.example.com/video/nowm012.mp4',
@@ -84,7 +84,7 @@ describe('parsePlayInfoResponse', () => {
     };
     const result = parsePlayInfoResponse(raw);
     expect(result).not.toBeNull();
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
   });
 
   it('仅 play_info.main（非原始地址）', () => {
@@ -298,7 +298,7 @@ describe('parseCapturedResponse', () => {
     const result = parseCapturedResponse(raw);
     expect(result).not.toBeNull();
     expect(result!.url).toBe('https://vod.example.com/video/cap666.mp4');
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
     expect(result!.vid).toBe('v1234567890abcdef');
   });
 
@@ -319,7 +319,7 @@ describe('parseCapturedResponse', () => {
     };
     const result = parseCapturedResponse(raw);
     expect(result).not.toBeNull();
-    expect(result!.isOriginal).toBe(true);
+    expect(result!.isOriginal).toBe(false);
   });
 
   it('null 输入返回 null', () => {
@@ -368,7 +368,7 @@ describe('parseConversationScanData', () => {
 
   // ---- P1-5 回归：URL 与 original_media_info 必须同一对象 ----
 
-  it('P1-5: URL 与 original_media_info 属于同一对象时标记为原始', () => {
+  it('P1-5: original_media_info 同对象也不等于无水印授权', () => {
     const raw = {
       messages: [
         {
@@ -389,7 +389,7 @@ describe('parseConversationScanData', () => {
     const original = result.candidates.find(c => c.url.includes('orig_msg1'));
     const nonOriginal = result.candidates.find(c => c.url.includes('play_msg2'));
     expect(original).toBeDefined();
-    expect(original!.isOriginal).toBe(true);
+    expect(original!.isOriginal).toBe(false);
     expect(nonOriginal).toBeDefined();
     expect(nonOriginal!.isOriginal).toBe(false);
   });
@@ -415,7 +415,7 @@ describe('parseConversationScanData', () => {
     expect(playB!.isOriginal).toBe(false);
   });
 
-  it('P1-5: download_url 字段直接作为字符串时标记为原始', () => {
+  it('P1-5: 页面 download_url 字段不等于无水印授权', () => {
     const raw = {
       item: {
         vid: 'vid_dl_test',
@@ -425,10 +425,10 @@ describe('parseConversationScanData', () => {
     const result = parseConversationScanData(raw);
     const dl = result.candidates.find(c => c.url.includes('direct_dl'));
     expect(dl).toBeDefined();
-    expect(dl!.isOriginal).toBe(true);
+    expect(dl!.isOriginal).toBe(false);
   });
 
-  it('P1-5: no_watermark_url 字段标记为原始', () => {
+  it('P1-5: 页面 no_watermark_url 字段仍需权威接口确认', () => {
     const raw = {
       item: {
         vid: 'vid_nowm_test',
@@ -438,7 +438,7 @@ describe('parseConversationScanData', () => {
     const result = parseConversationScanData(raw);
     const nowm = result.candidates.find(c => c.url.includes('nowm'));
     expect(nowm).toBeDefined();
-    expect(nowm!.isOriginal).toBe(true);
+    expect(nowm!.isOriginal).toBe(false);
   });
 });
 

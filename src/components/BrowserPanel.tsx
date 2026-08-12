@@ -113,9 +113,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         lower.includes('lr=');
       if (isImageOnly && !isLikelyVideo) continue;
       if (!isLikelyVideo) continue;
-      const clean = trimmed.includes('lr=')
-        ? trimmed.replace(/lr=[^&]+/g, 'lr=video_gen_no_watermark')
-        : trimmed;
+      // 下载豆包明确返回的原始 URL；禁止通过改写查询参数伪装成无水印地址。
+      const clean = trimmed;
       if (!seen.has(clean)) {
         seen.add(clean);
         result.push(clean);
@@ -342,7 +341,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
 
     setManualVideoExtracting(true);
-    useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在提取当前对话的视频地址...');
+    useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在查询豆包官方无水印下载...');
     try {
       const result = await manualResolveVideoArtifact(webview, {
         conversationUrl: webview.getURL(),
@@ -433,7 +432,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       try {
         useAccountStore.getState().selectAccount(accountId);
-        useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '手动提取视频地址...');
+        useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在查询豆包官方无水印下载...');
         const conversationUrl = task.runtime?.conversationUrl;
         if (conversationUrl && webview.getURL() !== conversationUrl) {
           message.info('正在打开该任务对应的豆包对话...');
@@ -963,10 +962,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         <div className="browser-url-bar">
           <span className="browser-url-text">doubao.com</span>
         </div>
-        <Tooltip title="提取并下载当前对话视频，同时更新额度预测">
+        <Tooltip title="仅在豆包官方明确开放无水印下载时提取；不可用时不会下载替代视频">
           <button
             onClick={() => void handleExtractCurrentVideo()}
-            title="提取当前对话视频"
+            title="提取官方无水印视频"
             disabled={manualVideoExtracting || !!accountBusy[activeAccount.id]}
             style={{
               width: 30,
