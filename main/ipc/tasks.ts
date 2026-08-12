@@ -12,6 +12,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
 import { acquireTaskLease, canReleaseTaskLease, renewTaskLease } from '../utils/taskLease';
+import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/downloadRecovery';
 import type {
   GenerationMode,
   VideoModel,
@@ -128,15 +129,10 @@ function loadDownloadJobs(): DownloadJob[] {
   // 下载中断恢复：将上次进程遗留的 'downloading' 状态标记为 'failed'
   if (!downloadRecoveryApplied) {
     downloadRecoveryApplied = true;
-    let changed = false;
-    for (const job of jobs) {
-      if (job.status !== 'downloading') continue;
-      job.status = 'failed';
-      job.error = '程序退出导致下载中断，可重新下载';
-      job.updatedAt = new Date().toISOString();
-      changed = true;
-    }
-    if (changed) writeJSON(DOWNLOAD_STORE_FILE, jobs);
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const recovery = recoverInterruptedDownloads(fs, path, jobs, new Date().toISOString());
+    if (recovery.recovered > 0) writeJSON(DOWNLOAD_STORE_FILE, jobs);
   }
   return jobs;
 }
@@ -767,6 +763,7 @@ export function registerTaskIPC(): () => void {
             jobs.push(job);
             jobIds.push(job.id);
             saveDownloadJobs(jobs);
+            let temporaryPath: string | undefined;
             try {
               const controller = new AbortController();
               const timeout = setTimeout(() => controller.abort(), 60000);
@@ -802,7 +799,7 @@ export function registerTaskIPC(): () => void {
               }
               const fileName = `${task.taskId.substring(0, 8)}_${outputIndex + 1}${ext}`;
               const filePath = getAvailableDownloadPath(fs, path, saveDir, fileName);
-              const temporaryPath = `${filePath}.${job.id}.part`;
+              temporaryPath = `${filePath}.${job.id}.part`;
               fs.writeFileSync(temporaryPath, buffer);
               fs.renameSync(temporaryPath, filePath);
               job.status = 'done';
@@ -813,9 +810,7 @@ export function registerTaskIPC(): () => void {
               downloadedCount++;
             } catch (e: any) {
               try {
-                for (const entry of fs.readdirSync(saveDir)) {
-                  if (entry.endsWith(`.${job.id}.part`)) fs.unlinkSync(path.join(saveDir, entry));
-                }
+                removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id);
               } catch {}
               const classified = classifyDownloadException(e);
               failures.push(`${task.taskId.slice(0, 8)}: ${classified.message}`);
@@ -843,9 +838,7 @@ export function registerTaskIPC(): () => void {
   );
 
   ipcMain.handle('tasks:listDownloads', async (): Promise<DownloadJob[]> => {
-    const jobs = loadDownloadJobs();
-    saveDownloadJobs(jobs);
-    return jobs;
+    return loadDownloadJobs();
   });
 
   ipcMain.handle(
