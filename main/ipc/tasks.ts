@@ -15,12 +15,11 @@ import { acquireTaskLease, canReleaseTaskLease, renewTaskLease } from '../utils/
 import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/downloadRecovery';
 import { TaskEventStream } from '../core/TaskEventStream';
 import { TaskRepository } from '../core/TaskRepository';
+import { TaskService } from '../core/TaskService';
 import type {
-  GenerationMode,
   VideoModel,
   VideoDuration,
   VideoAspectRatio,
-  TaskStatus,
   Task,
   TaskErrorInfo,
   TaskRunSnapshot,
@@ -72,34 +71,11 @@ const taskRepository = new TaskRepository({
   events: taskEventStream,
   warn: (message, details) => console.warn(message, details),
 });
+const taskService = new TaskService({ store: taskRepository, defaultProjectId: getDefaultProjectId });
 
 /** 读取所有任务（含运行时归一化） */
 function loadTasks(): Task[] {
   return taskRepository.read();
-}
-
-function artifactId(url: string): string {
-  let hash = 5381;
-  for (let index = 0; index < url.length; index++) hash = ((hash << 5) + hash) ^ url.charCodeAt(index);
-  return `artifact-${(hash >>> 0).toString(16)}`;
-}
-
-function appendArtifacts(task: Task, outputs: string[], source: TaskArtifact['source'] = 'network'): void {
-  const existing = new Map((task.artifacts || []).map((artifact) => [artifact.url, artifact]));
-  for (const url of outputs) {
-    if (!url || existing.has(url)) continue;
-    const artifact: TaskArtifact = {
-      id: artifactId(url),
-      url,
-      kind: task.mode === 'video' ? 'video' : task.mode === 'image' ? 'image' : 'file',
-      source,
-      runId: task.runtime?.runId,
-      conversationUrl: task.runtime?.conversationUrl,
-      discoveredAt: new Date().toISOString(),
-    };
-    existing.set(url, artifact);
-  }
-  task.artifacts = [...existing.values()];
 }
 
 import { parseCsv, normalizeCsvMode } from '../utils/csv';
@@ -244,40 +220,8 @@ export function registerTaskIPC(): () => void {
     'tasks:add',
     async (_event, params: TaskAddParams): Promise<{ success: boolean; tasks?: Task[]; error?: string }> => {
       try {
-        if (!params.prompts || params.prompts.length === 0) {
-          return { success: false, error: '请输入至少一条提示词' };
-        }
-
-        const tasks = loadTasks();
-        const mode: GenerationMode = params.mode || 'chat';
-        const newTasks: Task[] = params.prompts
-          .filter((p) => p.trim().length > 0)
-          .map((prompt) => ({
-            id: uuidv4(),
-            prompt: prompt.trim(),
-            assignedAccountId: null,
-            status: 'queued' as TaskStatus,
-            mode,
-            videoConfig: params.videoConfig,
-            attachments: params.attachments,
-            audioAttachment: params.audioAttachment,
-            result: null,
-            outputs: [],
-            artifacts: [],
-            runHistory: [],
-            source: 'manual',
-            dependsOnTaskIds: [],
-            projectId: params.projectId || getDefaultProjectId(),
-            errorInfo: undefined,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          }));
-
-        tasks.push(...newTasks);
-        const saved = saveTasksOrError(tasks);
-        if (!saved.success) return saved;
-
-        return { success: true, tasks: newTasks };
+        const result = taskService.create(params);
+        return result.success ? { success: true, tasks: result.data } : result;
       } catch (err: any) {
         return { success: false, error: err.message };
       }
@@ -313,23 +257,7 @@ export function registerTaskIPC(): () => void {
       _event,
       params: TaskUpdateStatusParams
     ): Promise<{ success: boolean; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((t) => t.id === params.taskId);
-      if (!task) {
-        return { success: false, error: '任务不存在' };
-      }
-
-      task.status = params.status;
-      if (params.result !== undefined) task.result = params.result;
-      if (params.outputs !== undefined) {
-        task.outputs = [...new Set(params.outputs.filter(Boolean))];
-        appendArtifacts(task, task.outputs);
-      }
-      if (params.status === 'done') task.errorInfo = undefined;
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
-
-      return { success: true };
+      return taskService.updateStatus(params);
     }
   );
 
@@ -370,24 +298,7 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:delete',
     async (_event, params: TaskIdParams): Promise<{ success: boolean; error?: string }> => {
-      const tasks = loadTasks();
-      const idx = tasks.findIndex((t) => t.id === params.taskId);
-      if (idx === -1) {
-        return { success: false, error: '任务不存在' };
-      }
-      const task = tasks[idx];
-      if (['executing', 'generating', 'waiting_verification'].includes(task.status)) {
-        return { success: false, error: '任务正在执行，请先暂停后再删除' };
-      }
-      const dependentCount = tasks.filter((item) => item.dependsOnTaskIds?.includes(task.id)).length;
-      if (dependentCount > 0) {
-        return { success: false, error: `仍有 ${dependentCount} 个任务依赖此任务，请先调整依赖关系` };
-      }
-
-      tasks.splice(idx, 1);
-      const saved = saveTasksOrError(tasks);
-      if (!saved.success) return saved;
-      return { success: true };
+      return taskService.delete(params.taskId);
     }
   );
 
@@ -395,20 +306,8 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:retry',
     async (_event, params: TaskIdParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((t) => t.id === params.taskId);
-      if (!task) {
-        return { success: false, error: '任务不存在' };
-      }
-      if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
-        return { success: false, error: '任务正在执行中，无法重试' };
-      }
-
-      resetTaskForQueue(task);
-      const saved = saveTasksOrError(tasks);
-      if (!saved.success) return saved;
-
-      return { success: true, task };
+      const result = taskService.retry(params.taskId);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
