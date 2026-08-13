@@ -32,6 +32,11 @@ export type TaskServiceResult<T = undefined> =
   | ({ success: true } & (T extends undefined ? object : { data: T }))
   | { success: false; error: string };
 
+export interface TaskRecoverySummary {
+  recoveredTasks: number;
+  clearedLocks: number;
+}
+
 const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification']);
 const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
 const RENEW_WRITE_ERROR = '任务锁续租写入失败';
@@ -94,7 +99,8 @@ export class TaskService {
   create(params: TaskAddParams): TaskServiceResult<Task[]> {
     const prompts = (params.prompts || []).map((prompt) => prompt.trim()).filter(Boolean);
     if (prompts.length === 0) return { success: false, error: '请输入至少一条提示词' };
-    const tasks = this.deps.store.read();
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
     const mode: GenerationMode = params.mode || 'chat';
     const created = prompts.map((prompt): Task => {
       const timestamp = this.now();
@@ -141,7 +147,8 @@ export class TaskService {
   }
 
   updateStatus(params: TaskUpdateStatusParams): TaskServiceResult {
-    const tasks = this.deps.store.read();
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
     task.status = params.status;
@@ -166,7 +173,8 @@ export class TaskService {
   }
 
   delete(taskId: string): TaskServiceResult {
-    const tasks = this.deps.store.read();
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
     const index = tasks.findIndex((task) => task.id === taskId);
     if (index < 0) return { success: false, error: '任务不存在' };
     if (ACTIVE.has(tasks[index].status)) return { success: false, error: '任务正在执行，请先暂停后再删除' };
@@ -178,7 +186,8 @@ export class TaskService {
   }
 
   retry(taskId: string): TaskServiceResult<Task> {
-    const tasks = this.deps.store.read();
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return { success: false, error: '任务不存在' };
     if (ACTIVE.has(task.status)) return { success: false, error: '任务正在执行中，无法重试' };
@@ -207,6 +216,69 @@ export class TaskService {
     if (!changed) return { success: true };
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true };
+  }
+
+  recoverInterruptedTasks(): TaskServiceResult<TaskRecoverySummary> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+
+    const timestamp = this.now();
+    let recoveredTasks = 0;
+    let clearedLocks = 0;
+    let changed = false;
+
+    for (const task of tasks) {
+      if (!ACTIVE.has(task.status)) {
+        if (task.lock) {
+          task.lock = undefined;
+          clearedLocks++;
+          changed = true;
+        }
+        continue;
+      }
+
+      task.status = 'paused';
+      task.result = '程序上次退出时任务仍在运行，可重新执行';
+      task.errorInfo = {
+        code: 'cancelled',
+        message: task.result,
+        recoverable: true,
+        detectedAt: timestamp,
+      };
+      if (task.runtime) {
+        task.runtime = {
+          ...task.runtime,
+          stage: 'paused',
+          message: '程序重启，任务已安全暂停',
+          stageStartedAt: timestamp,
+          lastHeartbeatAt: timestamp,
+        };
+      }
+      task.updatedAt = timestamp;
+      if (task.lock) clearedLocks++;
+      task.lock = undefined;
+
+      if (task.runtime) {
+        const runtime = task.runtime;
+        const activeRun = task.runHistory?.find(
+          (run) => run.runId === runtime.runId && !run.finishedAt,
+        );
+        if (activeRun) {
+          activeRun.finishedAt = timestamp;
+          activeRun.finalStage = 'paused';
+          activeRun.outcome = 'paused';
+          activeRun.errorCode = 'cancelled';
+          activeRun.durationMs = Math.max(0, new Date(timestamp).getTime() - new Date(activeRun.startedAt).getTime());
+        }
+      }
+
+      recoveredTasks++;
+      changed = true;
+    }
+
+    if (!changed) return { success: true, data: { recoveredTasks: 0, clearedLocks: 0 } };
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: { recoveredTasks, clearedLocks } };
   }
 
   updateRuntime(params: TaskUpdateRuntimeParams): TaskServiceResult<Task> {
