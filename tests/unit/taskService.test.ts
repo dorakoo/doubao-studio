@@ -1414,3 +1414,202 @@ describe('IPC 接线源码契约检查：validateArtifact', () => {
     expect(handlerBody).not.toMatch(/err\.message/);
   });
 });
+
+// ==================== 只读任务查询 ====================
+
+const Q_WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+
+function qTask(id: string, status: Task['status'], outputs: string[] = []): Task {
+  const task = base(id, status);
+  task.outputs = outputs;
+  return task;
+}
+
+function queryFixture(initial: Task[] = [], basename?: (value: string) => string) {
+  let stored = structuredClone(initial);
+  let writeCount = 0;
+  const store = {
+    read: (): Task[] => structuredClone(stored),
+    replace: (tasks: Task[]): boolean => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default', id: () => 'id', now: () => 'now',
+    basename,
+  });
+  return { service, stored: () => stored, writeCount: () => writeCount };
+}
+
+describe('TaskService 只读查询 getTasks', () => {
+  it('返回全部任务且保持顺序', () => {
+    const { service } = queryFixture([qTask('t1', 'queued'), qTask('t2', 'done')]);
+    const result = service.getTasks();
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.map((task) => task.id)).toEqual(['t1', 't2']);
+  });
+
+  it('read 失败返回 WRITE_ERROR', () => {
+    const service = new TaskService({
+      store: { read: () => { throw new Error('read failed'); }, replace: () => true },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => 'now',
+    });
+    expect(service.getTasks()).toEqual({ success: false, error: Q_WRITE_ERROR });
+  });
+
+  it('零写入', () => {
+    const { service, writeCount } = queryFixture([qTask('t1', 'queued')]);
+    service.getTasks();
+    expect(writeCount()).toBe(0);
+  });
+});
+
+describe('TaskService 只读查询 getCompletedOutputs', () => {
+  it('只返回 done 且有产物的任务', () => {
+    const { service } = queryFixture([
+      qTask('t1', 'done', ['u1']),
+      qTask('t2', 'done'),
+      qTask('t3', 'queued', ['u2']),
+      qTask('t4', 'fail', ['u3']),
+    ]);
+    const result = service.getCompletedOutputs();
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.map((item) => item.taskId)).toEqual(['t1']);
+  });
+
+  it('投影字段完整且保持顺序', () => {
+    const first = qTask('t1', 'done', ['u1', 'u2']);
+    first.assignedAccountId = 'acc-9';
+    first.mode = 'video';
+    first.prompt = '你好';
+    const second = qTask('t2', 'done', ['u3']);
+    const { service } = queryFixture([first, second]);
+    const result = service.getCompletedOutputs();
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data[0]).toEqual({ taskId: 't1', prompt: '你好', outputs: ['u1', 'u2'], accountId: 'acc-9', mode: 'video' });
+      expect(result.data.map((item) => item.taskId)).toEqual(['t1', 't2']);
+    }
+  });
+
+  it('read 失败返回 WRITE_ERROR', () => {
+    const service = new TaskService({
+      store: { read: () => { throw new Error('read failed'); }, replace: () => true },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => 'now',
+    });
+    expect(service.getCompletedOutputs()).toEqual({ success: false, error: Q_WRITE_ERROR });
+  });
+
+  it('零写入', () => {
+    const { service, writeCount } = queryFixture([qTask('t1', 'done', ['u1'])]);
+    service.getCompletedOutputs();
+    expect(writeCount()).toBe(0);
+  });
+});
+
+describe('TaskService 只读查询 buildTaskDiagnostics', () => {
+  function diagTask(): Task {
+    const task = qTask('t1', 'done', ['u1', 'u2']);
+    task.prompt = 'secret prompt';
+    task.assignedAccountId = 'acc-9';
+    task.attachments = ['C:\\dir\\a.png', 'D:\\x\\b.jpg'];
+    task.audioAttachment = 'C:\\dir\\au.mp3';
+    task.artifacts = [{ id: 'art-1', url: 'https://x/v.mp4', kind: 'video', source: 'network', discoveredAt: 'old' }];
+    return task;
+  }
+
+  it('prompt 脱敏为长度标记且其他字段原样保留', () => {
+    const { service } = queryFixture([diagTask()], (value) => `BASE:${value}`);
+    const result = service.buildTaskDiagnostics();
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data[0].prompt).toBe('[已脱敏，长度 13]');
+      expect(result.data[0]).toMatchObject({ id: 't1', status: 'done', assignedAccountId: 'acc-9' });
+    }
+  });
+
+  it('attachments 使用注入 basename', () => {
+    const { service } = queryFixture([diagTask()], (value) => `BASE:${value}`);
+    const result = service.buildTaskDiagnostics();
+    if (result.success) {
+      expect(result.data[0].attachments).toEqual(['BASE:C:\\dir\\a.png', 'BASE:D:\\x\\b.jpg']);
+    }
+  });
+
+  it('audioAttachment 使用注入 basename，空值规范为 undefined', () => {
+    const withAudio = diagTask();
+    const withoutAudio = diagTask();
+    withoutAudio.audioAttachment = undefined;
+    const { service } = queryFixture([withAudio, withoutAudio], (value) => `BASE:${value}`);
+    const result = service.buildTaskDiagnostics();
+    if (result.success) {
+      expect(result.data[0].audioAttachment).toBe('BASE:C:\\dir\\au.mp3');
+      expect(result.data[1].audioAttachment).toBeUndefined();
+    }
+  });
+
+  it('outputs 掩码为序号标记', () => {
+    const { service } = queryFixture([diagTask()], (value) => `BASE:${value}`);
+    const result = service.buildTaskDiagnostics();
+    if (result.success) expect(result.data[0].outputs).toEqual(['[产物地址 1]', '[产物地址 2]']);
+  });
+
+  it('artifacts 的 url 掩码，其余字段保留', () => {
+    const { service } = queryFixture([diagTask()], (value) => `BASE:${value}`);
+    const result = service.buildTaskDiagnostics();
+    if (result.success) {
+      expect(result.data[0].artifacts![0]).toMatchObject({ id: 'art-1', url: '[已脱敏]', kind: 'video' });
+    }
+  });
+
+  it('默认 basename 按分隔符截取末段', () => {
+    const { service } = queryFixture([diagTask()]);
+    const result = service.buildTaskDiagnostics();
+    if (result.success) {
+      expect(result.data[0].attachments).toEqual(['a.png', 'b.jpg']);
+      expect(result.data[0].audioAttachment).toBe('au.mp3');
+    }
+  });
+
+  it('read 失败返回 WRITE_ERROR', () => {
+    const service = new TaskService({
+      store: { read: () => { throw new Error('read failed'); }, replace: () => true },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => 'now',
+    });
+    expect(service.buildTaskDiagnostics()).toEqual({ success: false, error: Q_WRITE_ERROR });
+  });
+
+  it('零写入', () => {
+    const { service, writeCount } = queryFixture([diagTask()], (value) => `BASE:${value}`);
+    service.buildTaskDiagnostics();
+    expect(writeCount()).toBe(0);
+  });
+});
+
+describe('IPC 接线源码契约检查：只读查询', () => {
+  const source = readFileSync(resolve(__dirname, '../../main/ipc/tasks.ts'), 'utf-8');
+
+  it('tasks:list / tasks:getCompletedOutputs 退化为薄适配且 loadTasks 已删除', () => {
+    expect(source).not.toMatch(/function\s+loadTasks\s*\(/);
+    expect(source).toMatch(/basename: \(value\) => require\('path'\)\.basename\(value\)/);
+    const listStart = source.indexOf("'tasks:list'", source.indexOf("'tasks:list'") + 1);
+    const listEnd = source.indexOf("'tasks:add'", source.indexOf("'tasks:add'") + 1);
+    const listBody = source.slice(listStart, listEnd);
+    expect(listBody).toMatch(/taskService\.getTasks\(\)/);
+    expect(listBody).not.toMatch(/\bloadTasks\b/);
+    const coStart = source.indexOf("'tasks:getCompletedOutputs'", source.indexOf("'tasks:getCompletedOutputs'") + 1);
+    const coEnd = source.indexOf("'tasks:selectImages'", source.indexOf("'tasks:selectImages'") + 1);
+    const coBody = source.slice(coStart, coEnd);
+    expect(coBody).toMatch(/taskService\.getCompletedOutputs\(\)/);
+    expect(coBody).not.toMatch(/\bloadTasks\b/);
+    expect(coBody).not.toMatch(/\.filter\(/);
+  });
+
+  it('exportDiagnostics 任务部分调用 buildTaskDiagnostics，脱敏逻辑不在 handler', () => {
+    const exStart = source.indexOf("'tasks:exportDiagnostics'", source.indexOf("'tasks:exportDiagnostics'") + 1);
+    const exEnd = source.indexOf("'tasks:validateArtifact'", source.indexOf("'tasks:validateArtifact'") + 1);
+    const exBody = source.slice(exStart, exEnd);
+    expect(exBody).toMatch(/taskService\.buildTaskDiagnostics\(\)/);
+    expect(exBody).not.toMatch(/\bloadTasks\b/);
+    expect(exBody).not.toMatch(/已脱敏，长度/);
+    expect(exBody).not.toMatch(/\[产物地址/);
+  });
+});
