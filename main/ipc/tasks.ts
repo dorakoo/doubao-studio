@@ -119,51 +119,6 @@ function getAvailableDownloadPath(fs: typeof import('fs'), path: typeof import('
   return candidate;
 }
 
-function recoverInterruptedTasks(): void {
-  const tasks = loadTasks();
-  let changed = false;
-  const now = new Date().toISOString();
-  for (const task of tasks) {
-    const wasActive = task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification';
-    if (!wasActive) {
-      if (task.lock) {
-        task.lock = undefined;
-        changed = true;
-      }
-      continue;
-    }
-    task.status = 'paused';
-    task.result = '程序上次退出时任务仍在运行，可重新执行';
-    task.errorInfo = {
-      code: 'cancelled',
-      message: task.result,
-      recoverable: true,
-      detectedAt: now,
-    };
-    if (task.runtime) {
-      task.runtime = {
-        ...task.runtime,
-        stage: 'paused',
-        message: '程序重启，任务已安全暂停',
-        stageStartedAt: now,
-        lastHeartbeatAt: now,
-      };
-    }
-    task.updatedAt = now;
-    task.lock = undefined;
-    const activeRun = task.runtime && task.runHistory?.find((run) => run.runId === task.runtime!.runId && !run.finishedAt);
-    if (activeRun) {
-      activeRun.finishedAt = now;
-      activeRun.finalStage = 'paused';
-      activeRun.outcome = 'paused';
-      activeRun.errorCode = 'cancelled';
-      activeRun.durationMs = Math.max(0, new Date(now).getTime() - new Date(activeRun.startedAt).getTime());
-    }
-    changed = true;
-  }
-  if (changed) saveTasks(tasks);
-}
-
 // ==================== IPC 处理器注册 ====================
 
 const TASK_IPC_CHANNELS = [
@@ -178,7 +133,11 @@ const TASK_IPC_CHANNELS = [
 
 export function registerTaskIPC(): () => void {
   const dispose = replaceIpcHandlers(ipcMain, TASK_IPC_CHANNELS);
-  recoverInterruptedTasks();
+  const recoveryResult = taskService.recoverInterruptedTasks();
+  if (!recoveryResult.success) {
+    dispose();
+    throw new Error('任务恢复失败，请检查数据目录和磁盘状态');
+  }
   // 在任何新下载开始前，仅恢复上次进程遗留的下载状态。
   loadDownloadJobs();
   writeJSON('schema.json', { version: 6, appVersion: '2.0.0', updatedAt: new Date().toISOString() });

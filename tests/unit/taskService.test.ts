@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 import type { Task, TaskStage, TaskLock } from '@doubao-studio/contracts';
 import { TaskService } from '../../main/core/TaskService';
 
@@ -597,5 +599,254 @@ describe('TaskService lease fail-closed', () => {
       defaultProjectId: () => 'default', nowMs: () => NOW_MS,
     });
     expect(call(service)).toEqual({ success: false, error: expectedError });
+  });
+});
+
+// ==================== recoverInterruptedTasks ====================
+
+const RECOVERY_NOW = '2026-08-13T12:00:00.000Z';
+const RECOVERY_WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+const RECOVERY_STARTED_AT = '2026-08-12T00:00:00.000Z';
+
+function recoveryFixture(initial: Task[] = []) {
+  let stored = structuredClone(initial);
+  let writeCount = 0;
+  const store = {
+    read: () => structuredClone(stored),
+    replace: (tasks: Task[]) => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default', now: () => RECOVERY_NOW,
+  });
+  return { service, stored: () => stored, writeCount: () => writeCount };
+}
+
+function activeTask(id: string, status: Task['status']): Task {
+  const task = withRuntime(base(id, status), 'generating');
+  task.runtime!.startedAt = RECOVERY_STARTED_AT;
+  task.lock = { ownerId: 'old-owner', acquiredAt: 'old', expiresAt: 'old' };
+  task.runHistory = [{ runId: 'r', attempt: 1, startedAt: RECOVERY_STARTED_AT }];
+  return task;
+}
+
+describe('TaskService recoverInterruptedTasks', () => {
+  it.each(['executing', 'generating', 'waiting_verification'] as const)(
+    '活动状态 %s 恢复为 paused 且 result/errorInfo/runtime/updatedAt/lock 正确',
+    (status) => {
+      const item = activeTask('t1', status);
+      const { service, stored } = recoveryFixture([item]);
+      const result = service.recoverInterruptedTasks();
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.recoveredTasks).toBe(1);
+        expect(result.data.clearedLocks).toBe(1);
+      }
+      const task = stored()[0];
+      expect(task.status).toBe('paused');
+      expect(task.result).toBe('程序上次退出时任务仍在运行，可重新执行');
+      expect(task.errorInfo).toEqual({
+        code: 'cancelled',
+        message: '程序上次退出时任务仍在运行，可重新执行',
+        recoverable: true,
+        detectedAt: RECOVERY_NOW,
+      });
+      expect(task.runtime?.stage).toBe('paused');
+      expect(task.runtime?.message).toBe('程序重启，任务已安全暂停');
+      expect(task.runtime?.stageStartedAt).toBe(RECOVERY_NOW);
+      expect(task.runtime?.lastHeartbeatAt).toBe(RECOVERY_NOW);
+      expect(task.updatedAt).toBe(RECOVERY_NOW);
+      expect(task.lock).toBeUndefined();
+      expect(task.runtime?.runId).toBe('r');
+      expect(task.runtime?.attempt).toBe(1);
+      expect(task.runtime?.input).toEqual({ prompt: 't1', mode: 'video', attachments: [] });
+    },
+  );
+
+  it('非活动任务只清除遗留 lock，无 lock 时完全不变', () => {
+    const withLock = base('t1', 'done');
+    withLock.lock = { ownerId: 'old', acquiredAt: 'old', expiresAt: 'old' };
+    const withoutLock = base('t2', 'queued');
+    const { service, stored, writeCount } = recoveryFixture([withLock, withoutLock]);
+    const result = service.recoverInterruptedTasks();
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.recoveredTasks).toBe(0);
+      expect(result.data.clearedLocks).toBe(1);
+    }
+    expect(stored()[0].lock).toBeUndefined();
+    expect(stored()[0].status).toBe('done');
+    expect(stored()[0].updatedAt).toBe('old');
+    expect(stored()[1]).toEqual(base('t2', 'queued'));
+    expect(writeCount()).toBe(1);
+  });
+
+  it('当前未结束 runHistory 正确收口', () => {
+    const { service, stored } = recoveryFixture([activeTask('t1', 'executing')]);
+    service.recoverInterruptedTasks();
+    const record = stored()[0].runHistory![0];
+    expect(record.finishedAt).toBe(RECOVERY_NOW);
+    expect(record.finalStage).toBe('paused');
+    expect(record.outcome).toBe('paused');
+    expect(record.errorCode).toBe('cancelled');
+    expect(record.durationMs).toBe(new Date(RECOVERY_NOW).getTime() - new Date(RECOVERY_STARTED_AT).getTime());
+  });
+
+  it('已 finished 的 runHistory 不改写', () => {
+    const item = activeTask('t1', 'executing');
+    item.runHistory = [{
+      runId: 'r', attempt: 1, startedAt: RECOVERY_STARTED_AT,
+      finishedAt: '2026-08-12T06:00:00.000Z', finalStage: 'completed',
+      outcome: 'done', durationMs: 21600000,
+    }];
+    const { service, stored } = recoveryFixture([item]);
+    service.recoverInterruptedTasks();
+    expect(stored()[0].runHistory![0]).toEqual({
+      runId: 'r', attempt: 1, startedAt: RECOVERY_STARTED_AT,
+      finishedAt: '2026-08-12T06:00:00.000Z', finalStage: 'completed',
+      outcome: 'done', durationMs: 21600000,
+    });
+  });
+
+  it('非当前 runId 的历史记录不改写', () => {
+    const item = activeTask('t1', 'executing');
+    item.runHistory = [
+      { runId: 'old-run', attempt: 0, startedAt: '2026-08-10T00:00:00.000Z' },
+      { runId: 'r', attempt: 1, startedAt: RECOVERY_STARTED_AT },
+    ];
+    const { service, stored } = recoveryFixture([item]);
+    service.recoverInterruptedTasks();
+    const records = stored()[0].runHistory!;
+    expect(records).toHaveLength(2);
+    expect(records[0].finishedAt).toBeUndefined();
+    expect(records[0].outcome).toBeUndefined();
+    expect(records[1].finishedAt).toBe(RECOVERY_NOW);
+    expect(records[1].outcome).toBe('paused');
+  });
+
+  it('没有 runtime 时不创建历史记录', () => {
+    const item = base('t1', 'executing');
+    item.runHistory = [];
+    const { service, stored } = recoveryFixture([item]);
+    service.recoverInterruptedTasks();
+    expect(stored()[0].runHistory).toEqual([]);
+  });
+
+  it('未来 startedAt 的 durationMs 收敛为 0', () => {
+    const item = activeTask('t1', 'executing');
+    item.runHistory = [{ runId: 'r', attempt: 1, startedAt: '2027-01-01T00:00:00.000Z' }];
+    const { service, stored } = recoveryFixture([item]);
+    service.recoverInterruptedTasks();
+    expect(stored()[0].runHistory![0].durationMs).toBe(0);
+  });
+
+  it('无变化时零写入', () => {
+    const { service, writeCount } = recoveryFixture([base('t1', 'queued'), base('t2', 'done'), base('t3', 'paused')]);
+    const result = service.recoverInterruptedTasks();
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.recoveredTasks).toBe(0);
+      expect(result.data.clearedLocks).toBe(0);
+    }
+    expect(writeCount()).toBe(0);
+  });
+
+  it('多任务恢复只执行一次 replace 且同一批次时间严格一致', () => {
+    const { service, stored, writeCount } = recoveryFixture([
+      activeTask('t1', 'executing'), activeTask('t2', 'generating'), activeTask('t3', 'waiting_verification'),
+    ]);
+    const result = service.recoverInterruptedTasks();
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.recoveredTasks).toBe(3);
+      expect(result.data.clearedLocks).toBe(3);
+    }
+    expect(writeCount()).toBe(1);
+    const tasks = stored();
+    const allTimes = tasks.flatMap((t) => [
+      t.errorInfo!.detectedAt,
+      t.runtime!.stageStartedAt,
+      t.runtime!.lastHeartbeatAt,
+      t.updatedAt,
+      t.runHistory![0].finishedAt!,
+    ]);
+    expect(new Set(allTimes).size).toBe(1);
+    expect(allTimes[0]).toBe(RECOVERY_NOW);
+  });
+
+  it.each([
+    ['read 失败', () => { throw new Error('read failed'); }, () => true],
+    ['replace=false', () => [structuredClone(activeTask('t1', 'executing'))], () => false],
+    ['陈旧快照异常', () => [structuredClone(activeTask('t1', 'executing'))], () => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); }],
+  ])('recoverInterruptedTasks 在 Repository %s 时 fail-closed', (_label, readFn, replaceFn) => {
+    const service = new TaskService({
+      store: { read: readFn as () => Task[], replace: replaceFn as () => boolean },
+      defaultProjectId: () => 'default', now: () => RECOVERY_NOW,
+    });
+    expect(service.recoverInterruptedTasks()).toEqual({ success: false, error: RECOVERY_WRITE_ERROR });
+  });
+});
+
+// ==================== read fail-closed (create/updateStatus/delete/retry) ====================
+
+describe('TaskService read fail-closed (前序方法)', () => {
+  const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+
+  it.each<[string, (s: TaskService) => { success: boolean; error?: string }]>([
+    ['create', (s) => s.create({ prompts: ['A'] })],
+    ['updateStatus', (s) => s.updateStatus({ taskId: 't1', status: 'done' })],
+    ['delete', (s) => s.delete('t1')],
+    ['retry', (s) => s.retry('t1')],
+  ])('%s read 抛错返回 WRITE_ERROR 且 replace 调用次数为 0', (_op, call) => {
+    let replaceCount = 0;
+    const service = new TaskService({
+      store: {
+        read: () => { throw new Error('read failed'); },
+        replace: () => { replaceCount++; return true; },
+      },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => 'now',
+    });
+    expect(call(service)).toEqual({ success: false, error: WRITE_ERROR });
+    expect(replaceCount).toBe(0);
+  });
+
+  it('create read 失败时 id 与 now 调用次数均为 0', () => {
+    const idFn = vi.fn(() => 'id');
+    const nowFn = vi.fn(() => 'now');
+    const service = new TaskService({
+      store: { read: () => { throw new Error('read failed'); }, replace: () => true },
+      defaultProjectId: () => 'default', id: idFn, now: nowFn,
+    });
+    expect(service.create({ prompts: ['A'] })).toEqual({ success: false, error: WRITE_ERROR });
+    expect(idFn).not.toHaveBeenCalled();
+    expect(nowFn).not.toHaveBeenCalled();
+  });
+});
+
+// ==================== IPC 接线源码契约检查 ====================
+
+// registerTaskIPC 依赖 Electron 的 ipcMain、dialog、session 等运行时 API，
+// 无法在不新增 IPC 测试基础设施的情况下做稳定行为测试。
+// 因此使用最小源码契约检查验证接线正确性，符合任务规格第 24-25 项的允许方案。
+
+describe('IPC 接线源码契约检查', () => {
+  const source = readFileSync(resolve(__dirname, '../../main/ipc/tasks.ts'), 'utf-8');
+
+  it('tasks.ts 不再定义本地恢复业务函数', () => {
+    expect(source).not.toMatch(/function\s+recoverInterruptedTasks\s*\(/);
+    expect(source).toMatch(/taskService\.recoverInterruptedTasks\(\)/);
+  });
+
+  it('registerTaskIPC 恢复失败时调用 disposer 并抛稳定错误，不继续后续初始化', () => {
+    const recoveryIdx = source.indexOf('taskService.recoverInterruptedTasks()');
+    const disposeCallIdx = source.indexOf('dispose()', recoveryIdx);
+    const throwIdx = source.indexOf("throw new Error('任务恢复失败，请检查数据目录和磁盘状态')");
+    const loadDownloadIdx = source.indexOf('loadDownloadJobs()', recoveryIdx);
+    const schemaIdx = source.indexOf("writeJSON('schema.json'", recoveryIdx);
+
+    expect(recoveryIdx).toBeGreaterThan(-1);
+    expect(disposeCallIdx).toBeGreaterThan(recoveryIdx);
+    expect(throwIdx).toBeGreaterThan(disposeCallIdx);
+    expect(loadDownloadIdx).toBeGreaterThan(throwIdx);
+    expect(schemaIdx).toBeGreaterThan(throwIdx);
   });
 });
