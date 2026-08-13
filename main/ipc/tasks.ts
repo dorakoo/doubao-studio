@@ -16,9 +16,6 @@ import { TaskEventStream } from '../core/TaskEventStream';
 import { TaskRepository } from '../core/TaskRepository';
 import { TaskService } from '../core/TaskService';
 import type {
-  VideoModel,
-  VideoDuration,
-  VideoAspectRatio,
   Task,
   TaskErrorInfo,
   TaskRunSnapshot,
@@ -76,8 +73,6 @@ const taskService = new TaskService({ store: taskRepository, defaultProjectId: g
 function loadTasks(): Task[] {
   return taskRepository.read();
 }
-
-import { parseCsv, normalizeCsvMode } from '../utils/csv';
 
 function saveTasks(tasks: Task[]): boolean {
   return taskRepository.replace(tasks);
@@ -256,76 +251,22 @@ export function registerTaskIPC(): () => void {
         });
         if (selected.canceled || !selected.filePaths[0]) return { success: false };
         const fs = require('fs');
-        const raw = fs.readFileSync(selected.filePaths[0], 'utf-8').replace(/^\uFEFF/, '');
-        const rows = parseCsv(raw);
-        if (rows.length < 2) return { success: false, error: 'CSV 没有可导入的数据行' };
-        const headers = rows[0].map((header) => header.trim().toLowerCase());
-        const indexOf = (...names: string[]) => names.map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
-        const promptIndex = indexOf('prompt', '提示词');
-        if (promptIndex < 0) return { success: false, error: 'CSV 必须包含 prompt 或 提示词 列' };
-
-        const modeIndex = indexOf('mode', '模式');
-        const modelIndex = indexOf('model', '模型');
-        const durationIndex = indexOf('duration', '时长');
-        const ratioIndex = indexOf('aspectratio', 'aspect_ratio', '比例');
-        const attachmentsIndex = indexOf('attachments', '参考图片');
-        const audioIndex = indexOf('audio', '参考音频');
-        const accountIndex = indexOf('account', '账号');
-        const dependsIndex = indexOf('depends_on', '依赖行');
-        const policyIndex = indexOf('dependency_policy', '依赖策略');
+        const raw = fs.readFileSync(selected.filePaths[0], 'utf-8');
         const accounts = readJSON<Array<{ id: string; name: string }>>('accounts.json', []);
-        const existingTasks = loadTasks();
-        const batchId = `batch-${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${uuidv4().slice(0, 6)}`;
-        const imported: Task[] = [];
-        const errors: string[] = [];
-        const sourceRows: number[] = [];
-
-        for (let dataIndex = 1; dataIndex < rows.length; dataIndex++) {
-          const row = rows[dataIndex];
-          const prompt = (row[promptIndex] || '').trim();
-          if (!prompt) {
-            errors.push(`第 ${dataIndex + 1} 行：提示词为空`);
-            continue;
-          }
-          const mode = modeIndex >= 0 ? normalizeCsvMode(row[modeIndex] || '') : 'chat';
-          const model = row[modelIndex] as VideoModel;
-          const duration = row[durationIndex] as VideoDuration;
-          const aspectRatio = row[ratioIndex] as VideoAspectRatio;
-          const now = new Date().toISOString();
-          const accountName = accountIndex >= 0 ? (row[accountIndex] || '').trim() : '';
-          const account = accountName ? accounts.find((item) => item.name === accountName) : undefined;
-          if (accountName && !account) errors.push(`第 ${dataIndex + 1} 行：未找到账号「${accountName}」，任务保持未指派`);
-          imported.push({
-            id: uuidv4(), prompt, assignedAccountId: account?.id || null, status: 'queued', mode,
-            videoConfig: mode === 'video' ? {
-              model: ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'].includes(model) ? model : 'seedance-2.0',
-              duration: /^(?:[4-9]|1[0-5])s$/.test(duration) ? duration : '10s',
-              aspectRatio: ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'].includes(aspectRatio) ? aspectRatio : '16:9',
-            } : undefined,
-            attachments: attachmentsIndex >= 0 ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean) : undefined,
-            audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
-            result: null, outputs: [], artifacts: [], runHistory: [], batchId, source: 'csv', dependsOnTaskIds: [],
-            dependencyPolicy: policyIndex >= 0 && row[policyIndex] === 'all_finished' ? 'all_finished' : 'all_done',
-            projectId: params?.projectId || getDefaultProjectId(),
-            createdAt: now, updatedAt: now,
-          });
-          sourceRows.push(dataIndex + 1);
+        const result = taskService.importCsv({ text: raw, accounts, projectId: params?.projectId });
+        if (result.success) {
+          return {
+            success: true,
+            tasks: result.data.tasks,
+            batchId: result.data.batchId,
+            imported: result.data.imported,
+            skipped: result.data.skipped,
+            errors: result.data.errors,
+          };
         }
-
-        const taskByCsvRow = new Map(sourceRows.map((rowNumber, index) => [rowNumber, imported[index]]));
-        imported.forEach((task, index) => {
-          if (dependsIndex < 0) return;
-          const rawDependencies = rows[sourceRows[index] - 1]?.[dependsIndex] || '';
-          task.dependsOnTaskIds = rawDependencies.split('|')
-            .map((item) => Number(item.trim()))
-            .map((rowNumber) => taskByCsvRow.get(rowNumber)?.id)
-            .filter((id): id is string => !!id);
-        });
-        existingTasks.push(...imported);
-        saveTasks(existingTasks);
-        return { success: true, tasks: imported, batchId, imported: imported.length, skipped: rows.length - 1 - imported.length, errors: errors.slice(0, 20) };
-      } catch (err: any) {
-        return { success: false, error: err.message };
+        return { success: false, error: result.error };
+      } catch {
+        return { success: false, error: 'CSV 导入失败，请检查文件格式和数据目录状态' };
       }
     }
   );
