@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import type { Task, TaskStage, TaskLock } from '@doubao-studio/contracts';
 import { TaskService } from '../../main/core/TaskService';
+import type { ArtifactProbe } from '../../main/core/TaskService';
 
 function base(id: string, status: Task['status'] = 'queued'): Task {
   return { id, prompt: id, assignedAccountId: null, status, mode: 'video', result: null, outputs: [], artifacts: [], createdAt: 'old', updatedAt: 'old' };
@@ -1217,5 +1218,199 @@ describe('TaskService importCsv fail-closed', () => {
     expect(idCount()).toBe(0);
     expect(nowCount()).toBe(0);
     expect(writeCount()).toBe(0);
+  });
+});
+
+// ==================== validateArtifact ====================
+
+const VA_NOW = '2026-08-13T23:00:00.000Z';
+const VA_WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+
+function vaTask(artifactId = 'a1'): Task {
+  const task = base('t1', 'done');
+  task.assignedAccountId = 'acc-1';
+  task.artifacts = [{
+    id: artifactId,
+    url: 'https://example.com/output.mp4',
+    kind: 'video',
+    source: 'network',
+    discoveredAt: 'old',
+  }];
+  return task;
+}
+
+function vaFixture(initial: Task[] = [vaTask()], probe: ArtifactProbe = async () => ({ kind: 'response', statusCode: 200 })) {
+  let stored = structuredClone(initial);
+  let readCount = 0;
+  let writeCount = 0;
+  let nowCount = 0;
+  const store = {
+    read: (): Task[] => { readCount++; return structuredClone(stored); },
+    replace: (tasks: Task[]): boolean => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default',
+    id: () => 'id', now: () => { nowCount++; return VA_NOW; },
+    probeArtifact: probe,
+  });
+  return { service, stored: () => stored, readCount: () => readCount, writeCount: () => writeCount, nowCount: () => nowCount };
+}
+
+describe('TaskService validateArtifact', () => {
+  it.each([200, 201, 206, 299])('HTTP %s 判定为 valid', async (statusCode) => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'response', statusCode }));
+    const result = await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.valid).toBe(true);
+    expect(stored()[0].artifacts![0].validation?.state).toBe('valid');
+  });
+
+  it.each([401, 403, 404, 410])('HTTP %s 判定为 expired', async (statusCode) => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'response', statusCode }));
+    const result = await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.valid).toBe(false);
+    expect(stored()[0].artifacts![0].validation?.state).toBe('expired');
+  });
+
+  it.each([400, 418, 500, 503, 301, 0])('HTTP %s 判定为 invalid', async (statusCode) => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'response', statusCode }));
+    const result = await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.valid).toBe(false);
+    expect(stored()[0].artifacts![0].validation?.state).toBe('invalid');
+  });
+
+  it('响应元数据 contentType/contentLength/statusCode 落盘', async () => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'response', statusCode: 200, contentType: 'video/mp4', contentLength: 12345 }));
+    await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(stored()[0].artifacts![0].validation).toMatchObject({ state: 'valid', contentType: 'video/mp4', contentLength: 12345, statusCode: 200 });
+  });
+
+  it('timeout 判定为 unknown 并记录验证超时', async () => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'timeout' }));
+    const result = await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.valid).toBe(false);
+    expect(stored()[0].artifacts![0].validation).toMatchObject({ state: 'unknown', error: '验证超时' });
+  });
+
+  it('网络错误判定为 invalid 并记录消息', async () => {
+    const { service, stored } = vaFixture([vaTask()], async () => ({ kind: 'error', message: 'net::ERR_FAILED' }));
+    const result = await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.valid).toBe(false);
+    expect(stored()[0].artifacts![0].validation).toMatchObject({ state: 'invalid', error: 'net::ERR_FAILED' });
+  });
+
+  it('任务不存在返回产物不存在且零探针/零写入', async () => {
+    const probe = vi.fn<ArtifactProbe>(async () => ({ kind: 'response', statusCode: 200 }));
+    const { service, writeCount } = vaFixture([vaTask()], probe);
+    expect(await service.validateArtifact({ taskId: 'nope', artifactId: 'a1' })).toEqual({ success: false, error: '产物不存在' });
+    expect(probe).not.toHaveBeenCalled();
+    expect(writeCount()).toBe(0);
+  });
+
+  it('产物不存在返回产物不存在且零探针/零写入', async () => {
+    const probe = vi.fn<ArtifactProbe>(async () => ({ kind: 'response', statusCode: 200 }));
+    const { service, writeCount } = vaFixture([vaTask()], probe);
+    expect(await service.validateArtifact({ taskId: 't1', artifactId: 'nope' })).toEqual({ success: false, error: '产物不存在' });
+    expect(probe).not.toHaveBeenCalled();
+    expect(writeCount()).toBe(0);
+  });
+
+  it('validation.checkedAt 与 task.updatedAt 共用单一时钟', async () => {
+    const { service, stored, nowCount } = vaFixture();
+    await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(nowCount()).toBe(1);
+    expect(stored()[0].artifacts![0].validation?.checkedAt).toBe(VA_NOW);
+    expect(stored()[0].updatedAt).toBe(VA_NOW);
+  });
+
+  it('探针收到产物与账号指派参数', async () => {
+    const probe = vi.fn<ArtifactProbe>(async () => ({ kind: 'response', statusCode: 200 }));
+    const { service } = vaFixture([vaTask()], probe);
+    await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe.mock.calls[0][0]).toMatchObject({ id: 'a1', url: 'https://example.com/output.mp4' });
+    expect(probe.mock.calls[0][1]).toBe('acc-1');
+  });
+
+  it('成功路径只调用一次 Repository replace', async () => {
+    const { service, writeCount } = vaFixture();
+    await service.validateArtifact({ taskId: 't1', artifactId: 'a1' });
+    expect(writeCount()).toBe(1);
+  });
+});
+
+describe('TaskService validateArtifact fail-closed', () => {
+  it('read 失败返回 WRITE_ERROR 且零探针/零时钟/零写', async () => {
+    const probe = vi.fn<ArtifactProbe>(async () => ({ kind: 'response', statusCode: 200 }));
+    const nowFn = vi.fn(() => VA_NOW);
+    let writeCount = 0;
+    const service = new TaskService({
+      store: { read: () => { throw new Error('read failed'); }, replace: () => { writeCount++; return true; } },
+      defaultProjectId: () => 'default', id: () => 'id', now: nowFn, probeArtifact: probe,
+    });
+    expect(await service.validateArtifact({ taskId: 't1', artifactId: 'a1' })).toEqual({ success: false, error: VA_WRITE_ERROR });
+    expect(probe).not.toHaveBeenCalled();
+    expect(nowFn).not.toHaveBeenCalled();
+    expect(writeCount).toBe(0);
+  });
+
+  it('replace=false 时 fail-closed 返回 WRITE_ERROR', async () => {
+    const service = new TaskService({
+      store: { read: () => structuredClone([vaTask()]), replace: () => false },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => VA_NOW,
+      probeArtifact: async () => ({ kind: 'response', statusCode: 200 }),
+    });
+    expect(await service.validateArtifact({ taskId: 't1', artifactId: 'a1' })).toEqual({ success: false, error: VA_WRITE_ERROR });
+  });
+
+  it('Repository 陈旧快照异常时 fail-closed 返回 WRITE_ERROR', async () => {
+    const service = new TaskService({
+      store: { read: () => structuredClone([vaTask()]), replace: () => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); } },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => VA_NOW,
+      probeArtifact: async () => ({ kind: 'response', statusCode: 200 }),
+    });
+    expect(await service.validateArtifact({ taskId: 't1', artifactId: 'a1' })).toEqual({ success: false, error: VA_WRITE_ERROR });
+  });
+
+  it('未注入探针时返回产物验证不可用且零写入', async () => {
+    const service = new TaskService({
+      store: { read: () => structuredClone([vaTask()]), replace: () => true },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => VA_NOW,
+    });
+    expect(await service.validateArtifact({ taskId: 't1', artifactId: 'a1' })).toEqual({ success: false, error: '产物验证不可用' });
+  });
+});
+
+describe('IPC 接线源码契约检查：validateArtifact', () => {
+  const source = readFileSync(resolve(__dirname, '../../main/ipc/tasks.ts'), 'utf-8');
+
+  it('tasks:validateArtifact 不再包含四态业务实现，只保留薄适配', () => {
+    const firstVa = source.indexOf("'tasks:validateArtifact'");
+    const handlerStart = source.indexOf("'tasks:validateArtifact'", firstVa + 1);
+    const firstSar = source.indexOf("'tasks:saveAdapterReport'");
+    const handlerEnd = source.indexOf("'tasks:saveAdapterReport'", firstSar + 1);
+    const handlerBody = source.slice(handlerStart, handlerEnd);
+    expect(handlerBody).toMatch(/taskService\.validateArtifact\(/);
+    expect(handlerBody).not.toMatch(/\[401, 403, 404, 410\]/);
+    expect(handlerBody).not.toMatch(/statusCode === 206/);
+    expect(handlerBody).not.toMatch(/\bloadTasks\b/);
+    expect(handlerBody).not.toMatch(/\bsaveTasks\b/);
+    expect(handlerBody).not.toMatch(/\bAbortController\b/);
+  });
+
+  it('tasks:validateArtifact 使用固定脱敏兜底且 saveTasks 已删除', () => {
+    expect(source).toMatch(/'产物验证失败，请检查网络和数据目录状态'/);
+    expect(source).not.toMatch(/function\s+saveTasks\s*\(/);
+    const firstVa = source.indexOf("'tasks:validateArtifact'");
+    const handlerStart = source.indexOf("'tasks:validateArtifact'", firstVa + 1);
+    const firstSar = source.indexOf("'tasks:saveAdapterReport'");
+    const handlerEnd = source.indexOf("'tasks:saveAdapterReport'", firstSar + 1);
+    const handlerBody = source.slice(handlerStart, handlerEnd);
+    expect(handlerBody).toMatch(/catch\s*\{/);
+    expect(handlerBody).not.toMatch(/err\.message/);
   });
 });

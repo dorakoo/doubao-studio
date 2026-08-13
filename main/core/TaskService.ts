@@ -5,6 +5,7 @@ import type {
   VideoDuration,
   VideoAspectRatio,
   Task,
+  TaskArtifact,
   TaskAddParams,
   TaskAssignParams,
   TaskUpdateStatusParams,
@@ -15,6 +16,7 @@ import type {
   TaskReleaseLockParams,
   TaskRunSnapshot,
   TaskRunRecord,
+  TaskValidateArtifactParams,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv, normalizeCsvMode } from '../utils/csv';
@@ -30,6 +32,8 @@ export interface TaskServiceDependencies {
   id?: () => string;
   now?: () => string;
   nowMs?: () => number;
+  /** 产物网络探针（Electron session 探测由 IPC 层注入，Core 只消费结果） */
+  probeArtifact?: ArtifactProbe;
 }
 
 export type TaskServiceResult<T = undefined> =
@@ -62,6 +66,24 @@ export interface TaskCsvImportResultData {
   skipped: number;
   errors: string[];
 }
+
+/** 产物校验成功返回的数据 */
+export interface TaskValidateArtifactResultData {
+  valid: boolean;
+  artifact: TaskArtifact;
+}
+
+/** 产物网络探针结果：由 IPC 层注入的 Electron 探测产生 */
+export type ArtifactProbeResult =
+  | { kind: 'response'; statusCode: number; contentType?: string; contentLength?: number }
+  | { kind: 'timeout' }
+  | { kind: 'error'; message: string };
+
+/** 产物探针：Core 只消费结果，网络/session/账号解析由注入实现负责 */
+export type ArtifactProbe = (
+  artifact: TaskArtifact,
+  assignedAccountId: string | null,
+) => Promise<ArtifactProbeResult>;
 
 const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification']);
 const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
@@ -565,6 +587,57 @@ export class TaskService {
         skipped: rows.length - 1 - imported.length,
         errors: errors.slice(0, 20),
       },
+    };
+  }
+
+  /** 产物校验：查找 → 注入探针 → 四态判定 → 单次 Repository 写入（fail-closed） */
+  async validateArtifact(params: TaskValidateArtifactParams): Promise<TaskServiceResult<TaskValidateArtifactResultData>> {
+    // 1. Repository read（fail-closed）
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+
+    // 2. 查找任务与产物；不存在时零探针/零时钟/零写入
+    const task = tasks.find((item) => item.id === params.taskId);
+    const artifact = task?.artifacts?.find((item) => item.id === params.artifactId);
+    if (!task || !artifact) return { success: false, error: '产物不存在' };
+
+    // 3. 探针依赖注入（Electron 网络探测由 IPC 层提供）
+    if (!this.deps.probeArtifact) return { success: false, error: '产物验证不可用' };
+    const probe = await this.deps.probeArtifact(artifact, task.assignedAccountId);
+
+    // 4. 单次 now() — validation.checkedAt 与 task.updatedAt 共用
+    const timestamp = this.now();
+
+    // 5. 四态判定（保持既有语义：2xx 含 206 为 valid，401/403/404/410 为 expired，其余为 invalid）
+    let validation: TaskArtifact['validation'];
+    if (probe.kind === 'response') {
+      const { statusCode } = probe;
+      const state: NonNullable<TaskArtifact['validation']>['state'] =
+        statusCode >= 200 && statusCode < 300 ? 'valid'
+          : [401, 403, 404, 410].includes(statusCode) ? 'expired'
+            : 'invalid';
+      validation = {
+        state,
+        checkedAt: timestamp,
+        contentType: probe.contentType,
+        contentLength: probe.contentLength,
+        statusCode,
+      };
+    } else if (probe.kind === 'timeout') {
+      validation = { state: 'unknown', checkedAt: timestamp, error: '验证超时' };
+    } else {
+      validation = { state: 'invalid', checkedAt: timestamp, error: probe.message };
+    }
+    artifact.validation = validation;
+    task.updatedAt = timestamp;
+
+    // 6. 单次 Repository replace（fail-closed，写失败不返回成功）
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+
+    // 7. 返回：valid 标志由 state 派生，错误消息沿用 validation.error
+    return {
+      success: true,
+      data: { valid: validation.state === 'valid', artifact },
     };
   }
 }
