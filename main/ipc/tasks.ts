@@ -15,6 +15,7 @@ import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/d
 import { TaskEventStream } from '../core/TaskEventStream';
 import { TaskRepository } from '../core/TaskRepository';
 import { TaskService } from '../core/TaskService';
+import type { ArtifactProbeResult } from '../core/TaskService';
 import type {
   Task,
   TaskErrorInfo,
@@ -36,6 +37,7 @@ import type {
   CompletedOutput,
   TaskDownloadOutputsParams,
   TaskValidateArtifactParams,
+  TaskValidateArtifactResult,
   TaskSaveAdapterReportParams,
 } from '@doubao-studio/contracts';
 
@@ -67,15 +69,42 @@ const taskRepository = new TaskRepository({
   events: taskEventStream,
   warn: (message, details) => console.warn(message, details),
 });
-const taskService = new TaskService({ store: taskRepository, defaultProjectId: getDefaultProjectId });
+const taskService = new TaskService({ store: taskRepository, defaultProjectId: getDefaultProjectId, probeArtifact: createArtifactProbe() });
 
 /** 读取所有任务（含运行时归一化） */
 function loadTasks(): Task[] {
   return taskRepository.read();
 }
 
-function saveTasks(tasks: Task[]): boolean {
-  return taskRepository.replace(tasks);
+/** 产物网络探针：Electron session/partition 探测由 IPC 边界提供，Core 只消费结果 */
+function createArtifactProbe(): (artifact: TaskArtifact, assignedAccountId: string | null) => Promise<ArtifactProbeResult> {
+  return async (artifact, assignedAccountId) => {
+    const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
+    const account = accounts.find((item) => item.id === assignedAccountId);
+    const accountSession = account ? session.fromPartition(`persist:doubao_${account.partition}`) : session.defaultSession;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const response = await accountSession.fetch(artifact.url, {
+        method: 'GET',
+        headers: { Referer: 'https://www.doubao.com/', Range: 'bytes=0-0' },
+        signal: controller.signal,
+      });
+      await response.body?.cancel();
+      return {
+        kind: 'response',
+        statusCode: response.status,
+        contentType: response.headers.get('content-type') || undefined,
+        contentLength: Number(response.headers.get('content-length') || 0) || undefined,
+      };
+    } catch (err: any) {
+      return err?.name === 'AbortError'
+        ? { kind: 'timeout' }
+        : { kind: 'error', message: err?.message || '未知网络错误' };
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 }
 
 /** 读取下载记录（含运行时归一化 + 中断恢复） */
@@ -561,43 +590,18 @@ export function registerTaskIPC(): () => void {
 
   ipcMain.handle(
     'tasks:validateArtifact',
-    async (_event, params: TaskValidateArtifactParams): Promise<{ success: boolean; artifact?: TaskArtifact; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === params.taskId);
-      const artifact = task?.artifacts?.find((item) => item.id === params.artifactId);
-      if (!task || !artifact) return { success: false, error: '产物不存在' };
-      const accounts = readJSON<Array<{ id: string; partition: string }>>('accounts.json', []);
-      const account = accounts.find((item) => item.id === task.assignedAccountId);
-      const accountSession = account ? session.fromPartition(`persist:doubao_${account.partition}`) : session.defaultSession;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 15_000);
+    async (_event, params: TaskValidateArtifactParams): Promise<TaskValidateArtifactResult> => {
       try {
-        const response = await accountSession.fetch(artifact.url, {
-          method: 'GET',
-          headers: { Referer: 'https://www.doubao.com/', Range: 'bytes=0-0' },
-          signal: controller.signal,
-        });
-        await response.body?.cancel();
-        const statusCode = response.status;
-        artifact.validation = {
-          state: response.ok || statusCode === 206 ? 'valid' : [401, 403, 404, 410].includes(statusCode) ? 'expired' : 'invalid',
-          checkedAt: new Date().toISOString(),
-          contentType: response.headers.get('content-type') || undefined,
-          contentLength: Number(response.headers.get('content-length') || 0) || undefined,
-          statusCode,
+        const result = await taskService.validateArtifact(params);
+        if (!result.success) return { success: false, error: result.error };
+        return {
+          success: result.data.valid,
+          artifact: result.data.artifact,
+          error: result.data.artifact.validation?.error,
         };
-      } catch (err: any) {
-        artifact.validation = {
-          state: err.name === 'AbortError' ? 'unknown' : 'invalid',
-          checkedAt: new Date().toISOString(),
-          error: err.name === 'AbortError' ? '验证超时' : err.message,
-        };
-      } finally {
-        clearTimeout(timer);
+      } catch {
+        return { success: false, error: '产物验证失败，请检查网络和数据目录状态' };
       }
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
-      return { success: artifact.validation.state === 'valid', artifact, error: artifact.validation.error };
     }
   );
 
