@@ -1,6 +1,9 @@
 import { randomUUID } from 'crypto';
 import type {
   GenerationMode,
+  VideoModel,
+  VideoDuration,
+  VideoAspectRatio,
   Task,
   TaskAddParams,
   TaskAssignParams,
@@ -14,6 +17,7 @@ import type {
   TaskRunRecord,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
+import { parseCsv, normalizeCsvMode } from '../utils/csv';
 
 export interface TaskStore {
   read(): Task[];
@@ -37,11 +41,35 @@ export interface TaskRecoverySummary {
   clearedLocks: number;
 }
 
+/** CSV 导入时传入 Core 的最小账号投影 */
+export interface TaskCsvAccountProjection {
+  id: string;
+  name: string;
+}
+
+/** CSV 导入命令：纯文本 + 账号投影 + 可选项目 ID */
+export interface TaskCsvImportCommand {
+  text: string;
+  accounts: readonly TaskCsvAccountProjection[];
+  projectId?: string;
+}
+
+/** CSV 导入成功返回的数据 */
+export interface TaskCsvImportResultData {
+  tasks: Task[];
+  batchId: string;
+  imported: number;
+  skipped: number;
+  errors: string[];
+}
+
 const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification']);
 const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
 const RENEW_WRITE_ERROR = '任务锁续租写入失败';
 const RELEASE_WRITE_ERROR = '任务锁释放写入失败';
 const TERMINAL_STATUSES: ReadonlyArray<Task['status']> = ['done', 'fail', 'paused', 'cancelled'];
+const VALID_MODELS: readonly VideoModel[] = ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'];
+const VALID_RATIOS: readonly VideoAspectRatio[] = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'];
 
 function artifactId(url: string): string {
   let hash = 5381;
@@ -376,5 +404,167 @@ export class TaskService {
     task.updatedAt = new Date(nowMs).toISOString();
     if (!this.persist(tasks)) return { success: false, error: RELEASE_WRITE_ERROR };
     return { success: true };
+  }
+
+  /** CSV 批量导入：纯文本解析 → 字段规范化 → 账号匹配 → 依赖映射 → 单次 Repository 写入 */
+  importCsv(command: TaskCsvImportCommand): TaskServiceResult<TaskCsvImportResultData> {
+    // 1. 去除 UTF-8 BOM
+    const text = command.text.replace(/^\uFEFF/, '');
+
+    // 2. 纯解析（parseCsv 可能抛出未闭合引号错误）
+    let rows: string[][];
+    try {
+      rows = parseCsv(text);
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+
+    // 3. 结构校验：至少包含表头和一行数据
+    if (rows.length < 2) return { success: false, error: 'CSV 没有可导入的数据行' };
+
+    // 4. 识别表头列索引
+    const headers = rows[0].map((header) => header.trim().toLowerCase());
+    const indexOf = (...names: string[]): number =>
+      names.map((name) => headers.indexOf(name)).find((index) => index >= 0) ?? -1;
+    const promptIndex = indexOf('prompt', '提示词');
+
+    // 5. 结构校验：必须存在 prompt 或 提示词 列
+    if (promptIndex < 0) return { success: false, error: 'CSV 必须包含 prompt 或 提示词 列' };
+
+    // 6. 纯行处理：字段规范化、账号匹配、空行跳过（无副作用）
+    const modeIndex = indexOf('mode', '模式');
+    const modelIndex = indexOf('model', '模型');
+    const durationIndex = indexOf('duration', '时长');
+    const ratioIndex = indexOf('aspectratio', 'aspect_ratio', '比例');
+    const attachmentsIndex = indexOf('attachments', '参考图片');
+    const audioIndex = indexOf('audio', '参考音频');
+    const accountIndex = indexOf('account', '账号');
+    const dependsIndex = indexOf('depends_on', '依赖行');
+    const policyIndex = indexOf('dependency_policy', '依赖策略');
+
+    const errors: string[] = [];
+    const sourceRows: number[] = [];
+
+    interface CsvPartialTask {
+      prompt: string;
+      mode: GenerationMode;
+      assignedAccountId: string | null;
+      videoConfig: Task['videoConfig'];
+      attachments: string[] | undefined;
+      audioAttachment: string | undefined;
+      dependencyPolicy: 'all_done' | 'all_finished';
+      dependsOnRaw: string;
+    }
+    const partialTasks: CsvPartialTask[] = [];
+
+    for (let dataIndex = 1; dataIndex < rows.length; dataIndex++) {
+      const row = rows[dataIndex];
+      const prompt = (row[promptIndex] || '').trim();
+      if (!prompt) {
+        errors.push(`第 ${dataIndex + 1} 行：提示词为空`);
+        continue;
+      }
+      const mode: GenerationMode = modeIndex >= 0 ? normalizeCsvMode(row[modeIndex] || '') : 'chat';
+      const model = row[modelIndex] as VideoModel;
+      const duration = row[durationIndex] as VideoDuration;
+      const aspectRatio = row[ratioIndex] as VideoAspectRatio;
+      const accountName = accountIndex >= 0 ? (row[accountIndex] || '').trim() : '';
+      const account = accountName ? command.accounts.find((item) => item.name === accountName) : undefined;
+      if (accountName && !account) errors.push(`第 ${dataIndex + 1} 行：未找到账号「${accountName}」，任务保持未指派`);
+
+      partialTasks.push({
+        prompt,
+        mode,
+        assignedAccountId: account?.id || null,
+        videoConfig: mode === 'video' ? {
+          model: VALID_MODELS.includes(model) ? model : 'seedance-2.0',
+          duration: /^(?:[4-9]|1[0-5])s$/.test(duration) ? duration : '10s',
+          aspectRatio: VALID_RATIOS.includes(aspectRatio) ? aspectRatio : '16:9',
+        } : undefined,
+        attachments: attachmentsIndex >= 0
+          ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean)
+          : undefined,
+        audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
+        dependencyPolicy: policyIndex >= 0 && row[policyIndex] === 'all_finished' ? 'all_finished' : 'all_done',
+        dependsOnRaw: dependsIndex >= 0 ? (row[dependsIndex] || '') : '',
+      });
+      sourceRows.push(dataIndex + 1);
+    }
+
+    // 7. 零有效任务：返回 success，不调用 Repository read、ID、时钟或 replace
+    if (partialTasks.length === 0) {
+      return {
+        success: true,
+        data: {
+          tasks: [],
+          batchId: '',
+          imported: 0,
+          skipped: rows.length - 1,
+          errors: errors.slice(0, 20),
+        },
+      };
+    }
+
+    // 8. Repository read（fail-closed）
+    const existingTasks = this.readTasks();
+    if (!existingTasks) return { success: false, error: WRITE_ERROR };
+
+    // 9. 单次 now() — 整个批次共享同一时间
+    const timestamp = this.now();
+
+    // 10. 生成 batchId（后缀来自注入 ID 生成器）
+    const batchId = `batch-${timestamp.replace(/[-:.TZ]/g, '').slice(0, 14)}-${this.id().slice(0, 6)}`;
+
+    // 11. 为每个成功任务生成独立 ID 并构造 Task 对象
+    const projectId = command.projectId || this.deps.defaultProjectId();
+    const imported: Task[] = partialTasks.map((partial): Task => ({
+      id: this.id(),
+      prompt: partial.prompt,
+      assignedAccountId: partial.assignedAccountId,
+      status: 'queued',
+      mode: partial.mode,
+      videoConfig: partial.videoConfig,
+      attachments: partial.attachments,
+      audioAttachment: partial.audioAttachment,
+      result: null,
+      outputs: [],
+      artifacts: [],
+      runHistory: [],
+      batchId,
+      source: 'csv',
+      dependsOnTaskIds: [],
+      dependencyPolicy: partial.dependencyPolicy,
+      projectId,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+
+    // 12. 构造依赖关系：CSV 行号 → 本次成功导入任务的 ID
+    const taskByCsvRow = new Map(sourceRows.map((rowNumber, index) => [rowNumber, imported[index]]));
+    imported.forEach((task, index) => {
+      const partial = partialTasks[index];
+      task.dependsOnTaskIds = partial.dependsOnRaw.split('|')
+        .map((item) => Number(item.trim()))
+        .map((rowNumber) => taskByCsvRow.get(rowNumber)?.id)
+        .filter((id): id is string => !!id);
+    });
+
+    // 13. 所有有效任务一次性追加至 Repository 返回的受追踪数组
+    existingTasks.push(...imported);
+
+    // 14. 单次 Repository replace（fail-closed）
+    if (!this.persist(existingTasks)) return { success: false, error: WRITE_ERROR };
+
+    // 15. 返回结果
+    return {
+      success: true,
+      data: {
+        tasks: imported,
+        batchId,
+        imported: imported.length,
+        skipped: rows.length - 1 - imported.length,
+        errors: errors.slice(0, 20),
+      },
+    };
   }
 }

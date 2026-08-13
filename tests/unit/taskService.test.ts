@@ -849,4 +849,373 @@ describe('IPC 接线源码契约检查', () => {
     expect(loadDownloadIdx).toBeGreaterThan(throwIdx);
     expect(schemaIdx).toBeGreaterThan(throwIdx);
   });
+
+  it('tasks:importCsv 不再包含旧 CSV 业务实现，只保留薄适配', () => {
+    expect(source).not.toMatch(/import\s*\{[^}]*parseCsv/);
+    expect(source).not.toMatch(/import\s*\{[^}]*normalizeCsvMode/);
+    // 使用第二次出现，跳过 TASK_IPC_CHANNELS 数组中的第一次
+    const firstCsv = source.indexOf("'tasks:importCsv'");
+    const handlerStart = source.indexOf("'tasks:importCsv'", firstCsv + 1);
+    const firstLock = source.indexOf("'tasks:releaseLock'");
+    const handlerEnd = source.indexOf("'tasks:releaseLock'", firstLock + 1);
+    const handlerBody = source.slice(handlerStart, handlerEnd);
+    expect(handlerBody).not.toMatch(/\bparseCsv\b/);
+    expect(handlerBody).not.toMatch(/\bnormalizeCsvMode\b/);
+    expect(handlerBody).not.toMatch(/\bheaders\b/);
+    expect(handlerBody).not.toMatch(/\bpromptIndex\b/);
+    expect(handlerBody).not.toMatch(/\bloadTasks\b/);
+    expect(handlerBody).not.toMatch(/\bsaveTasks\b/);
+    expect(handlerBody).toMatch(/taskService\.importCsv\(/);
+  });
+
+  it('tasks:importCsv 文件读取异常使用固定脱敏错误', () => {
+    expect(source).toMatch(/'CSV 导入失败，请检查文件格式和数据目录状态'/);
+    const firstCsv = source.indexOf("'tasks:importCsv'");
+    const handlerStart = source.indexOf("'tasks:importCsv'", firstCsv + 1);
+    const firstLock = source.indexOf("'tasks:releaseLock'");
+    const handlerEnd = source.indexOf("'tasks:releaseLock'", firstLock + 1);
+    const handlerBody = source.slice(handlerStart, handlerEnd);
+    expect(handlerBody).toMatch(/catch\s*\{/);
+    expect(handlerBody).not.toMatch(/err\.message/);
+  });
+});
+
+// ==================== importCsv ====================
+
+const CSV_NOW = '2026-08-13T12:00:00.000Z';
+const CSV_WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+
+function csvFixture(initial: Task[] = []) {
+  let stored = structuredClone(initial);
+  let readCount = 0;
+  let writeCount = 0;
+  let idCount = 0;
+  let nowCount = 0;
+  const store = {
+    read: (): Task[] => { readCount++; return structuredClone(stored); },
+    replace: (tasks: Task[]): boolean => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  let id = 0;
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default',
+    id: (): string => { idCount++; return `uuid-${++id}`; },
+    now: (): string => { nowCount++; return CSV_NOW; },
+  });
+  return { service, stored: () => stored, readCount: () => readCount, writeCount: () => writeCount, idCount: () => idCount, nowCount: () => nowCount };
+}
+
+function csv(text: string, accounts: { id: string; name: string }[] = [], projectId?: string) {
+  return { text, accounts, projectId };
+}
+
+describe('TaskService importCsv', () => {
+  it('BOM 被移除后正常解析', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('\uFEFFprompt\nHello'));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].prompt).toBe('Hello');
+  });
+
+  it('数据行不足时明确失败', () => {
+    const { service, readCount, idCount, nowCount, writeCount } = csvFixture();
+    expect(service.importCsv(csv('prompt'))).toEqual({ success: false, error: 'CSV 没有可导入的数据行' });
+    expect(service.importCsv(csv(''))).toEqual({ success: false, error: 'CSV 没有可导入的数据行' });
+    expect(readCount()).toBe(0);
+    expect(idCount()).toBe(0);
+    expect(nowCount()).toBe(0);
+    expect(writeCount()).toBe(0);
+  });
+
+  it('缺 prompt 表头时明确失败', () => {
+    const { service, readCount, idCount, nowCount, writeCount } = csvFixture();
+    expect(service.importCsv(csv('mode\nvideo'))).toEqual({ success: false, error: 'CSV 必须包含 prompt 或 提示词 列' });
+    expect(readCount()).toBe(0);
+    expect(idCount()).toBe(0);
+    expect(nowCount()).toBe(0);
+    expect(writeCount()).toBe(0);
+  });
+
+  it('未闭合引号返回明确 CSV 错误', () => {
+    const { service, readCount, idCount, nowCount, writeCount } = csvFixture();
+    const result = service.importCsv(csv('prompt\n"broken'));
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.error).toBe('CSV 格式错误：存在未闭合的引号');
+    expect(readCount()).toBe(0);
+    expect(idCount()).toBe(0);
+    expect(nowCount()).toBe(0);
+    expect(writeCount()).toBe(0);
+  });
+
+  it.each([
+    ['prompt', 'prompt'],
+    ['提示词', '提示词'],
+    ['Prompt', 'prompt'],
+    [' 提示词 ', '提示词'],
+  ])('表头别名「%s」被正确识别', (header) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`${header}\nHello`));
+    expect(result.success).toBe(true);
+  });
+
+  it.each([
+    ['chat', 'chat'],
+    ['image', 'image'],
+    ['图片', 'image'],
+    ['video', 'video'],
+    ['视频', 'video'],
+    ['music', 'music'],
+    ['音乐', 'music'],
+    ['', 'chat'],
+    ['unknown', 'chat'],
+  ])('模式「%s」规范化为 %s', (input, expected) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`prompt,mode\nHello,${input}`));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].mode).toBe(expected);
+  });
+
+  it('合法视频参数保留', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,mode,model,duration,aspectratio\nHello,video,seedance-2.5,5s,9:16'));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].videoConfig).toEqual({ model: 'seedance-2.5', duration: '5s', aspectRatio: '9:16' });
+  });
+
+  it.each([
+    ['seedance-1.0', 'seedance-2.0'],
+    ['invalid', 'seedance-2.0'],
+  ])('非法模型「%s」回退为 %s', (input, expected) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`prompt,mode,model\nHello,video,${input}`));
+    if (result.success) expect(result.data.tasks[0].videoConfig!.model).toBe(expected);
+  });
+
+  it.each([
+    ['3s', '10s'],
+    ['16s', '10s'],
+    ['abc', '10s'],
+  ])('非法时长「%s」回退为 %s', (input, expected) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`prompt,mode,duration\nHello,video,${input}`));
+    if (result.success) expect(result.data.tasks[0].videoConfig!.duration).toBe(expected);
+  });
+
+  it.each([
+    ['2:1', '16:9'],
+    ['invalid', '16:9'],
+  ])('非法比例「%s」回退为 %s', (input, expected) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`prompt,mode,aspectratio\nHello,video,${input}`));
+    if (result.success) expect(result.data.tasks[0].videoConfig!.aspectRatio).toBe(expected);
+  });
+
+  it('非视频任务无 videoConfig', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,mode,model\nHello,chat,seedance-2.5'));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].videoConfig).toBeUndefined();
+  });
+
+  it('attachments 分隔、trim 和过滤', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,attachments\nHello, a.jpg | b.jpg | | c.jpg '));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].attachments).toEqual(['a.jpg', 'b.jpg', 'c.jpg']);
+  });
+
+  it('audioAttachment 空值规范化为 undefined', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,audio\nHello,  '));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].audioAttachment).toBeUndefined();
+  });
+
+  it('账号精确匹配', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,account\nHello,测试账号', [{ id: 'acc-1', name: '测试账号' }]));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].assignedAccountId).toBe('acc-1');
+  });
+
+  it('未知账号保持未指派并记录错误', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,account\nHello,未知', [{ id: 'acc-1', name: '测试账号' }]));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks[0].assignedAccountId).toBeNull();
+      expect(result.data.errors).toContain('第 2 行：未找到账号「未知」，任务保持未指派');
+    }
+  });
+
+  it('空 prompt 行跳过', () => {
+    const { service } = csvFixture();
+    // Row 3 has empty prompt but non-empty second field, so parseCsv keeps it
+    const result = service.importCsv(csv('prompt,depends_on\nHello\n,x\nWorld'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(2);
+      expect(result.data.imported).toBe(2);
+      expect(result.data.skipped).toBe(1);
+      expect(result.data.errors).toContain('第 3 行：提示词为空');
+    }
+  });
+
+  it('errors 最多 20 条', () => {
+    const { service } = csvFixture();
+    // 25 valid rows + 25 empty-prompt rows (with non-empty second field so parseCsv keeps them)
+    const rows = 'prompt,depends_on\n' + Array.from({ length: 25 }, (_, i) => `row${i}`).join('\n') + '\n' + Array.from({ length: 25 }, () => ',x').join('\n');
+    const result = service.importCsv(csv(rows));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.errors.length).toBeLessThanOrEqual(20);
+  });
+
+  it.each([
+    ['all_finished', 'all_finished'],
+    ['all_done', 'all_done'],
+    ['other', 'all_done'],
+    ['', 'all_done'],
+  ])('dependencyPolicy「%s」映射为 %s', (input, expected) => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv(`prompt,dependency_policy\nHello,${input}`));
+    if (result.success) expect(result.data.tasks[0].dependencyPolicy).toBe(expected);
+  });
+
+  it('依赖行正确映射', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,depends_on\nA\nB,2'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const taskA = result.data.tasks[0];
+      const taskB = result.data.tasks[1];
+      expect(taskB.dependsOnTaskIds).toEqual([taskA.id]);
+    }
+  });
+
+  it('被跳过的行不能成为依赖', () => {
+    const { service } = csvFixture();
+    // Row 2 has empty prompt (skipped), Row 3 depends on row 2 (which was skipped)
+    const result = service.importCsv(csv('prompt,depends_on\n,3\nA,2'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(1);
+      expect(result.data.tasks[0].dependsOnTaskIds).toEqual([]);
+    }
+  });
+
+  it('无效、越界和非数字依赖被过滤', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,depends_on\nA\nB,abc|2|99|1'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const taskA = result.data.tasks[0];
+      const taskB = result.data.tasks[1];
+      expect(taskB.dependsOnTaskIds).toEqual([taskA.id]);
+    }
+  });
+
+  it('projectId 显式值和默认值', () => {
+    const { service: s1 } = csvFixture();
+    const r1 = s1.importCsv(csv('prompt\nHello', [], 'custom-project'));
+    if (r1.success) expect(r1.data.tasks[0].projectId).toBe('custom-project');
+    const { service: s2 } = csvFixture();
+    const r2 = s2.importCsv(csv('prompt\nHello'));
+    if (r2.success) expect(r2.data.tasks[0].projectId).toBe('default');
+  });
+
+  it('单批次所有任务时间一致', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt\nA\nB\nC'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      for (const task of result.data.tasks) {
+        expect(task.createdAt).toBe(CSV_NOW);
+        expect(task.updatedAt).toBe(CSV_NOW);
+      }
+    }
+  });
+
+  it('任务 ID 与 batchId 唯一且格式正确', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt\nA\nB\nC'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const ids = result.data.tasks.map((t) => t.id);
+      expect(new Set(ids).size).toBe(3);
+      for (const id of ids) expect(id).toMatch(/^uuid-/);
+      expect(result.data.batchId).toMatch(/^batch-20260813120000-uuid-/);
+      expect(result.data.tasks.every((t) => t.batchId === result.data.batchId)).toBe(true);
+    }
+  });
+
+  it('多任务只调用一次 Repository replace', () => {
+    const { service, writeCount } = csvFixture();
+    service.importCsv(csv('prompt\nA\nB\nC'));
+    expect(writeCount()).toBe(1);
+  });
+});
+
+describe('TaskService importCsv fail-closed', () => {
+  it.each([
+    ['数据行不足', 'prompt', 'CSV 没有可导入的数据行'],
+    ['缺 prompt 列', 'mode\nvideo', 'CSV 必须包含 prompt 或 提示词 列'],
+    ['未闭合引号', 'prompt\n"broken', 'CSV 格式错误：存在未闭合的引号'],
+  ])('纯结构校验失败「%s」时零 read/id/now/replace', (_label, text) => {
+    const { service, readCount, idCount, nowCount, writeCount } = csvFixture();
+    service.importCsv(csv(text));
+    expect(readCount()).toBe(0);
+    expect(idCount()).toBe(0);
+    expect(nowCount()).toBe(0);
+    expect(writeCount()).toBe(0);
+  });
+
+  it('Repository read 失败时零 id/now/replace', () => {
+    let idCount = 0;
+    let nowCount = 0;
+    let writeCount = 0;
+    const service = new TaskService({
+      store: {
+        read: (): Task[] => { throw new Error('read failed'); },
+        replace: (): boolean => { writeCount++; return true; },
+      },
+      defaultProjectId: () => 'default',
+      id: (): string => { idCount++; return 'id'; },
+      now: (): string => { nowCount++; return CSV_NOW; },
+    });
+    expect(service.importCsv(csv('prompt\nHello'))).toEqual({ success: false, error: CSV_WRITE_ERROR });
+    expect(idCount).toBe(0);
+    expect(nowCount).toBe(0);
+    expect(writeCount).toBe(0);
+  });
+
+  it('Repository replace=false 时 fail-closed', () => {
+    const service = new TaskService({
+      store: { read: (): Task[] => [], replace: (): boolean => false },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => CSV_NOW,
+    });
+    expect(service.importCsv(csv('prompt\nHello'))).toEqual({ success: false, error: CSV_WRITE_ERROR });
+  });
+
+  it('Repository 陈旧快照异常时 fail-closed', () => {
+    const service = new TaskService({
+      store: { read: (): Task[] => [], replace: (): boolean => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); } },
+      defaultProjectId: () => 'default', id: () => 'id', now: () => CSV_NOW,
+    });
+    expect(service.importCsv(csv('prompt\nHello'))).toEqual({ success: false, error: CSV_WRITE_ERROR });
+  });
+
+  it('零有效任务成功且零 Repository/ID/时钟调用', () => {
+    const { service, readCount, idCount, nowCount, writeCount } = csvFixture();
+    // Row 2 has empty prompt but non-empty second field, so parseCsv keeps it
+    const result = service.importCsv(csv('prompt,depends_on\n,x'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.imported).toBe(0);
+      expect(result.data.tasks).toEqual([]);
+      expect(result.data.batchId).toBe('');
+    }
+    expect(readCount()).toBe(0);
+    expect(idCount()).toBe(0);
+    expect(nowCount()).toBe(0);
+    expect(writeCount()).toBe(0);
+  });
 });
