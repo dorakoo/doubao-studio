@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Task, TaskStage } from '@doubao-studio/contracts';
+import type { Task, TaskStage, TaskLock } from '@doubao-studio/contracts';
 import { TaskService } from '../../main/core/TaskService';
 
 function base(id: string, status: Task['status'] = 'queued'): Task {
@@ -290,5 +290,312 @@ describe('TaskService fail-closed', () => {
       defaultProjectId: () => 'default', now: () => 'now',
     });
     expect(service.batchPause()).toEqual({ success: false, error: WRITE_ERROR });
+  });
+});
+
+// ==================== updateRuntime ====================
+
+const NOW_ISO = '2026-08-13T00:00:00.000Z';
+const NOW_MS = Date.parse(NOW_ISO);
+const RUNTIME_WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+
+function runtimeFixture(initial: Task[] = []) {
+  let stored = structuredClone(initial);
+  let writeCount = 0;
+  const store = {
+    read: () => structuredClone(stored),
+    replace: (tasks: Task[]) => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default', now: () => NOW_ISO,
+  });
+  return { service, stored: () => stored, writeCount: () => writeCount };
+}
+
+describe('TaskService updateRuntime', () => {
+  it('任务不存在', () => {
+    const { service, writeCount } = runtimeFixture([base('t1')]);
+    expect(service.updateRuntime({ taskId: 'missing', status: 'done' })).toEqual({
+      success: false, error: '任务不存在',
+    });
+    expect(writeCount()).toBe(0);
+  });
+
+  it('未初始化 runtime 且 patch 缺少 runId 时拒绝并零写入', () => {
+    const { service, writeCount } = runtimeFixture([base('t1')]);
+    expect(service.updateRuntime({ taskId: 't1', runtime: { stage: 'generating' } })).toEqual({
+      success: false, error: '运行快照尚未初始化',
+    });
+    expect(writeCount()).toBe(0);
+  });
+
+  it('合并现有 runtime patch 并不重复建立 runHistory 记录', () => {
+    const item = base('t1', 'executing');
+    item.runtime = {
+      runId: 'r1', attempt: 1, stage: 'queued', message: 'old',
+      startedAt: '2026-08-12T00:00:00.000Z',
+      stageStartedAt: 'old', lastHeartbeatAt: 'old',
+      input: { prompt: 't1', mode: 'video', attachments: [] },
+    };
+    item.runHistory = [{ runId: 'r1', attempt: 1, startedAt: '2026-08-12T00:00:00.000Z' }];
+    const { service, stored } = runtimeFixture([item]);
+    expect(service.updateRuntime({
+      taskId: 't1', runtime: { stage: 'generating', message: '生成中' },
+    }).success).toBe(true);
+    const task = stored()[0];
+    expect(task.runtime?.stage).toBe('generating');
+    expect(task.runtime?.message).toBe('生成中');
+    expect(task.runtime?.runId).toBe('r1');
+    expect(task.runHistory).toHaveLength(1);
+  });
+
+  it('首次 runtime 创建 runHistory 记录', () => {
+    const { service, stored } = runtimeFixture([base('t1', 'executing')]);
+    service.updateRuntime({
+      taskId: 't1',
+      runtime: {
+        runId: 'r1', attempt: 1, stage: 'queued', message: '开始',
+        startedAt: '2026-08-12T00:00:00.000Z',
+      },
+    });
+    expect(stored()[0].runHistory).toEqual([
+      { runId: 'r1', attempt: 1, startedAt: '2026-08-12T00:00:00.000Z' },
+    ]);
+  });
+
+  it('runHistory 最多保留 20 条', () => {
+    const item = base('t1', 'executing');
+    item.runHistory = Array.from({ length: 20 }, (_, i) => ({
+      runId: `old-${i}`, attempt: i + 1, startedAt: '2026-08-01T00:00:00.000Z',
+    }));
+    const { service, stored } = runtimeFixture([item]);
+    service.updateRuntime({
+      taskId: 't1',
+      runtime: {
+        runId: 'new-r', attempt: 21, stage: 'queued', message: 'new',
+        startedAt: '2026-08-12T00:00:00.000Z',
+      },
+    });
+    const task = stored()[0];
+    expect(task.runHistory).toHaveLength(20);
+    expect(task.runHistory![19].runId).toBe('new-r');
+    expect(task.runHistory![0].runId).toBe('old-1');
+  });
+
+  it.each([
+    ['done', 'done'],
+    ['fail', 'failed'],
+    ['paused', 'paused'],
+    ['cancelled', 'cancelled'],
+  ] as const)('终态 %s 设置正确的 outcome/finalStage/errorCode/duration 且时间一致', (status, expectedOutcome) => {
+    const startedAt = '2026-08-12T00:00:00.000Z';
+    const item = base('t1', 'executing');
+    item.runtime = {
+      runId: 'r1', attempt: 1, stage: 'generating', message: '生成中',
+      startedAt, stageStartedAt: startedAt, lastHeartbeatAt: startedAt,
+      input: { prompt: 't1', mode: 'video', attachments: [] },
+    };
+    item.runHistory = [{ runId: 'r1', attempt: 1, startedAt }];
+    item.errorInfo = { code: 'timeout', message: '超时', recoverable: true, detectedAt: startedAt };
+    const { service, stored } = runtimeFixture([item]);
+    service.updateRuntime({
+      taskId: 't1', status,
+      runtime: { stage: status === 'done' ? 'completed' : status === 'fail' ? 'failed' : status },
+    });
+    const task = stored()[0];
+    const record = task.runHistory![0];
+    expect(record.outcome).toBe(expectedOutcome);
+    expect(record.finalStage).toBe(task.runtime?.stage);
+    expect(record.errorCode).toBe('timeout');
+    expect(record.durationMs).toBe(new Date(NOW_ISO).getTime() - new Date(startedAt).getTime());
+    expect(record.durationMs).toBeGreaterThanOrEqual(0);
+    expect(record.finishedAt).toBe(NOW_ISO);
+    expect(task.updatedAt).toBe(NOW_ISO);
+  });
+
+  it('errorInfo=null 清除错误', () => {
+    const item = base('t1', 'fail');
+    item.errorInfo = { code: 'timeout', message: '超时', recoverable: true, detectedAt: 'old' };
+    const { service, stored } = runtimeFixture([item]);
+    service.updateRuntime({ taskId: 't1', errorInfo: null });
+    expect(stored()[0].errorInfo).toBeUndefined();
+  });
+
+  it.each([
+    ['read 失败', () => { throw new Error('read failed'); }, () => true],
+    ['replace=false', () => [structuredClone(base('t1', 'executing'))], () => false],
+    ['陈旧快照异常', () => [structuredClone(base('t1', 'executing'))], () => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); }],
+  ])('updateRuntime 在 Repository %s 时 fail-closed', (_label, readFn, replaceFn) => {
+    const service = new TaskService({
+      store: { read: readFn as () => Task[], replace: replaceFn as () => boolean },
+      defaultProjectId: () => 'default', now: () => NOW_ISO,
+    });
+    expect(service.updateRuntime({ taskId: 't1', status: 'done' })).toEqual({
+      success: false, error: RUNTIME_WRITE_ERROR,
+    });
+  });
+});
+
+// ==================== lease ====================
+
+function leaseFixture(initial: Task[] = []) {
+  let stored = structuredClone(initial);
+  let writeCount = 0;
+  const store = {
+    read: () => structuredClone(stored),
+    replace: (tasks: Task[]) => { writeCount++; stored = structuredClone(tasks); return true; },
+  };
+  const service = new TaskService({
+    store, defaultProjectId: () => 'default',
+    now: () => new Date(NOW_MS).toISOString(), nowMs: () => NOW_MS,
+  });
+  return { service, stored: () => stored, writeCount: () => writeCount };
+}
+
+function withLock(task: Task, ownerId = 'owner-1'): Task {
+  task.lock = {
+    ownerId,
+    acquiredAt: new Date(NOW_MS).toISOString(),
+    expiresAt: new Date(NOW_MS + 60_000).toISOString(),
+  };
+  return task;
+}
+
+describe('TaskService lease', () => {
+  it('acquire 成功并写入正确锁', () => {
+    const item = base('t1', 'queued');
+    item.assignedAccountId = 'acc-1';
+    const { service, stored } = leaseFixture([item]);
+    const result = service.acquireLock({ taskId: 't1', ownerId: 'owner-1' });
+    expect(result.success).toBe(true);
+    const task = stored()[0];
+    expect(task.lock?.ownerId).toBe('owner-1');
+    expect(task.lock?.acquiredAt).toBe(new Date(NOW_MS).toISOString());
+    expect(Date.parse(task.lock!.expiresAt)).toBe(NOW_MS + 2 * 60 * 1000);
+    expect(task.updatedAt).toBe(new Date(NOW_MS).toISOString());
+  });
+
+  it('有效同账号冲突拒绝且零写入', () => {
+    const t1 = base('t1', 'queued');
+    t1.assignedAccountId = 'acc-1';
+    const t2 = base('t2', 'executing');
+    t2.assignedAccountId = 'acc-1';
+    t2.lock = { ownerId: 'other', acquiredAt: new Date(NOW_MS).toISOString(), expiresAt: new Date(NOW_MS + 60_000).toISOString() };
+    const { service, stored, writeCount } = leaseFixture([t1, t2]);
+    expect(service.acquireLock({ taskId: 't1', ownerId: 'owner-1' })).toEqual({
+      success: false, error: '该账号已经被其他任务锁定',
+    });
+    expect(writeCount()).toBe(0);
+    expect(stored()[0].lock).toBeUndefined();
+  });
+
+  it('不同账号不互相阻塞且无效 expiresAt 不形成账号冲突', () => {
+    const t1 = base('t1', 'queued'); t1.assignedAccountId = 'acc-1';
+    const t2 = base('t2', 'executing'); t2.assignedAccountId = 'acc-2';
+    t2.lock = { ownerId: 'other', acquiredAt: new Date(NOW_MS).toISOString(), expiresAt: new Date(NOW_MS + 60_000).toISOString() };
+    expect(leaseFixture([t1, t2]).service.acquireLock({ taskId: 't1', ownerId: 'owner-1' }).success).toBe(true);
+
+    const t3 = base('t3', 'queued'); t3.assignedAccountId = 'acc-1';
+    const t4 = base('t4', 'executing'); t4.assignedAccountId = 'acc-1';
+    t4.lock = { ownerId: 'other', acquiredAt: 'old', expiresAt: 'not-a-date' };
+    expect(leaseFixture([t3, t4]).service.acquireLock({ taskId: 't3', ownerId: 'owner-1' }).success).toBe(true);
+  });
+
+  it('renew 成功并更新锁', () => {
+    const item = withLock(base('t1', 'executing'), 'owner-1');
+    const { service, stored } = leaseFixture([item]);
+    const result = service.renewLock({ taskId: 't1', ownerId: 'owner-1' });
+    expect(result.success).toBe(true);
+    const task = stored()[0];
+    expect(task.lock?.ownerId).toBe('owner-1');
+    expect(Date.parse(task.lock!.expiresAt)).toBe(NOW_MS + 2 * 60 * 1000);
+    expect(task.lock?.acquiredAt).toBe(new Date(NOW_MS).toISOString());
+    expect(task.updatedAt).toBe(new Date(NOW_MS).toISOString());
+  });
+
+  it.each<{
+    label: string; lock: TaskLock | undefined; ownerId: string; expectedError: string;
+  }>([
+    { label: '缺失锁', lock: undefined, ownerId: 'owner-1', expectedError: '任务锁不存在或已过期' },
+    { label: '已过期', lock: { ownerId: 'owner-1', acquiredAt: 'old', expiresAt: new Date(NOW_MS - 1).toISOString() }, ownerId: 'owner-1', expectedError: '任务锁不存在或已过期' },
+    { label: 'owner 不匹配', lock: { ownerId: 'other', acquiredAt: 'old', expiresAt: new Date(NOW_MS + 60_000).toISOString() }, ownerId: 'owner-1', expectedError: '任务锁 owner 不匹配' },
+  ])('renew $label 时失败', ({ lock, ownerId, expectedError }) => {
+    const item = base('t1', 'executing');
+    item.lock = lock;
+    const { service, writeCount } = leaseFixture([item]);
+    expect(service.renewLock({ taskId: 't1', ownerId })).toEqual({ success: false, error: expectedError });
+    expect(writeCount()).toBe(0);
+  });
+
+  it('release 正确 owner 成功', () => {
+    const item = withLock(base('t1', 'executing'), 'owner-1');
+    const { service, stored } = leaseFixture([item]);
+    expect(service.releaseLock({ taskId: 't1', ownerId: 'owner-1' })).toEqual({ success: true });
+    expect(stored()[0].lock).toBeUndefined();
+    expect(stored()[0].updatedAt).toBe(new Date(NOW_MS).toISOString());
+  });
+
+  it('release 错误 owner 拒绝且零写入', () => {
+    const item = withLock(base('t1', 'executing'), 'owner-1');
+    const { service, stored, writeCount } = leaseFixture([item]);
+    expect(service.releaseLock({ taskId: 't1', ownerId: 'wrong' })).toEqual({
+      success: false, error: '任务锁 owner 不匹配',
+    });
+    expect(writeCount()).toBe(0);
+    expect(stored()[0].lock?.ownerId).toBe('owner-1');
+  });
+
+  it.each<[string, (s: TaskService) => { success: boolean; error?: string }]>([
+    ['acquireLock', (s) => s.acquireLock({ taskId: 'missing', ownerId: 'o' })],
+    ['renewLock', (s) => s.renewLock({ taskId: 'missing', ownerId: 'o' })],
+    ['releaseLock', (s) => s.releaseLock({ taskId: 'missing', ownerId: 'o' })],
+  ])('%s 任务不存在', (_op, call) => {
+    const { service, writeCount } = leaseFixture([base('t1')]);
+    expect(call(service)).toEqual({ success: false, error: '任务不存在' });
+    expect(writeCount()).toBe(0);
+  });
+});
+
+describe('TaskService lease fail-closed', () => {
+  const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+  const RENEW_WRITE_ERROR = '任务锁续租写入失败';
+  const RELEASE_WRITE_ERROR = '任务锁释放写入失败';
+
+  function acquireTask(): Task {
+    const t = base('t1', 'queued');
+    t.assignedAccountId = 'acc-1';
+    return t;
+  }
+  function lockedTask(): Task {
+    const t = base('t1', 'executing');
+    t.assignedAccountId = 'acc-1';
+    t.lock = { ownerId: 'owner-1', acquiredAt: new Date(NOW_MS).toISOString(), expiresAt: new Date(NOW_MS + 60_000).toISOString() };
+    return t;
+  }
+
+  type LeaseCall = (s: TaskService) => { success: boolean; error?: string };
+
+  it.each<[string, () => Task, LeaseCall, string]>([
+    ['acquireLock', acquireTask, (s) => s.acquireLock({ taskId: 't1', ownerId: 'owner-1' }), WRITE_ERROR],
+    ['renewLock', lockedTask, (s) => s.renewLock({ taskId: 't1', ownerId: 'owner-1' }), RENEW_WRITE_ERROR],
+    ['releaseLock', lockedTask, (s) => s.releaseLock({ taskId: 't1', ownerId: 'owner-1' }), RELEASE_WRITE_ERROR],
+  ])('%s 在 Repository replace=false 时 fail-closed', (_op, makeTask, call, expectedError) => {
+    const service = new TaskService({
+      store: { read: () => [structuredClone(makeTask())], replace: () => false },
+      defaultProjectId: () => 'default', nowMs: () => NOW_MS,
+    });
+    expect(call(service)).toEqual({ success: false, error: expectedError });
+  });
+
+  it.each<[string, () => Task, LeaseCall, string]>([
+    ['acquireLock', acquireTask, (s) => s.acquireLock({ taskId: 't1', ownerId: 'owner-1' }), WRITE_ERROR],
+    ['renewLock', lockedTask, (s) => s.renewLock({ taskId: 't1', ownerId: 'owner-1' }), RENEW_WRITE_ERROR],
+    ['releaseLock', lockedTask, (s) => s.releaseLock({ taskId: 't1', ownerId: 'owner-1' }), RELEASE_WRITE_ERROR],
+  ])('%s 在 Repository 抛出陈旧快照异常时 fail-closed', (_op, makeTask, call, expectedError) => {
+    const service = new TaskService({
+      store: { read: () => [structuredClone(makeTask())], replace: () => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); } },
+      defaultProjectId: () => 'default', nowMs: () => NOW_MS,
+    });
+    expect(call(service)).toEqual({ success: false, error: expectedError });
   });
 });
