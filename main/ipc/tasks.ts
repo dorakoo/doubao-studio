@@ -69,12 +69,12 @@ const taskRepository = new TaskRepository({
   events: taskEventStream,
   warn: (message, details) => console.warn(message, details),
 });
-const taskService = new TaskService({ store: taskRepository, defaultProjectId: getDefaultProjectId, probeArtifact: createArtifactProbe() });
-
-/** 读取所有任务（含运行时归一化） */
-function loadTasks(): Task[] {
-  return taskRepository.read();
-}
+const taskService = new TaskService({
+  store: taskRepository,
+  defaultProjectId: getDefaultProjectId,
+  probeArtifact: createArtifactProbe(),
+  basename: (value) => require('path').basename(value),
+});
 
 /** 产物网络探针：Electron session/partition 探测由 IPC 边界提供，Core 只消费结果 */
 function createArtifactProbe(): (artifact: TaskArtifact, assignedAccountId: string | null) => Promise<ArtifactProbeResult> {
@@ -167,8 +167,9 @@ export function registerTaskIPC(): () => void {
   writeJSON('schema.json', { version: 6, appVersion: '2.0.0', updatedAt: new Date().toISOString() });
   // ---- 获取所有任务 ----
   ipcMain.handle('tasks:list', async (): Promise<Task[]> => {
-    const tasks = loadTasks();
-    return tasks;
+    const result = taskService.getTasks();
+    if (!result.success) throw new Error(result.error);
+    return result.data;
   });
 
   // ---- 添加任务（支持批量 + 指定模式 + 视频配置 + 附件） ----
@@ -311,16 +312,9 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:getCompletedOutputs',
     async (): Promise<CompletedOutput[]> => {
-      const tasks = loadTasks();
-      return tasks
-        .filter((t) => t.status === 'done' && t.outputs.length > 0)
-        .map((t) => ({
-          taskId: t.id,
-          prompt: t.prompt,
-          outputs: t.outputs,
-          accountId: t.assignedAccountId,
-          mode: t.mode,
-        }));
+      const result = taskService.getCompletedOutputs();
+      if (!result.success) throw new Error(result.error);
+      return result.data;
     }
   );
 
@@ -548,14 +542,9 @@ export function registerTaskIPC(): () => void {
         });
         if (result.canceled || !result.filePath) return { success: false };
 
-        const tasks = loadTasks().map((task) => ({
-          ...task,
-          prompt: `[已脱敏，长度 ${task.prompt.length}]`,
-          attachments: (task.attachments || []).map((item) => path.basename(item)),
-          audioAttachment: task.audioAttachment ? path.basename(task.audioAttachment) : undefined,
-          outputs: task.outputs.map((_, index) => `[产物地址 ${index + 1}]`),
-          artifacts: (task.artifacts || []).map((artifact) => ({ ...artifact, url: '[已脱敏]' })),
-        }));
+        const tasksResult = taskService.buildTaskDiagnostics();
+        if (!tasksResult.success) return { success: false, error: tasksResult.error };
+        const tasks = tasksResult.data;
         const accounts = readJSON<Array<Record<string, any>>>('accounts.json', []).map((account) => ({
           id: account.id,
           name: account.name,

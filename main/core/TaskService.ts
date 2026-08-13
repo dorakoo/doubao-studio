@@ -17,6 +17,7 @@ import type {
   TaskRunSnapshot,
   TaskRunRecord,
   TaskValidateArtifactParams,
+  CompletedOutput,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv, normalizeCsvMode } from '../utils/csv';
@@ -34,6 +35,8 @@ export interface TaskServiceDependencies {
   nowMs?: () => number;
   /** 产物网络探针（Electron session 探测由 IPC 层注入，Core 只消费结果） */
   probeArtifact?: ArtifactProbe;
+  /** 诊断脱敏用的路径 basename（IPC 注入 path.basename；Core 默认按分隔符截取末段） */
+  basename?: (value: string) => string;
 }
 
 export type TaskServiceResult<T = undefined> =
@@ -103,11 +106,13 @@ export class TaskService {
   private readonly id: () => string;
   private readonly now: () => string;
   private readonly nowMs: () => number;
+  private readonly basename: (value: string) => string;
 
   constructor(private readonly deps: TaskServiceDependencies) {
     this.id = deps.id || randomUUID;
     this.now = deps.now || (() => new Date().toISOString());
     this.nowMs = deps.nowMs || (() => Date.now());
+    this.basename = deps.basename || ((value) => value.split(/[\\/]/).pop() || value);
   }
 
   private readTasks(): Task[] | null {
@@ -638,6 +643,48 @@ export class TaskService {
     return {
       success: true,
       data: { valid: validation.state === 'valid', artifact },
+    };
+  }
+
+  /** 只读查询：返回全部任务（零写入） */
+  getTasks(): TaskServiceResult<Task[]> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: tasks };
+  }
+
+  /** 只读查询：已完成且有产物的任务摘要（零写入） */
+  getCompletedOutputs(): TaskServiceResult<CompletedOutput[]> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    return {
+      success: true,
+      data: tasks
+        .filter((task) => task.status === 'done' && task.outputs.length > 0)
+        .map((task) => ({
+          taskId: task.id,
+          prompt: task.prompt,
+          outputs: task.outputs,
+          accountId: task.assignedAccountId,
+          mode: task.mode,
+        })),
+    };
+  }
+
+  /** 只读查询：导出诊断用的脱敏任务投影（路径名经注入 basename 收敛，零写入） */
+  buildTaskDiagnostics(): TaskServiceResult<Task[]> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    return {
+      success: true,
+      data: tasks.map((task) => ({
+        ...task,
+        prompt: `[已脱敏，长度 ${task.prompt.length}]`,
+        attachments: (task.attachments || []).map((item) => this.basename(item)),
+        audioAttachment: task.audioAttachment ? this.basename(task.audioAttachment) : undefined,
+        outputs: task.outputs.map((_, index) => `[产物地址 ${index + 1}]`),
+        artifacts: (task.artifacts || []).map((artifact) => ({ ...artifact, url: '[已脱敏]' })),
+      })),
     };
   }
 }
