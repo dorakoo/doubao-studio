@@ -11,7 +11,6 @@ import { validateDownloadResponse, classifyDownloadException } from '../utils/do
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
-import { acquireTaskLease, canReleaseTaskLease, renewTaskLease } from '../utils/taskLease';
 import { recoverInterruptedDownloads, removeExactDownloadPart } from '../utils/downloadRecovery';
 import { TaskEventStream } from '../core/TaskEventStream';
 import { TaskRepository } from '../core/TaskRepository';
@@ -266,77 +265,24 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:updateRuntime',
     async (_event, params: TaskUpdateRuntimeParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === params.taskId);
-      if (!task) return { success: false, error: '任务不存在' };
-
-      if (params.status) task.status = params.status;
-      if (params.result !== undefined) task.result = params.result;
-      if (params.errorInfo === null) task.errorInfo = undefined;
-      else if (params.errorInfo) task.errorInfo = params.errorInfo;
-      if (params.runtime) {
-        if (!task.runtime && !params.runtime.runId) {
-          return { success: false, error: '运行快照尚未初始化' };
-        }
-        task.runtime = { ...(task.runtime || {}), ...params.runtime } as TaskRunSnapshot;
-        const runtime = task.runtime;
-        task.runHistory = task.runHistory || [];
-        let record = task.runHistory.find((item) => item.runId === runtime.runId);
-        if (!record && runtime.runId && runtime.startedAt) {
-          record = { runId: runtime.runId, attempt: runtime.attempt, startedAt: runtime.startedAt };
-          task.runHistory.push(record);
-          task.runHistory = task.runHistory.slice(-20);
-        }
-        if (record && params.status && ['done', 'fail', 'paused', 'cancelled'].includes(params.status)) {
-          const finishedAt = new Date().toISOString();
-          record.finishedAt = finishedAt;
-          record.finalStage = runtime.stage;
-          record.outcome = params.status === 'fail' ? 'failed' : params.status as TaskRunRecord['outcome'];
-          record.errorCode = task.errorInfo?.code;
-          record.durationMs = Math.max(0, new Date(finishedAt).getTime() - new Date(record.startedAt).getTime());
-        }
-      }
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
-      return { success: true, task };
+      const result = taskService.updateRuntime(params);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
   ipcMain.handle(
     'tasks:acquireLock',
     async (_event, params: TaskAcquireLockParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === params.taskId);
-      if (!task) return { success: false, error: '任务不存在' };
-      const now = Date.now();
-      const accountConflict = task.assignedAccountId && tasks.some((item) =>
-        item.id !== task.id &&
-        item.assignedAccountId === task.assignedAccountId &&
-        item.lock &&
-        new Date(item.lock.expiresAt).getTime() > now
-      );
-      if (accountConflict) return { success: false, error: '该账号已经被其他任务锁定' };
-      const decision = acquireTaskLease(task.lock, params.ownerId, now);
-      if (!decision.success) return decision;
-      task.lock = decision.lock;
-      task.updatedAt = new Date().toISOString();
-      saveTasks(tasks);
-      return { success: true, task };
+      const result = taskService.acquireLock(params);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
   ipcMain.handle(
     'tasks:renewLock',
     async (_event, params: TaskRenewLockParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === params.taskId);
-      if (!task) return { success: false, error: '任务不存在' };
-      const decision = renewTaskLease(task.lock, params.ownerId, Date.now());
-      if (!decision.success) return decision;
-      task.lock = decision.lock;
-      task.updatedAt = new Date().toISOString();
-      if (!saveTasks(tasks)) return { success: false, error: '任务锁续租写入失败' };
-      return { success: true, task };
+      const result = taskService.renewLock(params);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
@@ -428,16 +374,7 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:releaseLock',
     async (_event, params: TaskReleaseLockParams): Promise<{ success: boolean; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((item) => item.id === params.taskId);
-      if (!task) return { success: false, error: '任务不存在' };
-      if (!canReleaseTaskLease(task.lock, params.ownerId)) {
-        return { success: false, error: '任务锁 owner 不匹配' };
-      }
-      task.lock = undefined;
-      task.updatedAt = new Date().toISOString();
-      if (!saveTasks(tasks)) return { success: false, error: '任务锁释放写入失败' };
-      return { success: true };
+      return taskService.releaseLock(params);
     }
   );
 

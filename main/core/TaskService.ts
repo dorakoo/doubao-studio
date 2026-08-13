@@ -1,5 +1,19 @@
 import { randomUUID } from 'crypto';
-import type { GenerationMode, Task, TaskAddParams, TaskAssignParams, TaskUpdateStatusParams, TaskUpdateInput } from '@doubao-studio/contracts';
+import type {
+  GenerationMode,
+  Task,
+  TaskAddParams,
+  TaskAssignParams,
+  TaskUpdateStatusParams,
+  TaskUpdateInput,
+  TaskUpdateRuntimeParams,
+  TaskAcquireLockParams,
+  TaskRenewLockParams,
+  TaskReleaseLockParams,
+  TaskRunSnapshot,
+  TaskRunRecord,
+} from '@doubao-studio/contracts';
+import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 
 export interface TaskStore {
   read(): Task[];
@@ -11,6 +25,7 @@ export interface TaskServiceDependencies {
   defaultProjectId: () => string;
   id?: () => string;
   now?: () => string;
+  nowMs?: () => number;
 }
 
 export type TaskServiceResult<T = undefined> =
@@ -19,6 +34,9 @@ export type TaskServiceResult<T = undefined> =
 
 const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification']);
 const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
+const RENEW_WRITE_ERROR = '任务锁续租写入失败';
+const RELEASE_WRITE_ERROR = '任务锁释放写入失败';
+const TERMINAL_STATUSES: ReadonlyArray<Task['status']> = ['done', 'fail', 'paused', 'cancelled'];
 
 function artifactId(url: string): string {
   let hash = 5381;
@@ -29,10 +47,12 @@ function artifactId(url: string): string {
 export class TaskService {
   private readonly id: () => string;
   private readonly now: () => string;
+  private readonly nowMs: () => number;
 
   constructor(private readonly deps: TaskServiceDependencies) {
     this.id = deps.id || randomUUID;
     this.now = deps.now || (() => new Date().toISOString());
+    this.nowMs = deps.nowMs || (() => Date.now());
   }
 
   private readTasks(): Task[] | null {
@@ -186,6 +206,103 @@ export class TaskService {
     }
     if (!changed) return { success: true };
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true };
+  }
+
+  updateRuntime(params: TaskUpdateRuntimeParams): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    const task = tasks.find((item) => item.id === params.taskId);
+    if (!task) return { success: false, error: '任务不存在' };
+
+    const timestamp = this.now();
+
+    if (params.status) task.status = params.status;
+    if (params.result !== undefined) task.result = params.result;
+    if (params.errorInfo === null) task.errorInfo = undefined;
+    else if (params.errorInfo) task.errorInfo = params.errorInfo;
+
+    if (params.runtime) {
+      if (!task.runtime && !params.runtime.runId) {
+        return { success: false, error: '运行快照尚未初始化' };
+      }
+      task.runtime = { ...(task.runtime || {}), ...params.runtime } as TaskRunSnapshot;
+      const runtime = task.runtime;
+      task.runHistory = task.runHistory || [];
+      let record = task.runHistory.find((item) => item.runId === runtime.runId);
+      if (!record && runtime.runId && runtime.startedAt) {
+        record = { runId: runtime.runId, attempt: runtime.attempt, startedAt: runtime.startedAt };
+        task.runHistory.push(record);
+        task.runHistory = task.runHistory.slice(-20);
+      }
+      if (record && params.status && TERMINAL_STATUSES.includes(params.status)) {
+        record.finishedAt = timestamp;
+        record.finalStage = runtime.stage;
+        record.outcome = params.status === 'fail' ? 'failed' : params.status as TaskRunRecord['outcome'];
+        record.errorCode = task.errorInfo?.code;
+        record.durationMs = Math.max(0, new Date(timestamp).getTime() - new Date(record.startedAt).getTime());
+      }
+    }
+
+    task.updatedAt = timestamp;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: task };
+  }
+
+  acquireLock(params: TaskAcquireLockParams): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    const task = tasks.find((item) => item.id === params.taskId);
+    if (!task) return { success: false, error: '任务不存在' };
+
+    const nowMs = this.nowMs();
+    const accountConflict = task.assignedAccountId && tasks.some((item) =>
+      item.id !== task.id &&
+      item.assignedAccountId === task.assignedAccountId &&
+      item.lock &&
+      Date.parse(item.lock.expiresAt) > nowMs,
+    );
+    if (accountConflict) return { success: false, error: '该账号已经被其他任务锁定' };
+
+    const decision = acquireTaskLease(task.lock, params.ownerId, nowMs);
+    if (!decision.success) return decision;
+
+    task.lock = decision.lock;
+    task.updatedAt = new Date(nowMs).toISOString();
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    return { success: true, data: task };
+  }
+
+  renewLock(params: TaskRenewLockParams): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    const task = tasks.find((item) => item.id === params.taskId);
+    if (!task) return { success: false, error: '任务不存在' };
+
+    const nowMs = this.nowMs();
+    const decision = renewTaskLease(task.lock, params.ownerId, nowMs);
+    if (!decision.success) return decision;
+
+    task.lock = decision.lock;
+    task.updatedAt = new Date(nowMs).toISOString();
+    if (!this.persist(tasks)) return { success: false, error: RENEW_WRITE_ERROR };
+    return { success: true, data: task };
+  }
+
+  releaseLock(params: TaskReleaseLockParams): TaskServiceResult {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    const task = tasks.find((item) => item.id === params.taskId);
+    if (!task) return { success: false, error: '任务不存在' };
+
+    if (!canReleaseTaskLease(task.lock, params.ownerId)) {
+      return { success: false, error: '任务锁 owner 不匹配' };
+    }
+
+    const nowMs = this.nowMs();
+    task.lock = undefined;
+    task.updatedAt = new Date(nowMs).toISOString();
+    if (!this.persist(tasks)) return { success: false, error: RELEASE_WRITE_ERROR };
     return { success: true };
   }
 }
