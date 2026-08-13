@@ -84,12 +84,6 @@ function saveTasks(tasks: Task[]): boolean {
   return taskRepository.replace(tasks);
 }
 
-function saveTasksOrError(tasks: Task[]): { success: true } | { success: false; error: string } {
-  return saveTasks(tasks)
-    ? { success: true }
-    : { success: false, error: '任务数据写入失败，请检查磁盘空间和数据目录权限' };
-}
-
 /** 读取下载记录（含运行时归一化 + 中断恢复） */
 function loadDownloadJobs(): DownloadJob[] {
   const raw = readJSON<unknown>(DOWNLOAD_STORE_FILE, []);
@@ -124,26 +118,6 @@ function getAvailableDownloadPath(fs: typeof import('fs'), path: typeof import('
     candidate = path.join(saveDir, `${parsed.name}-${suffix}${parsed.ext}`);
   }
   return candidate;
-}
-
-function resetTaskForQueue(task: Task): void {
-  task.status = 'queued';
-  task.result = null;
-  task.outputs = [];
-  task.errorInfo = undefined;
-  // 暂停/中断任务重新入队时不应继承旧运行锁，否则恢复后会被当作仍在执行。
-  task.lock = undefined;
-  if (task.runtime) {
-    const now = new Date().toISOString();
-    task.runtime = {
-      ...task.runtime,
-      stage: 'queued',
-      message: '等待执行',
-      stageStartedAt: now,
-      lastHeartbeatAt: now,
-    };
-  }
-  task.updatedAt = new Date().toISOString();
 }
 
 function recoverInterruptedTasks(): void {
@@ -232,21 +206,7 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:assign',
     async (_event, params: TaskAssignParams): Promise<{ success: boolean; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((t) => t.id === params.taskId);
-      if (!task) {
-        return { success: false, error: '任务不存在' };
-      }
-      if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
-        return { success: false, error: '任务正在自动化执行中，无法重新指派' };
-      }
-
-      task.assignedAccountId = params.accountId;
-      resetTaskForQueue(task);
-      const saved = saveTasksOrError(tasks);
-      if (!saved.success) return saved;
-
-      return { success: true };
+      return taskService.assign(params);
     }
   );
 
@@ -271,26 +231,8 @@ export function registerTaskIPC(): () => void {
         updates: TaskUpdateInput;
       }
     ): Promise<{ success: boolean; task?: Task; error?: string }> => {
-      const tasks = loadTasks();
-      const task = tasks.find((t) => t.id === params.taskId);
-      if (!task) {
-        return { success: false, error: '任务不存在' };
-      }
-
-      const prompt = params.updates?.prompt?.trim();
-      if (!prompt) {
-        return { success: false, error: '提示词不能为空' };
-      }
-
-      task.prompt = prompt;
-      task.videoConfig = params.updates.videoConfig;
-      task.attachments = params.updates.attachments?.length ? params.updates.attachments : undefined;
-      task.audioAttachment = params.updates.audioAttachment || undefined;
-      resetTaskForQueue(task);
-      const saved = saveTasksOrError(tasks);
-      if (!saved.success) return saved;
-
-      return { success: true, task };
+      const result = taskService.update(params);
+      return result.success ? { success: true, task: result.data } : result;
     }
   );
 
@@ -315,21 +257,8 @@ export function registerTaskIPC(): () => void {
   ipcMain.handle(
     'tasks:batchPause',
     async (): Promise<{ success: boolean }> => {
-      const tasks = loadTasks();
-      for (const task of tasks) {
-        if (task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') {
-          const now = new Date().toISOString();
-          task.status = 'paused';
-          task.result = '批量暂停';
-          task.errorInfo = { code: 'cancelled', message: '批量暂停', recoverable: true, detectedAt: now };
-          if (task.runtime) {
-            task.runtime = { ...task.runtime, stage: 'paused', message: '批量暂停', stageStartedAt: now, lastHeartbeatAt: now };
-          }
-          task.updatedAt = now;
-        }
-      }
-      saveTasks(tasks);
-      return { success: true };
+      const result = taskService.batchPause();
+      return { success: result.success };
     }
   );
 
