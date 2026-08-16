@@ -23,7 +23,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run test && pnpm run build"
+    "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run test && pnpm run build",
+    "cli:list": "node dist/main/cli/doubaoCliEntry.js list",
+    "mcp:server": "node dist/main/mcp/doubaoMcpServer.js"
   },
   "dependencies": {
     "@ant-design/icons": "^5.5.0",
