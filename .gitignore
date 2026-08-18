@@ -94,3 +94,5 @@ logs/
 
 # CodeGraph index
 .codegraphfix_dropdown.py
+
+data/
