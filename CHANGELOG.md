@@ -2,6 +2,25 @@
 
 本文件记录豆包工作室的重要功能变化。
 
+## [2.3.0] - 2026-08-17
+
+### CLI 与 MCP 只读边界
+
+- 新增 CLI 只读命令（`list` / `task` / `outputs` / `diagnostics`），任务域读写路径全部收敛于主进程 `TaskService`，CLI 只有只读投影，不提供任何写入口。
+- 新增 MCP stdio 服务端（`pnpm run mcp:server`）：JSON-RPC 2.0 over stdio，暴露 `doubao.list_tasks` / `doubao.get_task` 两个只读工具，供外部 MCP 客户端接入；源码零 Electron 依赖，可独立于桌面应用运行。
+- 任务域读写路径服务化收口：CSV 导入、产物校验、只读查询迁移至 `TaskService`，删除 `loadTasks` / `saveTasks` 直接读写，持久化失败不再静默成功（fail-closed）。
+
+### MCP 客户端核心
+
+- 新增 MCP stdio 客户端（`pnpm run mcp:client`）：协议核心（initialize / tools/list / tools/call / ping）、进程适配层（spawn 注入可测）、连接配置校验与 secret 脱敏（`TOKEN/KEY/SECRET/PASSWORD` 命名规则 + 显式 `secretKeys`）。
+- 客户端 CLI 提供 `tools`（连接与工具发现）、`call`（显式调用，每次追加脱敏审计记录）、`audit`（只读审计）三个命令；无内置连接、不自动连接任何服务。
+- 与 Alice-agent 只读 MCP 服务端完成生产接线验证（`agent.health` / `agent.organizations_list` / `agent.billing_usage` / `agent.billing_invoices`）。
+
+### 工程质量
+
+- 全量测试扩展至 717 项（含 MCP 客户端自举端到端、CLI/MCP 边界契约测试）。
+- `validate` 统一校验类型、lint、工程检查、测试与构建保持全绿。
+
 ## [2.2.0] - 2026-07-14
 
 ### 视频任务可靠性

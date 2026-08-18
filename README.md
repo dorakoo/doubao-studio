@@ -1,6 +1,6 @@
 # 豆包工作室 Doubao Studio
 
-[![Version](https://img.shields.io/badge/version-2.2.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
+[![Version](https://img.shields.io/badge/version-2.3.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-149eca?logo=react)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript)](https://www.typescriptlang.org/)
@@ -16,6 +16,7 @@
 
 ## 最新工作流改进
 
+- 新增 MCP（Model Context Protocol）双通道：**MCP 服务端**通过 stdio 向外部 Agent 暴露只读任务能力（`doubao.list_tasks` / `doubao.get_task`，零写入、零 Electron 依赖）；**MCP 客户端**可接入外部 MCP 服务端（如 Alice-agent 网关），支持连接配置、secret 脱敏、工具发现、显式调用与脱敏审计。
 - 视频任务在提交前会精确校验模型、时长和画面比例；任一配置未成功写入页面时，任务会停止而不是以错误参数继续提交。
 - 全局暂停后的任务会清理遗留运行锁并重新进入队列。恢复失败时会显示具体原因，避免出现界面已恢复但调度器没有动作的情况。
 - 浏览器工具栏提供“提取当前对话视频”按钮：对手动在豆包网页中生成的视频，尝试解析平台提供的原始媒体地址并直接下载，同时更新对应账号的 Seedance 预计额度。
@@ -164,6 +165,17 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 - v1 Schema 使用开放字符串枚举，客户端应忽略无法识别的新状态，为后续能力扩展保留兼容性。
 - Schema 文件位于 `schemas/capability/v1/`，设计说明见 [`docs/architecture/capability-api-schema.md`](docs/architecture/capability-api-schema.md)。
 
+### CLI 与 MCP 只读边界（v2.3）
+
+- CLI 提供 `list / task / outputs / diagnostics` 只读命令（`pnpm run cli:list`），任务域读写路径全部收敛于主进程 `TaskService`，CLI 与 MCP 只有只读投影。
+- MCP 服务端（`pnpm run mcp:server`）：JSON-RPC 2.0 over stdio，暴露 `doubao.list_tasks` / `doubao.get_task` 两个只读工具；由外部 MCP 客户端（如 Claude Desktop、Alice-agent 生态）接入。
+- MCP 客户端（`pnpm run mcp:client`）：stdio 客户端核心（initialize / tools/list / tools/call / ping），支持 `tools / call / audit` 三个只读命令：
+  - 连接配置来自用户显式提供的 JSON 文件（`--connections-file`），**无内置连接、不自动连接任何服务**。
+  - `env` 中的 secret 键（`TOKEN/KEY/SECRET/PASSWORD` 命名规则或显式 `secretKeys`）在展示与日志中一律脱敏为 `***`。
+  - `call` 是用户显式触发的唯一调用路径，每次调用追加一条脱敏审计记录（连接名/工具名/结果，不含参数值与环境变量）。
+  - 客户端已与 Alice-agent 只读 MCP 服务端（`agent.health` / `agent.organizations_list` / `agent.billing_usage` / `agent.billing_invoices`）完成生产接线验证。
+- 边界纪律：CLI/MCP 相关源码零 `electron` import，可独立于桌面应用运行与测试。
+
 ## 界面结构
 
 - **顶部工具栏**：全部暂停/继续、批量下载、下载记录、运行统计、诊断导出和设置。
@@ -213,6 +225,9 @@ pnpm run dev
 | `pnpm run build` | 构建前端与 Electron 主进程 |
 | `pnpm run dist:win` | 生成 Windows 安装包 |
 | `pnpm run pack` | 生成未安装的打包目录 |
+| `pnpm run cli:list` | 只读 CLI：列出任务 |
+| `pnpm run mcp:server` | 启动 MCP stdio 服务端（只读工具） |
+| `pnpm run mcp:client` | 启动 MCP 客户端 CLI（`tools` / `call` / `audit`） |
 
 ## 数据与隐私
 
