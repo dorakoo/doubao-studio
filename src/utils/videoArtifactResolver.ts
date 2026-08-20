@@ -15,7 +15,8 @@ export type VideoArtifactSource =
   | 'play_info'                // get_play_info 接口返回的 original_media_info / download_url
   | 'captured_response'        // SSE 响应中拦截到的原始媒体地址
   | 'conversation_scan'        // 从对话/Thread 页面结构化数据中提取的地址
-  | 'page_fallback';           // 普通 DOM 结果 URL，非原始地址
+  | 'page_fallback'            // 普通 DOM 结果 URL，非原始地址
+  | 'experimental';            // 实验直取（用户显式授权；未经官方授权，可能仍含水印）
 
 /** 解析状态 */
 export type VideoArtifactStatus =
@@ -337,6 +338,7 @@ const SOURCE_PRIORITY: Record<VideoArtifactSource, number> = {
   captured_response: 2,
   conversation_scan: 3,
   page_fallback: 4,
+  experimental: 5, // 实验直取（未经官方授权）始终最低优先
 };
 
 /**
