@@ -4245,6 +4245,7 @@ import {
   createResolvedResolution,
   createFailedResolution,
 } from './videoArtifactResolver';
+import { tryExperimentalDirectExtract } from './experimentalNoWatermark';
 
 /**
  * resolveVideoArtifact 的上下文参数。
@@ -4262,6 +4263,8 @@ export interface ResolveVideoArtifactContext {
   isManual?: boolean;
   /** 仅接受豆包官方明确确认的无水印下载地址 */
   requireWithoutWatermark?: boolean;
+  /** 实验开关：官方授权失败后尝试直接提取源文件（用户显式授权；默认关闭，候选标注 experimental） */
+  experimentalNoWatermark?: boolean;
   /** 可选的中断信号，取消后立即停止解析 */
   signal?: AbortSignal;
 }
@@ -4349,8 +4352,39 @@ export async function resolveVideoArtifact(
     attempts.push(fallbackResult.attempt);
   }
 
+  // ---- 策略 6（实验，默认关闭）：官方失败后直接提取源文件 ----
+  if (!isAborted() && ctx.experimentalNoWatermark) {
+    const expResult = await tryExperimentalStrategy(webview, resolvedVid, remainingMs());
+    candidates.push(...expResult.candidates);
+    attempts.push(expResult.attempt);
+  }
+
   // ---- 候选过滤、排序与选择 ----
   return selectBestCandidate(candidates, resolvedVid, ctx, attempts);
+}
+
+/**
+ * 策略 6（实验，默认关闭）：官方授权失败后直接提取源文件候选。
+ * 仅当 ctx.experimentalNoWatermark 且已有 vid 时执行；候选 source='experimental'，
+ * 标注未经官方授权（可能仍含水印/触发风控），由 selectBestCandidate 作为最后手段使用。
+ */
+async function tryExperimentalStrategy(
+  webview: WebviewHandle,
+  vid: string | undefined,
+  timeoutMs: number,
+): Promise<{ candidates: VideoCandidate[]; attempt: ArtifactAttempt }> {
+  if (!vid) {
+    return { candidates: [], attempt: { strategy: 'experimental', result: 'skip', reason: '无 vid' } };
+  }
+  try {
+    const candidates = await tryExperimentalDirectExtract(webview, vid, timeoutMs);
+    if (candidates.length === 0) {
+      return { candidates, attempt: { strategy: 'experimental', result: 'fail', reason: '未发现可用源文件地址' } };
+    }
+    return { candidates, attempt: { strategy: 'experimental', result: 'success', reason: `${candidates.length} 个实验候选（未经官方授权）` } };
+  } catch (err: unknown) {
+    return { candidates: [], attempt: { strategy: 'experimental', result: 'fail', reason: getErrorMessage(err) } };
+  }
 }
 
 /**
@@ -4602,11 +4636,17 @@ function selectBestCandidate(
     runId: ctx.runId,
   };
   const contextMatched = filterCandidatesByContext(candidates, filterCtx);
-  const filtered = ctx.requireWithoutWatermark
+  const officialFiltered = ctx.requireWithoutWatermark
     ? contextMatched.filter((candidate) => (
       candidate.source === 'platform_download_info' && candidate.isOriginal
     ))
     : contextMatched;
+  // 实验通道（默认关闭）：官方授权候选为空且显式开启时，把 experimental 候选作为最后手段参与选择。
+  // experimental 候选未经官方授权（可能仍含水印/触发风控），UI 必须明示来源。
+  let filtered = officialFiltered;
+  if (filtered.length === 0 && ctx.experimentalNoWatermark) {
+    filtered = contextMatched.filter((candidate) => candidate.source === 'experimental');
+  }
   const sorted = sortCandidatesByTrust(filtered);
 
   // 如果有多个原始地址候选且无法唯一匹配，标记需要人工选择
@@ -4642,8 +4682,13 @@ function selectBestCandidate(
       && attempt.reason?.includes('without_watermark=false')
     ))
     : undefined;
-  const lastError = officialWatermarkError ?? attempts.filter((a) => a.result === 'fail').pop();
-  const reason = lastError?.reason || '所有策略均未获取到视频地址';
+  const experimentalError = ctx.experimentalNoWatermark
+    ? attempts.find((attempt) => attempt.strategy === 'experimental' && attempt.result === 'fail')
+    : undefined;
+  const lastError = officialWatermarkError ?? experimentalError ?? attempts.filter((a) => a.result === 'fail').pop();
+  const reason = experimentalError
+    ? `${lastError?.reason || '官方未开放无水印'}；实验直取未获得可验证源文件（实验模式，可能仍含水印）`
+    : (lastError?.reason || '所有策略均未获取到视频地址');
   return createFailedResolution('unavailable', reason, attempts, resolvedVid);
 }
 

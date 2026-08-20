@@ -9,7 +9,7 @@
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { message, Tooltip } from 'antd';
+import { message, Tooltip, Switch, Modal } from 'antd';
 import type { Account, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
@@ -18,6 +18,7 @@ import { classifyTaskError } from '../utils/taskRuntime';
 import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
 import { automationEngine } from '../automation/AutomationEngine';
 import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
+import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 import {
   injectPrompt,
   submitPrompt,
@@ -52,6 +53,7 @@ const formatResolutionMessage = (result: VideoArtifactResolution): string => {
     captured_response: '已拦截响应',
     conversation_scan: '对话页面扫描',
     page_fallback: '页面回退地址',
+    experimental: '实验直取（未经官方授权）',
   };
   const statusLabels: Record<string, string> = {
     resolved: '已获取',
@@ -90,6 +92,31 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
   const [manualVideoExtracting, setManualVideoExtracting] = useState(false);
+  /** 实验开关（默认关闭；用户显式开启后，官方授权失败时尝试直接提取源文件） */
+  const [experimentalNoWatermark, setExperimentalNoWatermark] = useState<boolean>(() => isExperimentalNoWatermarkEnabled());
+
+  /** 切换实验开关：开启需二次确认（对抗平台能力，有账号风控风险）。 */
+  const toggleExperimentalNoWatermark = (enabled: boolean) => {
+    if (!enabled) {
+      setExperimentalNoWatermarkEnabled(false);
+      setExperimentalNoWatermark(false);
+      return;
+    }
+    Modal.confirm({
+      title: '开启实验模式：直接提取源文件？',
+      content:
+        '该模式在豆包官方未开放无水印下载时，尝试绕过官方授权直接提取源文件。' +
+        '风险：可能违反豆包服务条款、触发账号风控；提取结果可能仍含水印或无法播放。' +
+        '仅对手动提取生效，自动任务不受影响。确定开启？',
+      okText: '知晓风险，开启',
+      cancelText: '取消',
+      onOk: () => {
+        setExperimentalNoWatermarkEnabled(true);
+        setExperimentalNoWatermark(true);
+        message.warning('实验模式已开启：官方未授权时将以实验通道提取源文件（结果未经官方确认）');
+      },
+    });
+  };
 
   const accountBusy = useTaskStore((s) => s.accountBusy);
   const accountAutoState = useTaskStore((s) => s.accountAutomationState);
@@ -458,6 +485,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           runId: task.runtime?.runId,
           timeoutMs: 15000,
           isManual: true,
+          experimentalNoWatermark: isExperimentalNoWatermarkEnabled(),
         });
         if (result.status === 'resolved' && result.url) {
           const outputs = normalizeVideoUrls([result.url]);
@@ -993,6 +1021,25 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
+        </Tooltip>
+        <Tooltip
+          title={
+            experimentalNoWatermark
+              ? '实验模式已开启：官方未授权时将以实验通道提取源文件（有账号风控风险）'
+              : '实验模式（默认关闭）：官方未授权时尝试直接提取源文件，有账号风控风险'
+          }
+        >
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginLeft: 6 }}>
+            <Switch
+              size="small"
+              checked={experimentalNoWatermark}
+              onChange={toggleExperimentalNoWatermark}
+              style={{ transform: 'scale(0.8)' }}
+            />
+            <span style={{ fontSize: 10, color: experimentalNoWatermark ? '#f59e0b' : '#8a8f99', whiteSpace: 'nowrap' }}>
+              实验直取
+            </span>
+          </span>
         </Tooltip>
       </div>
 
