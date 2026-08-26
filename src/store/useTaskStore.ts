@@ -10,7 +10,6 @@
 
 import { create } from 'zustand';
 import type {
-  Account,
   Task,
   TaskStatus,
   GenerationMode,
@@ -20,7 +19,7 @@ import type {
   TaskStage,
   TaskArtifact,
 } from '../types';
-import { getAccountSchedulingScore } from '../utils/schedulingScore';
+import { getAssignedAccountBlockReason } from '../utils/queueAccountDecision';
 import { evaluateDependencies } from '../utils/dependencyEval';
 import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
@@ -55,7 +54,7 @@ interface TaskState {
   // ---- Actions ----
   loadTasks: (recoverInterrupted?: boolean) => Promise<void>;
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
-  importCsv: () => Promise<{ imported: number; skipped: number; errors: string[] } | null>;
+  importCsv: () => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
@@ -76,7 +75,12 @@ interface TaskState {
     result?: string;
   }) => Promise<void>;
   completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
-  pauseAutomation: (taskId: string, accountId: string, message?: string) => Promise<void>;
+  pauseAutomation: (
+    taskId: string,
+    accountId: string,
+    message?: string,
+    options?: { status: 'paused' | 'waiting_verification'; code?: string },
+  ) => Promise<void>;
   failAutomation: (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => Promise<void>;
 
   /** 处理队列：检查待执行任务，分配到空闲账号 */
@@ -112,18 +116,6 @@ function mergeArtifacts(task: Task, outputs: string[], source: TaskArtifact['sou
 }
 
 // evaluateDependencies 已抽取到 src/utils/dependencyEval.ts
-
-function getAccountBlockReason(account: Account | undefined, task: Task): string | null {
-  if (!account) return '指派账号不存在';
-  if (account.status === 'error') return '指派账号当前异常';
-  if (task.mode === 'video' && account.seedanceQuota?.exhausted) return '指派账号今日 Seedance 额度已用尽';
-  if (account.health?.verificationRequired) return '指派账号正在等待人工验证';
-  if (account.health?.loginState === 'expired') return '指派账号登录已失效';
-  if (account.health?.cooldownUntil && new Date(account.health.cooldownUntil).getTime() > Date.now()) return '指派账号处于自动冷却期';
-  if (account.scheduling?.enabled === false) return '指派账号已暂停调度';
-  if (account.scheduling?.manualCooldownUntil && new Date(account.scheduling.manualCooldownUntil).getTime() > Date.now()) return '指派账号处于手动冷却期';
-  return null;
-}
 
 // ==================== Store ====================
 
@@ -244,7 +236,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
     set({ tasks: [...get().tasks, ...result.tasks] });
     setTimeout(() => get().processQueue(), 0);
-    return { imported: result.imported || result.tasks.length, skipped: result.skipped || 0, errors: result.errors || [] };
+    return { tasks: result.tasks, imported: result.imported || result.tasks.length, skipped: result.skipped || 0, errors: result.errors || [] };
   },
 
   updateTask: async (taskId: string, updates: TaskUpdateInput) => {
@@ -397,7 +389,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
 
     const accountId = task.assignedAccountId;
     const assignedAccount = useAccountStore.getState().accounts.find((account) => account.id === accountId);
-    const accountBlockReason = getAccountBlockReason(assignedAccount, task);
+    const accountBlockReason = getAssignedAccountBlockReason(assignedAccount, task);
     if (accountBlockReason) {
       console.warn('[TaskStore] 账号不可调度:', accountBlockReason, accountId);
       set({ error: accountBlockReason });
@@ -606,20 +598,27 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }, 2000);
   },
 
-  pauseAutomation: async (taskId: string, accountId: string, pauseMessage = '用户已暂停') => {
+  pauseAutomation: async (
+    taskId: string,
+    accountId: string,
+    pauseMessage = '用户已暂停',
+    options?: { status: 'paused' | 'waiting_verification'; code?: string },
+  ) => {
     void window.electronAPI.logs.append({ level: 'warn', scope: 'automation', message: pauseMessage, taskId, accountId });
     const now = new Date().toISOString();
+    const targetStatus: TaskStatus = options?.status || 'paused';
+    const targetStage: TaskStage = targetStatus === 'waiting_verification' ? 'waiting_verification' : 'paused';
     const errorInfo: TaskErrorInfo = {
-      code: 'cancelled',
+      code: options?.code || 'cancelled',
       message: pauseMessage,
       recoverable: true,
       detectedAt: now,
     };
     await window.electronAPI.tasks.updateRuntime(taskId, {
-      status: 'paused',
+      status: targetStatus,
       result: pauseMessage,
       errorInfo,
-      runtime: { stage: 'paused', message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now },
+      runtime: { stage: targetStage, message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now },
     });
 
     const newExecuting = { ...get().executingTasks };
@@ -629,10 +628,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     set({
       tasks: get().tasks.map((task) => task.id === taskId ? {
         ...task,
-        status: 'paused',
+        status: targetStatus,
         result: pauseMessage,
         errorInfo,
-        runtime: task.runtime ? { ...task.runtime, stage: 'paused', message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now } : task.runtime,
+        runtime: task.runtime ? { ...task.runtime, stage: targetStage, message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now } : task.runtime,
         updatedAt: now,
       } : task),
       executingTasks: newExecuting,
@@ -750,20 +749,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         if (dependency.state !== 'ready') continue;
         const accountId = task.assignedAccountId!;
         const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-        if (getAccountBlockReason(account, task)) {
-          const candidates = useAccountStore.getState().accounts
-            .filter((candidate) => candidate.id !== accountId)
-              .map((candidate) => ({ candidate, score: getAccountSchedulingScore(candidate, state.tasks.filter((item) => item.assignedAccountId === candidate.id && ['queued', 'executing', 'generating', 'waiting_verification'].includes(item.status)).length, task.mode) }))
-            .filter((item) => Number.isFinite(item.score))
-            .sort((a, b) => a.score - b.score);
-          if (candidates[0]) {
-            handedOff = true;
-            void state.assignTask(task.id, candidates[0].candidate.id).finally(() => {
-              queueProcessing = false;
-              get().processQueue();
-            });
-            return;
-          }
+        if (getAssignedAccountBlockReason(account, task)) {
+          // 用户已明确指派的任务必须保持绑定，不得因冷却/额度/登录状态而静默改派。
+          // 自动指派只发生在任务创建或 CSV 导入阶段。
           continue;
         }
         if (!state.accountBusy[accountId]) {

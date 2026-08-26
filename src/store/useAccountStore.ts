@@ -6,7 +6,22 @@
  */
 
 import { create } from 'zustand';
-import type { Account, AccountStatus } from '../types';
+import type { Account, AccountAvailability, AccountPlatform, AccountStatus } from '../types';
+import { requireStartupAvailabilityRecheck } from '../utils/accountAvailability';
+
+function prepareAccountForRuntime(account: Account, checkedAt: string): Account {
+  return {
+    ...account,
+    pinned: account.pinned ?? false,
+    health: {
+      ...(account.health || {
+        loginState: 'unknown', verificationRequired: false, consecutiveFailures: 0,
+        successCount: 0, failureCount: 0,
+      }),
+      availability: requireStartupAvailabilityRecheck(account.health?.availability, checkedAt),
+    },
+  };
+}
 
 // ==================== 类型 ====================
 
@@ -19,12 +34,14 @@ interface AccountState {
   loading: boolean;
   /** 错误信息 */
   error: string | null;
+  availabilityChecking: Record<string, boolean>;
+  availabilityCheckRequests: Record<string, number>;
 
   // Actions
   /** 从主进程加载账号列表 */
   loadAccounts: () => Promise<void>;
   /** 添加新账号 */
-  addAccount: (name: string) => Promise<boolean>;
+  addAccount: (name: string, platform?: AccountPlatform) => Promise<boolean>;
   /** 编辑账号名称 */
   updateAccount: (id: string, name: string) => Promise<boolean>;
   /** 删除账号 */
@@ -40,6 +57,9 @@ interface AccountState {
   recordSeedanceUsage: (id: string, units: number) => Promise<void>;
   markSeedanceExhausted: (id: string) => Promise<void>;
   recordAccountOutcome: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: string) => Promise<void>;
+  setAccountAvailability: (id: string, availability: AccountAvailability) => Promise<boolean>;
+  setAvailabilityChecking: (id: string, checking: boolean) => void;
+  requestAvailabilityCheck: (id: string) => void;
   updateScheduling: (id: string, updates: Partial<NonNullable<Account['scheduling']>>) => Promise<void>;
   /** 清除错误 */
   clearError: () => void;
@@ -52,14 +72,17 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   selectedAccountId: null,
   loading: false,
   error: null,
+  availabilityChecking: {},
+  availabilityCheckRequests: {},
 
   // 加载账号列表
   loadAccounts: async () => {
     set({ loading: true, error: null });
     try {
       const accounts = await window.electronAPI.accounts.list();
-      // 兼容旧数据：如果没有 pinned 字段，默认为 false
-      const normalized = accounts.map(a => ({ ...a, pinned: a.pinned ?? false }));
+      // 打开软件后不信任上次运行的 ready；必须等当前隔离页面完成探测。
+      const checkedAt = new Date().toISOString();
+      const normalized = accounts.map((account) => prepareAccountForRuntime(account, checkedAt));
       set({ accounts: normalized, loading: false });
     } catch (err: any) {
       set({ error: err.message, loading: false });
@@ -67,12 +90,12 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   },
 
   // 添加账号
-  addAccount: async (name: string) => {
+  addAccount: async (name: string, platform: AccountPlatform = 'doubao') => {
     set({ error: null });
     try {
-      const result = await window.electronAPI.accounts.add(name);
+      const result = await window.electronAPI.accounts.add(name, platform);
       if (result.success && result.account) {
-        const accounts = [...get().accounts, result.account];
+        const accounts = [...get().accounts, prepareAccountForRuntime(result.account, new Date().toISOString())];
         set({ accounts });
         return true;
       } else {
@@ -202,6 +225,27 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
     }
   },
+
+  setAccountAvailability: async (id, availability) => {
+    const result = await window.electronAPI.accounts.setAvailability(id, availability);
+    if (!result.success || !result.account) {
+      set({ error: result.error || '账号可用性状态保存失败' });
+      return false;
+    }
+    set({ accounts: get().accounts.map((account) => account.id === id ? result.account! : account) });
+    return true;
+  },
+
+  setAvailabilityChecking: (id, checking) => set({
+    availabilityChecking: { ...get().availabilityChecking, [id]: checking },
+  }),
+
+  requestAvailabilityCheck: (id) => set({
+    availabilityCheckRequests: {
+      ...get().availabilityCheckRequests,
+      [id]: (get().availabilityCheckRequests[id] || 0) + 1,
+    },
+  }),
 
   updateScheduling: async (id, updates) => {
     const result = await window.electronAPI.accounts.updateScheduling(id, updates);

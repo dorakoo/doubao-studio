@@ -47,6 +47,7 @@ function makeValidAccount(): Account {
   return {
     id: 'acc-1',
     name: '测试账号',
+    platform: 'doubao',
     avatar: '',
     partition: 'account_abc12345',
     status: 'idle',
@@ -54,7 +55,7 @@ function makeValidAccount(): Account {
     seedanceQuota: {
       date: TODAY,
       usedUnits: 3,
-      estimatedTotalUnits: 10,
+      estimatedTotalUnits: 6,
       exhausted: false,
       updatedAt: NOW,
     },
@@ -144,7 +145,7 @@ describe('normalizeAccounts', () => {
     expect(result.data[0].seedanceQuota).toBeDefined();
     expect(result.data[0].seedanceQuota!.date).toBe(TODAY);
     expect(result.data[0].seedanceQuota!.usedUnits).toBe(0);
-    expect(result.data[0].seedanceQuota!.estimatedTotalUnits).toBe(10);
+    expect(result.data[0].seedanceQuota!.estimatedTotalUnits).toBe(6);
   });
 
   it('缺失 health 时补全为安全默认值', () => {
@@ -165,6 +166,30 @@ describe('normalizeAccounts', () => {
     expect(result.data[0].scheduling).toBeDefined();
     expect(result.data[0].scheduling!.enabled).toBe(true);
     expect(result.data[0].scheduling!.weight).toBe(1);
+  });
+
+  it('合法可用性快照原样保留，非法字段 fail-closed 归一化', () => {
+    const valid = makeValidAccount();
+    valid.health!.availability = {
+      state: 'ready', reason: 'ready', message: '账号页面正常', checkedAt: NOW, source: 'startup',
+    };
+    const normalized = normalizeAccounts([valid], NOW);
+    expect(normalized.data[0].health!.availability).toEqual(valid.health!.availability);
+
+    const invalid = makeValidAccount() as unknown as Record<string, unknown>;
+    (invalid.health as Record<string, unknown>).availability = {
+      state: 'invented', reason: 1, message: null, checkedAt: 'bad-date', source: 'invented',
+    };
+    const repaired = normalizeAccounts([invalid], NOW).data[0].health!.availability!;
+    expect(repaired).toMatchObject({ state: 'unknown', reason: 'unknown', source: 'startup', checkedAt: NOW });
+  });
+
+  it('历史账号缺失 platform 时归一为 doubao，Dola 值保持不变', () => {
+    const legacy = makeValidAccount();
+    delete (legacy as Partial<Account>).platform;
+    const dola = { ...makeValidAccount(), id: 'acc-dola', platform: 'dola' as const };
+    const result = normalizeAccounts([legacy, dola], NOW);
+    expect(result.data.map((account) => account.platform)).toEqual(['doubao', 'dola']);
   });
 
   it('缺失 partition 时从 id 生成', () => {
@@ -198,7 +223,7 @@ describe('normalizeAccounts', () => {
     account.seedanceQuota = { date: TODAY, usedUnits: 3, estimatedTotalUnits: -1, exhausted: false, updatedAt: NOW };
     const result = normalizeAccounts([account], NOW);
     expect(result.changed).toBe(true);
-    expect(result.data[0].seedanceQuota!.estimatedTotalUnits).toBe(10);
+    expect(result.data[0].seedanceQuota!.estimatedTotalUnits).toBe(6);
   });
 
   it('额度日期为昨日时重置 usedUnits 为 0', () => {
@@ -356,11 +381,11 @@ describe('normalizeAccountQuota', () => {
     expect(account.seedanceQuota!.exhausted).toBe(false);
   });
 
-  it('保留正数 estimatedTotalUnits 在跨日重置时', () => {
+  it('跨日重置时把历史总量统一为每日 6 单位', () => {
     const account = makeValidAccount();
     account.seedanceQuota = { date: '2025-01-10', usedUnits: 5, estimatedTotalUnits: 20, exhausted: false, updatedAt: PAST_ISO };
     normalizeAccountQuota(account, NOW);
-    expect(account.seedanceQuota!.estimatedTotalUnits).toBe(20);
+    expect(account.seedanceQuota!.estimatedTotalUnits).toBe(6);
   });
 });
 

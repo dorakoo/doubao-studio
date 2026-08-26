@@ -15,10 +15,12 @@ import type {
   TaskErrorInfo,
   TaskRunSnapshot,
   DownloadJob,
+  AccountAvailability,
   AccountScheduling,
 } from '../domain';
 import type {
   GenerationMode,
+  AccountPlatform,
   TaskStatus,
 } from '../enums';
 
@@ -36,6 +38,7 @@ import type {
   CsvImportResult,
   CompletedOutput,
   TaskDownloadOutputsResult,
+  PublicShareMediaDownloadResult,
   FileSelectResult,
   AudioSelectResult,
   ReadFileAsBase64Result,
@@ -84,7 +87,7 @@ export interface ElectronAPI {
   // ---- 账号管理 ----
   accounts: {
     list: () => Promise<Account[]>;
-    add: (name: string) => Promise<AccountResult>;
+    add: (name: string, platform?: AccountPlatform) => Promise<AccountResult>;
     update: (id: string, name: string) => Promise<AccountOperationResult>;
     delete: (id: string) => Promise<AccountOperationResult>;
     refresh: (id: string) => Promise<AccountOperationResult>;
@@ -92,6 +95,7 @@ export interface ElectronAPI {
     setPinned: (id: string, pinned: boolean) => Promise<{ success: boolean }>;
     updateSeedanceQuota: (id: string, action: 'consume' | 'exhausted', units?: number) => Promise<AccountResult>;
     updateHealth: (id: string, action: AccountHealthAction, errorCode?: string) => Promise<AccountResult>;
+    setAvailability: (id: string, availability: AccountAvailability) => Promise<AccountResult>;
     updateScheduling: (id: string, updates: Partial<AccountScheduling>) => Promise<AccountResult>;
     getPartition: (id: string) => Promise<string | null>;
   };
@@ -133,6 +137,7 @@ export interface ElectronAPI {
     selectAudio: () => Promise<AudioSelectResult>;
     readFileAsBase64: (filePath: string) => Promise<ReadFileAsBase64Result>;
     downloadOutputs: (outputs: CompletedOutput[], saveDir?: string) => Promise<TaskDownloadOutputsResult>;
+    downloadPublicShareMedia: (shareUrl: string, saveDir?: string) => Promise<PublicShareMediaDownloadResult>;
     listDownloads: () => Promise<DownloadJob[]>;
     exportDiagnostics: () => Promise<ExportDiagnosticsResult>;
     validateArtifact: (taskId: string, artifactId: string) => Promise<TaskValidateArtifactResult>;

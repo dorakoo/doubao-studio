@@ -10,6 +10,7 @@
 import type {
   GenerationMode,
   AccountStatus,
+  AccountPlatform,
   TaskStatus,
   TaskStage,
   TaskErrorCode,
@@ -18,6 +19,9 @@ import type {
   VideoAspectRatio,
   DependencyPolicy,
   SeedanceQuota,
+  AccountAvailabilityState,
+  AccountAvailabilitySource,
+  AccountAvailability,
   AccountHealth,
   AccountScheduling,
   Account,
@@ -42,6 +46,7 @@ import type {
 export type {
   GenerationMode,
   AccountStatus,
+  AccountPlatform,
   TaskStatus,
   TaskStage,
   TaskErrorCode,
@@ -50,6 +55,9 @@ export type {
   VideoAspectRatio,
   DependencyPolicy,
   SeedanceQuota,
+  AccountAvailabilityState,
+  AccountAvailabilitySource,
+  AccountAvailability,
   AccountHealth,
   AccountScheduling,
   Account,
@@ -75,7 +83,8 @@ export type {
 
 /** 视频配置默认值 */
 export const DEFAULT_VIDEO_CONFIG = {
-  model: 'seedance-2.0' as VideoModel,
+  // 当前普通账号页面默认可用项；标准版会触发会员升级弹层，不能作为无探测默认值。
+  model: 'seedance-2.0-mini' as VideoModel,
   duration: '10s' as VideoDuration,
   aspectRatio: '16:9' as VideoAspectRatio,
 };
@@ -90,10 +99,10 @@ export const VIDEO_MODEL_LABELS: Record<VideoModel, string> = {
 
 /** 视频模型消耗说明 */
 export const VIDEO_MODEL_COST: Record<VideoModel, string> = {
-  'seedance-2.5': '页面实时显示',
-  'seedance-2.0': '2 倍消耗',
-  'seedance-2.0-fast': '快速出片',
-  'seedance-2.0-mini': '日常使用',
+  'seedance-2.5': '每 5 秒 1 单位',
+  'seedance-2.0': '每 5 秒 1 单位',
+  'seedance-2.0-fast': '每 5 秒 1 单位',
+  'seedance-2.0-mini': '每 5 秒 1 单位',
 };
 
 /** 生成模式配置 */

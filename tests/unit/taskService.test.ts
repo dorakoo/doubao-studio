@@ -59,6 +59,41 @@ describe('TaskService 核心用例', () => {
     expect(stored()[0].lock).toBeUndefined(); expect(stored()[0].errorInfo).toBeUndefined();
   });
 
+  it('等待验证任务允许在人工处理后重新入队，真正运行中仍拒绝重试', () => {
+    const waiting = withRuntime(base('waiting', 'waiting_verification'), 'waiting_verification');
+    waiting.errorInfo = {
+      code: 'human_verification', message: '需要人工验证', recoverable: true, detectedAt: 'old',
+    };
+    const waitingFixture = fixture([waiting]);
+    expect(waitingFixture.service.retry('waiting').success).toBe(true);
+    expect(waitingFixture.stored()[0]).toMatchObject({
+      status: 'queued', errorInfo: undefined, runtime: { stage: 'queued', message: '等待执行' },
+    });
+
+    for (const status of ['executing', 'generating'] as const) {
+      expect(fixture([base(status, status)]).service.retry(status)).toEqual({
+        success: false, error: '任务正在执行中，无法重试',
+      });
+    }
+  });
+
+  it('已有提交记录且提交不确定时禁止重试，兼容旧 cancelled 现场', () => {
+    for (const errorInfo of [
+      { code: 'submission_uncertain', message: '待核对', recoverable: true, detectedAt: 'old' },
+      { code: 'cancelled', message: '发送按钮不可用或点击结果不确定', recoverable: true, detectedAt: 'old' },
+    ]) {
+      const item = withRuntime(base(`t-${errorInfo.code}`, 'paused'), 'paused');
+      item.runtime!.submittedAt = '2026-08-24T11:41:00.458Z';
+      item.errorInfo = errorInfo;
+      const state = fixture([item]);
+      expect(state.service.retry(item.id)).toEqual({
+        success: false,
+        error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送',
+      });
+      expect(state.stored()[0].status).toBe('paused');
+    }
+  });
+
   it('Repository 冲突或写盘异常统一返回安全失败', () => {
     const service = new TaskService({
       store: { read: () => [], replace: () => { throw new Error('TASK_REPOSITORY_STALE_SNAPSHOT'); } },
@@ -350,6 +385,32 @@ describe('TaskService updateRuntime', () => {
     expect(task.runtime?.message).toBe('生成中');
     expect(task.runtime?.runId).toBe('r1');
     expect(task.runHistory).toHaveLength(1);
+  });
+
+  it('新 run 替换旧快照，不继承旧 submittedAt 与 conversationUrl', () => {
+    const item = base('t1', 'paused');
+    item.runtime = {
+      runId: 'old-run', attempt: 1, stage: 'paused', message: '待核对',
+      startedAt: '2026-08-12T00:00:00.000Z', stageStartedAt: 'old', lastHeartbeatAt: 'old',
+      submittedAt: '2026-08-12T00:00:10.000Z', conversationUrl: 'https://www.doubao.com/chat/old',
+      input: { prompt: 't1', mode: 'video', attachments: [] },
+    };
+    item.runHistory = [{ runId: 'old-run', attempt: 1, startedAt: item.runtime.startedAt }];
+    const { service, stored } = runtimeFixture([item]);
+
+    expect(service.updateRuntime({
+      taskId: 't1', status: 'executing',
+      runtime: {
+        runId: 'new-run', attempt: 2, stage: 'preparing_account', message: '准备执行',
+        startedAt: '2026-08-12T01:00:00.000Z', stageStartedAt: 'now', lastHeartbeatAt: 'now',
+        input: { prompt: 't1', mode: 'video', attachments: [] },
+      },
+    }).success).toBe(true);
+
+    expect(stored()[0].runtime).toMatchObject({ runId: 'new-run', attempt: 2, stage: 'preparing_account' });
+    expect(stored()[0].runtime?.submittedAt).toBeUndefined();
+    expect(stored()[0].runtime?.conversationUrl).toBeUndefined();
+    expect(stored()[0].runHistory?.map((run) => run.runId)).toEqual(['old-run', 'new-run']);
   });
 
   it('首次 runtime 创建 runHistory 记录', () => {
@@ -905,7 +966,7 @@ function csvFixture(initial: Task[] = []) {
   return { service, stored: () => stored, readCount: () => readCount, writeCount: () => writeCount, idCount: () => idCount, nowCount: () => nowCount };
 }
 
-function csv(text: string, accounts: { id: string; name: string }[] = [], projectId?: string) {
+function csv(text: string, accounts: { id: string; name: string; platform?: 'doubao' | 'dola' }[] = [], projectId?: string) {
   return { text, accounts, projectId };
 }
 
@@ -967,12 +1028,21 @@ describe('TaskService importCsv', () => {
     ['music', 'music'],
     ['音乐', 'music'],
     ['', 'chat'],
-    ['unknown', 'chat'],
   ])('模式「%s」规范化为 %s', (input, expected) => {
     const { service } = csvFixture();
     const result = service.importCsv(csv(`prompt,mode\nHello,${input}`));
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.tasks[0].mode).toBe(expected);
+  });
+
+  it('填写未知模式时跳过该行并返回行号错误', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,mode\nHello,unknown'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors).toContain('第 2 行：模式「unknown」无效');
+    }
   });
 
   it('合法视频参数保留', () => {
@@ -985,29 +1055,45 @@ describe('TaskService importCsv', () => {
   it.each([
     ['seedance-1.0', 'seedance-2.0'],
     ['invalid', 'seedance-2.0'],
-  ])('非法模型「%s」回退为 %s', (input, expected) => {
+  ])('非法模型「%s」跳过任务', (input) => {
     const { service } = csvFixture();
     const result = service.importCsv(csv(`prompt,mode,model\nHello,video,${input}`));
-    if (result.success) expect(result.data.tasks[0].videoConfig!.model).toBe(expected);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors[0]).toContain('视频模型');
+    }
+  });
+
+  it('视频模型留空时使用普通账号可用的 Mini 默认值', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,mode,model,duration,aspectratio\nHello,video,,5s,16:9'));
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.tasks[0].videoConfig?.model).toBe('seedance-2.0-mini');
   });
 
   it.each([
     ['3s', '10s'],
     ['16s', '10s'],
     ['abc', '10s'],
-  ])('非法时长「%s」回退为 %s', (input, expected) => {
+  ])('非法时长「%s」跳过任务', (input) => {
     const { service } = csvFixture();
     const result = service.importCsv(csv(`prompt,mode,duration\nHello,video,${input}`));
-    if (result.success) expect(result.data.tasks[0].videoConfig!.duration).toBe(expected);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors[0]).toContain('视频时长');
+    }
   });
 
   it.each([
     ['2:1', '16:9'],
     ['invalid', '16:9'],
-  ])('非法比例「%s」回退为 %s', (input, expected) => {
+  ])('非法比例「%s」跳过任务', (input) => {
     const { service } = csvFixture();
     const result = service.importCsv(csv(`prompt,mode,aspectratio\nHello,video,${input}`));
-    if (result.success) expect(result.data.tasks[0].videoConfig!.aspectRatio).toBe(expected);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors[0]).toContain('画面比例');
+    }
   });
 
   it('非视频任务无 videoConfig', () => {
@@ -1038,13 +1124,27 @@ describe('TaskService importCsv', () => {
     if (result.success) expect(result.data.tasks[0].assignedAccountId).toBe('acc-1');
   });
 
-  it('未知账号保持未指派并记录错误', () => {
+  it('未知账号跳过任务并记录错误', () => {
     const { service } = csvFixture();
     const result = service.importCsv(csv('prompt,account\nHello,未知', [{ id: 'acc-1', name: '测试账号' }]));
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.tasks[0].assignedAccountId).toBeNull();
-      expect(result.data.errors).toContain('第 2 行：未找到账号「未知」，任务保持未指派');
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors).toContain('第 2 行：未找到账号「未知」');
+    }
+  });
+
+  it('账号可按 ID 或平台前缀解析，跨平台重名不猜测', () => {
+    const accounts = [
+      { id: 'db-1', name: '运营号', platform: 'doubao' as const },
+      { id: 'dola-1', name: '运营号', platform: 'dola' as const },
+    ];
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,account\nA,db-1\nB,dola:运营号\nC,运营号', accounts));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks.map((task) => task.assignedAccountId)).toEqual(['db-1', 'dola-1']);
+      expect(result.data.errors).toContain('第 4 行：账号「运营号」存在重名，请使用平台前缀或账号 ID');
     }
   });
 
@@ -1073,12 +1173,21 @@ describe('TaskService importCsv', () => {
   it.each([
     ['all_finished', 'all_finished'],
     ['all_done', 'all_done'],
-    ['other', 'all_done'],
     ['', 'all_done'],
   ])('dependencyPolicy「%s」映射为 %s', (input, expected) => {
     const { service } = csvFixture();
     const result = service.importCsv(csv(`prompt,dependency_policy\nHello,${input}`));
     if (result.success) expect(result.data.tasks[0].dependencyPolicy).toBe(expected);
+  });
+
+  it('填写未知 dependencyPolicy 时跳过该行', () => {
+    const { service } = csvFixture();
+    const result = service.importCsv(csv('prompt,dependency_policy\nHello,other'));
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tasks).toHaveLength(0);
+      expect(result.data.errors[0]).toContain('依赖策略');
+    }
   });
 
   it('依赖行正确映射', () => {

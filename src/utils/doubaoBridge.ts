@@ -111,6 +111,31 @@ function getErrorMessage(err: unknown): string {
   return String(err);
 }
 
+/**
+ * 豆包编辑器会把换行折叠为空格，并可能插入 NBSP/零宽字符。
+ * 只规范这些无语义差异；标点、引号、英文台词和字符顺序必须完整保留。
+ */
+export function normalizePromptForComposer(value: string): string {
+  return value
+    .replace(/\u00a0/g, ' ')
+    .replace(/[\u200b-\u200d\ufeff]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 发送前的权威条件：编辑器内容必须与任务提示词全文等值。 */
+export function isExactPromptInComposer(expected: string, actual: string): boolean {
+  return normalizePromptForComposer(expected) === normalizePromptForComposer(actual);
+}
+
+/**
+ * Electron 逐字符键盘只用于单行 ASCII；中文、弯引号及多行文本走整段编辑器输入，
+ * 避免 keyCode 不支持时在英文台词前静默截断。
+ */
+export function canUseNativePerCharacterInput(prompt: string): boolean {
+  return prompt.length <= 500 && /^[\x20-\x7e]*$/.test(prompt);
+}
+
 // ==================== 注入提示词 ====================
 
 /**
@@ -164,9 +189,22 @@ export async function injectPrompt(
   const wasVideoMode = await videoModeGuard();
   console.log(`[doubaoBridge] 注入前按钮状态: ${initialBtnReady ? '已激活' : '未激活'}`);
 
+  // 普通对话的 contenteditable 是 React 受控节点。先用真实键盘写入，避免
+  // DOM 注入只改变可见文字、却没有更新 React 提交状态，造成“按钮清空但未发送”。
+  let charByCharTried = false;
+  if (typeof webview.sendInputEvent === 'function' && prompt.length <= 500) {
+    charByCharTried = true;
+    const nativeResult = await injectCharByChar(webview, prompt);
+    if (nativeResult) {
+      console.log('[doubaoBridge] 优先真实键盘注入成功');
+      return true;
+    }
+    console.warn('[doubaoBridge] 优先真实键盘注入失败，回退兼容注入');
+  }
+
   // 如果按钮本来就激活（如视频模式有图就激活），按钮状态不能作为验证标准
   // 直接走逐字输入（模拟真实按键，React 100% 捕获）
-  if (initialBtnReady) {
+  if (initialBtnReady && !charByCharTried) {
     console.log('[doubaoBridge] 按钮初始已激活，直接使用逐字输入确保 React 状态同步');
     const charResult = await injectCharByChar(webview, prompt);
     if (charResult) {
@@ -175,8 +213,6 @@ export async function injectPrompt(
     }
     console.warn('[doubaoBridge] 逐字输入失败，尝试常规注入 + DOM 验证');
   }
-
-  let charByCharTried = initialBtnReady; // 如果初始按钮已激活，上面已经试过了
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     console.log(`[doubaoBridge] injectPrompt 第 ${attempt}/${maxRetries} 次尝试`);
@@ -221,6 +257,51 @@ export async function injectPrompt(
 
   console.error('[doubaoBridge] injectPrompt 全部重试失败');
   return false;
+}
+
+/**
+ * 发送前独立回读当前可见编辑器。任何截断、丢失台词或标点变化都返回 false，
+ * 调用方必须在产生外部副作用前停止。
+ */
+export async function verifyPromptReadyForSubmission(
+  webview: WebviewHandle,
+  prompt: string,
+): Promise<boolean> {
+  const expectedNormalized = JSON.stringify(normalizePromptForComposer(prompt));
+  const code = `
+    (function() {
+      try {
+        var expected = ${expectedNormalized};
+        var normalize = function(value) {
+          return String(value || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/[\u200b-\u200d\ufeff]/g, '')
+            .replace(/\\s+/g, ' ')
+            .trim();
+        };
+        var editors = document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+        for (var i = 0; i < editors.length; i++) {
+          var editor = editors[i];
+          if (editor.offsetParent === null) continue;
+          if (editor.disabled || editor.getAttribute('aria-disabled') === 'true') continue;
+          var rect = editor.getBoundingClientRect();
+          if (rect.width < 50 || rect.height < 20 || rect.top < 0 || rect.top > window.innerHeight) continue;
+          var actual = editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT'
+            ? editor.value
+            : (editor.innerText || editor.textContent || '');
+          if (normalize(actual) === expected) return true;
+        }
+        return false;
+      } catch(e) {
+        return false;
+      }
+    })()
+  `;
+  try {
+    return await safeExecuteJS<boolean>(webview, code, 5000, 'verifyPromptReadyForSubmission');
+  } catch {
+    return false;
+  }
 }
 
 /** 逐字输入兜底（单独函数，确保 React 状态 100% 同步） */
@@ -345,17 +426,17 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
   // ========== 第二步：优先使用真实键盘事件（sendInputEvent）==========
   // 短文本用真实键盘更可靠，长文本直接走 JS 批量注入更快（避免数千事件卡死页面）
   const wv = webview as any;
-  const useRealKeyboard = typeof wv.sendInputEvent === 'function' && promptText.length <= 500;
+  const useRealKeyboard = typeof wv.sendInputEvent === 'function' && canUseNativePerCharacterInput(promptText);
   if (useRealKeyboard) {
     try {
       console.log('[doubaoBridge] 使用真实键盘事件输入 (sendInputEvent)');
-      const chars = promptText.split('');
+      // 裸 Enter 在豆包 composer 中等价于“发送”。输入阶段必须把换行规范为
+      // 空格，绝不能用 Enter/回车模拟多行文本，否则会把一条提示词拆成多次提交。
+      const nativePromptText = promptText.replace(/\r\n?|\n/g, ' ');
+      const chars = nativePromptText.split('');
       for (let i = 0; i < chars.length; i++) {
         const ch = chars[i];
-        if (ch === '\n' || ch === '\r') {
-          wv.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
-          wv.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
-        } else if (ch === '\b') {
+        if (ch === '\b') {
           wv.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
           wv.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
         } else {
@@ -372,11 +453,20 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
       await sleep(300);
 
       // 验证：读取 DOM 内容长度
+      const expectedNormalized = JSON.stringify(normalizePromptForComposer(nativePromptText));
       const verifyCode = `
         (function() {
           try {
             var inputType = '${prepareResult.inputType}';
-            var expectedLen = ${promptText.length};
+            var expectedLen = ${nativePromptText.length};
+            var expectedNormalized = ${expectedNormalized};
+            var normalize = function(value) {
+              return String(value || '')
+                .replace(/\u00a0/g, ' ')
+                .replace(/[\u200b-\u200d\ufeff]/g, '')
+                .replace(/\\s+/g, ' ')
+                .trim();
+            };
             var input = null;
 
             var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
@@ -436,7 +526,7 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
             } catch(e) {}
 
             return {
-              ok: actualLen >= expectedLen * 0.8,
+              ok: normalize(actualText) === expectedNormalized,
               actualLen: actualLen,
               expectedLen: expectedLen,
               hasFiber: hasFiber,
@@ -466,10 +556,19 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
   // ========== 第三步：回退 - JS 模拟逐字输入 + React Fiber 强制同步 ==========
   console.log('[doubaoBridge] 使用 JS 模拟逐字输入');
   const safePrompt = JSON.stringify(promptText);
+  const fallbackExpectedNormalized = JSON.stringify(normalizePromptForComposer(promptText));
   const fallbackCode = `
     (function() {
       try {
         var targetPrompt = ${safePrompt};
+        var expectedNormalized = ${fallbackExpectedNormalized};
+        var normalize = function(value) {
+          return String(value || '')
+            .replace(/\u00a0/g, ' ')
+            .replace(/[\u200b-\u200d\ufeff]/g, '')
+            .replace(/\\s+/g, ' ')
+            .trim();
+        };
         var placeholderKeywords = ['描述你想要的视频', '描述你想要的图片', '描述你想要的图像', '输入消息', '请输入', '说点什么', '发消息', '输入内容'];
         var viewportH = window.innerHeight;
         var input = null;
@@ -790,8 +889,9 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
           } catch(e) { return false; }
         })();
 
-        var actualLen = inputType === 'textarea' ? input.value.length : input.innerText.length;
-        var ok = actualLen >= targetPrompt.length * 0.8;
+        var actualText = inputType === 'textarea' ? input.value : input.innerText;
+        var actualLen = actualText.length;
+        var ok = normalize(actualText) === expectedNormalized;
         return { ok: ok, actualLen: actualLen, method: 'char-by-char-js' };
       } catch(e) {
         return { ok: false, error: e.message };
@@ -816,146 +916,90 @@ async function injectCharByChar(webview: WebviewHandle, promptText: string): Pro
 }
 
 
-async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
+export interface SendButtonTarget {
+  ok: boolean;
+  position?: string;
+  method?: string;
+}
+
+/**
+ * 注入前检查与最终点击共用同一定位器，避免“检查放行、点击找不到”的矛盾。
+ * 除旧版权威 ID 外，只接受当前可见编辑器所属 composer 内，具备发送语义或
+ * 明确主色背景的右侧方形控件；语音、更多、下拉菜单均被排除。
+ */
+export async function findSendButtonTarget(webview: WebviewHandle): Promise<SendButtonTarget> {
   const code = `
     (function() {
       try {
-        // 找发送按钮（和 submitPrompt 相同的优先级）
-        var btn = null;
+        var visible = function(el) {
+          if (!el || el.offsetParent === null) return false;
+          var style = window.getComputedStyle(el);
+          var rect = el.getBoundingClientRect();
+          return style.visibility !== 'hidden' && style.display !== 'none' &&
+            style.pointerEvents !== 'none' && parseFloat(style.opacity || '1') >= 0.5 &&
+            rect.width > 0 && rect.height > 0;
+        };
+        var enabled = function(el) {
+          return visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true' &&
+            el.getAttribute('data-disabled') !== 'true';
+        };
+        var finish = function(button, method) {
+          if (!enabled(button)) return { ok: false };
+          var rect = button.getBoundingClientRect();
+          return { ok: true, method: method,
+            position: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2) };
+        };
 
-        // 策略A：aria-label
-        var ariaSelectors = [
-          'button[aria-label*="发送"]',
-          'button[aria-label*="Send"]',
-          'button[aria-label*="send"]',
-          'button[aria-label*="提交"]',
-        ];
-        for (var s = 0; s < ariaSelectors.length; s++) {
-          var b = document.querySelector(ariaSelectors[s]);
-          if (b && b.offsetParent !== null) { btn = b; break; }
+        var exact = document.querySelector('#flow-end-msg-send');
+        if (enabled(exact)) return finish(exact, 'exact-id');
+
+        var editors = document.querySelectorAll('textarea, [contenteditable="true"]');
+        var editor = null;
+        for (var i = 0; i < editors.length; i++) {
+          if (visible(editors[i])) { editor = editors[i]; break; }
         }
-
-        // 策略B：textarea 附近最后一个 button
-        if (!btn) {
-          var textareas = document.querySelectorAll('textarea');
-          var foundTa = null;
-          for (var i = 0; i < textareas.length; i++) {
-            if (textareas[i].offsetParent !== null) { foundTa = textareas[i]; break; }
-          }
-          if (foundTa) {
-            var container = foundTa.parentElement;
-            for (var level = 0; level < 8 && container; level++) {
-              var buttons = container.querySelectorAll('button');
-              for (var bi = buttons.length - 1; bi >= 0; bi--) {
-                if (buttons[bi].offsetParent !== null) {
-                  btn = buttons[bi];
-                  break;
-                }
-              }
-              if (btn) break;
-              container = container.parentElement;
+        if (!editor) return { ok: false };
+        var editorRect = editor.getBoundingClientRect();
+        var root = editor.parentElement;
+        for (var depth = 0; depth < 12 && root; depth++, root = root.parentElement) {
+          var controls = root.querySelectorAll('button, [role="button"], [data-testid], [aria-label], [title]');
+          var matches = [];
+          for (var j = 0; j < controls.length; j++) {
+            var control = controls[j];
+            if (!enabled(control)) continue;
+            if (control.getAttribute('aria-haspopup')) continue;
+            var descriptor = [control.id, control.getAttribute('aria-label'), control.getAttribute('title'),
+              control.getAttribute('data-testid'), control.getAttribute('data-action'), control.innerText]
+              .filter(Boolean).join(' ').toLowerCase();
+            if (/麦克风|语音|voice|microphone|audio|更多|more/.test(descriptor)) continue;
+            var rect = control.getBoundingClientRect();
+            var nearRight = rect.left >= editorRect.right - 180 && rect.left <= editorRect.right + 120;
+            var nearVertical = rect.top <= editorRect.bottom + 80 && rect.bottom >= editorRect.top - 40;
+            var square = rect.width >= 24 && rect.width <= 64 && rect.height >= 24 && rect.height <= 64;
+            var semantic = /发送|提交|生成|send|submit|generate/.test(descriptor);
+            var rgb = (window.getComputedStyle(control).backgroundColor || '').match(/\d+/g);
+            var accent = !!(rgb && rgb.length >= 3 && Number(rgb[2]) > Number(rgb[0]) && Number(rgb[2]) > Number(rgb[1]) && Number(rgb[2]) > 120);
+            if (nearRight && nearVertical && square && (semantic || accent)) {
+              matches.push({ el: control, semantic: semantic, accent: accent });
             }
           }
+          if (matches.length === 1) return finish(matches[0].el, matches[0].semantic ? 'composer-semantic' : 'composer-accent');
         }
-
-        // 策略C：contenteditable 附近的发送按钮（视频/图片模式）
-        // 增强版：收集候选+打分排序，排除语音/麦克风按钮，优先匹配箭头图标和蓝色圆形
-        if (!btn) {
-          var editables = document.querySelectorAll('[contenteditable="true"]');
-          var targetEd = null;
-          for (var ei = 0; ei < editables.length; ei++) {
-            var ed = editables[ei];
-            if (ed.offsetParent !== null) { targetEd = ed; break; }
-          }
-          if (targetEd) {
-            var candidatesC = [];
-            var parentC = targetEd.parentElement;
-            for (var lvl = 0; lvl < 6 && parentC; lvl++) {
-              var allBtnsC = parentC.querySelectorAll('button, [role="button"]');
-              for (var bj = 0; bj < allBtnsC.length; bj++) {
-                var elC = allBtnsC[bj];
-                if (elC.offsetParent === null) continue;
-                var rectC = elC.getBoundingClientRect();
-                var edRectC = targetEd.getBoundingClientRect();
-                // 在输入框右下角区域
-                if (rectC.left > edRectC.right - 100 && rectC.top > edRectC.bottom - 60) {
-                  var score = 0;
-                  var htmlC = elC.outerHTML || '';
-                  var svgHtml = '';
-                  var svgs = elC.querySelectorAll('svg');
-                  for (var si = 0; si < svgs.length; si++) {
-                    svgHtml += svgs[si].outerHTML || '';
-                  }
-                  // 箭头/发送图标加分
-                  if (svgHtml.indexOf('arrow') >= 0 || svgHtml.indexOf('Arrow') >= 0 ||
-                      svgHtml.indexOf('send') >= 0 || svgHtml.indexOf('Send') >= 0 ||
-                      svgHtml.indexOf('paper-plane') >= 0 || svgHtml.indexOf('up') >= 0) {
-                    score += 100;
-                  }
-                  // 麦克风/语音减分（排除语音输入按钮）
-                  if (svgHtml.indexOf('mic') >= 0 || svgHtml.indexOf('Mic') >= 0 ||
-                      svgHtml.indexOf('microphone') >= 0 || svgHtml.indexOf('voice') >= 0 ||
-                      svgHtml.indexOf('audio') >= 0) {
-                    score -= 200;
-                  }
-                  // 蓝色背景加分（发送按钮通常是蓝色）
-                  var styleC = window.getComputedStyle(elC);
-                  var bgColor = styleC.backgroundColor || '';
-                  if (bgColor.indexOf('rgb') >= 0) {
-                    var rgbMatch = bgColor.match(/\d+/g);
-                    if (rgbMatch && rgbMatch.length >= 3) {
-                      var r = parseInt(rgbMatch[0]), g = parseInt(rgbMatch[1]), b = parseInt(rgbMatch[2]);
-                      if (b > r && b > g && b > 150) score += 50; // 蓝色调
-                    }
-                  }
-                  // 越靠右越可能是发送按钮
-                  score += rectC.left * 0.01;
-                  candidatesC.push({ el: elC, score: score, rect: rectC });
-                }
-              }
-              parentC = parentC.parentElement;
-            }
-            if (candidatesC.length > 0) {
-              candidatesC.sort(function(a, b) { return b.score - a.score; });
-              btn = candidatesC[0].el;
-              console.log('[checkSendBtn] 策略C选中按钮, score=' + candidatesC[0].score +
-                ', tag=' + btn.tagName + ', 候选数=' + candidatesC.length);
-            }
-          }
-        }
-
-        if (!btn) {
-          // 找不到按钮，无法验证，保守返回 true（避免误判）
-          console.log('[checkSendBtn] 未找到发送按钮，跳过验证');
-          return { ready: true, found: false };
-        }
-
-        // 检查按钮是否可用
-        var style = window.getComputedStyle(btn);
-        var isDisabled = btn.disabled || btn.getAttribute('aria-disabled') === 'true' ||
-                        parseFloat(style.opacity) < 0.5 || style.pointerEvents === 'none';
-
-        console.log('[checkSendBtn] 按钮状态: disabled=' + isDisabled +
-          ', disabledAttr=' + btn.disabled +
-          ', ariaDisabled=' + btn.getAttribute('aria-disabled') +
-          ', opacity=' + style.opacity +
-                  ', tag=' + btn.tagName);
-
-        return { ready: !isDisabled, found: true, disabled: isDisabled, tag: btn.tagName };
+        return { ok: false };
       } catch(e) {
-        return { ready: true, error: e.message };
+        return { ok: false };
       }
     })();
   `;
-
   try {
-    const result = await safeExecuteJS<{ ready: boolean; found: boolean; disabled?: boolean }>(
-      webview, code, 5000, 'checkSendButtonReady'
-    );
-    return result.ready;
+    return await safeExecuteJS<SendButtonTarget>(webview, code, 5000, 'findSendButtonTarget');
   } catch {
-    return true; // 验证失败时保守放行
+    return { ok: false };
   }
+}
+
+async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
+  return (await findSendButtonTarget(webview)).ok;
 }
 
 /** 单次注入尝试 */
@@ -965,6 +1009,7 @@ async function tryInjectOnce(
 ): Promise<{ ok: boolean; error?: string; method?: string; tag?: string; actualLen?: number; preview?: string }> {
   // 安全的 JSON 序列化（处理特殊字符）
   const safePrompt = JSON.stringify(prompt);
+  const expectedNormalized = JSON.stringify(normalizePromptForComposer(prompt));
 
   const code = `
     (function() {
@@ -1232,6 +1277,7 @@ async function tryInjectOnce(
 
         // ========== 注入提示词 ==========
         var promptText = ${safePrompt};
+        var expectedNormalized = ${expectedNormalized};
 
         function verifyValue() {
           var val = '';
@@ -1240,10 +1286,16 @@ async function tryInjectOnce(
           } else {
             val = input.innerText || input.textContent || '';
           }
-          var actualLen = val.trim().length;
-          var expectedLen = promptText.length;
-          var ratio = actualLen > 0 && expectedLen > 0 ? Math.min(actualLen, expectedLen) / Math.max(actualLen, expectedLen) : 0;
-          return { pass: ratio >= 0.5, actual: val, ratio: ratio, actualLen: actualLen, preview: val.substring(0, 50) };
+          var normalize = function(value) {
+            return String(value || '')
+              .replace(/\u00a0/g, ' ')
+              .replace(/[\u200b-\u200d\ufeff]/g, '')
+              .replace(/\\s+/g, ' ')
+              .trim();
+          };
+          var actualLen = val.length;
+          var pass = normalize(val) === expectedNormalized;
+          return { pass: pass, actual: val, ratio: pass ? 1 : 0, actualLen: actualLen, preview: val.substring(0, 50) };
         }
 
         // 清空输入框（移除 placeholder 等 contenteditable=false 的元素）
@@ -1490,6 +1542,15 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
       try {
         var sendBtn = null;
 
+        // 豆包当前对话页的权威发送按钮。不能从整页任意按钮中猜测，
+        // 否则可能点到模式、菜单等控件并把“点击”误报为“已发送”。
+        var exactSendButton = document.querySelector('#flow-end-msg-send');
+        if (exactSendButton && exactSendButton.offsetParent !== null &&
+            !exactSendButton.disabled && exactSendButton.getAttribute('aria-disabled') !== 'true' &&
+            exactSendButton.getAttribute('data-disabled') !== 'true') {
+          sendBtn = exactSendButton;
+        }
+
         // ========== 策略A：aria-label 匹配 ==========
         var ariaSelectors = [
           'button[aria-label*="发送"]',
@@ -1497,7 +1558,7 @@ export async function submitPrompt(webview: WebviewHandle): Promise<boolean> {
           'button[aria-label*="send"]',
           'button[aria-label*="提交"]',
         ];
-        for (var s = 0; s < ariaSelectors.length; s++) {
+        for (var s = 0; !sendBtn && s < ariaSelectors.length; s++) {
           try {
             var btn = document.querySelector(ariaSelectors[s]);
             if (btn && !btn.disabled && btn.offsetParent !== null) {
@@ -1996,6 +2057,170 @@ export async function injectGenerationMonitor(webview: WebviewHandle): Promise<b
 }
 
 /**
+ * 以 Electron 原生鼠标事件点击当前豆包页的发送按钮。
+ * 豆包的 React 控件在部分账号页会忽略脚本 click()，因此任务自动化优先使用
+ * 与人工点击等价的 webview 输入事件；找不到权威按钮时才回退到旧兼容路径。
+ */
+export async function submitPromptWithNativeClick(webview: WebviewHandle): Promise<boolean> {
+  if (typeof webview.sendInputEvent !== 'function') return false;
+  try {
+    const target = await findSendButtonTarget(webview);
+    // 只认当前页面的权威发送按钮。找不到时 fail-closed，不猜测其它控件。
+    if (!target.ok || !target.position) return false;
+    const [x, y] = target.position.split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    webview.sendInputEvent({ type: 'mouseMove', x, y });
+    webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    await sleep(35);
+    webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    console.log('[doubaoBridge] submitPrompt 成功, 方法: native-click');
+    return true;
+  } catch (error: unknown) {
+    // 原生事件可能已经部分送达；此处回退会形成第二次外部副作用。
+    console.warn('[doubaoBridge] 原生发送点击失败，禁止自动回退:', getErrorMessage(error));
+    return false;
+  }
+}
+
+/**
+ * 原生 Enter 作为发送按钮点击没有获得页面回执时的单次兜底。
+ * 只在调用方已经回读确认“点击未发送”后使用，避免把成功发送的任务重复提交。
+ */
+export async function submitPromptWithNativeEnter(webview: WebviewHandle): Promise<boolean> {
+  if (typeof webview.sendInputEvent !== 'function') return false;
+  try {
+    const focused = await safeExecuteJS<boolean>(
+      webview,
+      `
+        (function() {
+          var editor = document.querySelector('[contenteditable="true"]:not([contenteditable="false"]), textarea:not([disabled])');
+          if (!editor || editor.offsetParent === null) return false;
+          editor.focus();
+          return document.activeElement === editor || editor.contains(document.activeElement);
+        })();
+      `,
+      5000,
+      'focusEditorForNativeEnter',
+    );
+    if (!focused) return false;
+    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Enter', code: 'Enter' });
+    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Enter', code: 'Enter' });
+    console.log('[doubaoBridge] 已发送原生 Enter 提交事件');
+    return true;
+  } catch (error: unknown) {
+    console.warn('[doubaoBridge] 原生 Enter 提交失败:', getErrorMessage(error));
+    return false;
+  }
+}
+
+export interface SubmissionEvidence {
+  generationStarted: boolean;
+  inputCleared: boolean;
+  messageCount: number;
+  promptPublished: boolean;
+}
+
+/**
+ * 提交后的 fail-closed 回读：只有输入框已清空且已观察到豆包回复请求，
+ * 才能认为任务真正离开“仅注入”阶段。
+ */
+export async function getSubmissionEvidence(
+  webview: WebviewHandle,
+  prompt: string,
+  startTimeBeforeSubmit: number,
+  messageCountBeforeSubmit: number,
+): Promise<SubmissionEvidence> {
+  const promptText = JSON.stringify(prompt.replace(/\s+/g, ' ').trim());
+  const code = `
+    (function() {
+      var normalize = function(value) { return String(value || '').replace(/\\s+/g, ' ').trim(); };
+      var expected = ${promptText};
+      var editorText = '';
+      var editors = document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+      for (var i = 0; i < editors.length; i++) {
+        var editor = editors[i];
+        if (editor.offsetParent === null) continue;
+        var candidate = editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT'
+          ? editor.value
+          : editor.innerText;
+        if (normalize(candidate).length > 0) {
+          editorText = candidate;
+          break;
+        }
+      }
+      var state = window.__genState || {};
+      var messageCount = document.querySelectorAll('[data-message-id]').length;
+      // 当前豆包页面并非所有会话都带 data-message-id。把编辑器从克隆文档移除后，
+      // 若提示词仍存在，说明它已经进入会话区，而不只是停留在输入框中。
+      var clone = document.body.cloneNode(true);
+      var cloneEditors = clone.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+      for (var j = 0; j < cloneEditors.length; j++) cloneEditors[j].remove();
+      var promptPublished = normalize(clone.innerText).indexOf(expected) !== -1;
+      return {
+        // 部分普通对话不产生可观察的 SSE data 帧；新消息节点是同等的页面回执。
+        generationStarted: Number(state.startTime || 0) > ${startTimeBeforeSubmit} || messageCount > ${messageCountBeforeSubmit} || promptPublished,
+        inputCleared: normalize(editorText).indexOf(expected) === -1,
+        messageCount: messageCount,
+        promptPublished: promptPublished,
+      };
+    })();
+  `;
+  try {
+    return await safeExecuteJS<SubmissionEvidence>(webview, code, 8000, 'getSubmissionEvidence');
+  } catch {
+    return { generationStarted: false, inputCleared: false, messageCount: 0, promptPublished: false };
+  }
+}
+
+export async function getGenerationStartTime(webview: WebviewHandle): Promise<number> {
+  try {
+    return await safeExecuteJS<number>(
+      webview,
+      '(function() { return Number((window.__genState && window.__genState.startTime) || 0); })();',
+      5000,
+      'getGenerationStartTime',
+    );
+  } catch {
+    return 0;
+  }
+}
+
+/** 与提交回读使用同一选择器的消息基线，不能复用综合生成检测的异构计数。 */
+export async function getSubmissionMessageCount(webview: WebviewHandle): Promise<number> {
+  try {
+    return await safeExecuteJS<number>(
+      webview,
+      "(function() { return document.querySelectorAll('[data-message-id]').length; })();",
+      5000,
+      'getSubmissionMessageCount',
+    );
+  } catch {
+    return 0;
+  }
+}
+
+/** 返回不含输入框的会话可见文本，用于新版页面没有稳定消息属性时的终态回读。 */
+export async function getConversationText(webview: WebviewHandle): Promise<string> {
+  try {
+    return await safeExecuteJS<string>(
+      webview,
+      `
+        (function() {
+          var clone = document.body.cloneNode(true);
+          var editors = clone.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]');
+          for (var i = 0; i < editors.length; i++) editors[i].remove();
+          return String(clone.innerText || '').replace(/\\s+/g, ' ').trim();
+        })();
+      `,
+      5000,
+      'getConversationText',
+    );
+  } catch {
+    return '';
+  }
+}
+
+/**
  * 检查豆包页面当前是否正在生成回复
  * 返回 generating=true 表示确定在生成，false 表示确定已完成，unknown 表示无法确定
  */
@@ -2034,8 +2259,11 @@ export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<G
             return { generating: true, status: 'detected', reason: 'network-monitor', sseDataCount: gs.sseDataCount, lastUpdate: gs.lastUpdate };
           }
           // 已完成（有明确的开始和结束时间）
-          if (!gs.generating && gs.endTime > 0 && gs.startTime > 0) {
+          if (!gs.generating && gs.endTime > 0 && gs.startTime > 0 && gs.sseDataCount > 0) {
             return { generating: false, status: 'detected', reason: 'network-monitor', sseDataCount: gs.sseDataCount, endTime: gs.endTime };
+          }
+          if (!gs.generating && gs.endTime > 0 && gs.startTime > 0) {
+            return { generating: false, status: 'unknown', reason: 'network-empty', sseDataCount: gs.sseDataCount, endTime: gs.endTime };
           }
           // 状态未初始化（还没发过请求），继续走 DOM 检测
         }
@@ -2080,6 +2308,7 @@ export async function checkGeneratingDetailed(webview: WebviewHandle): Promise<G
         // ========== 维度2：对话消息检测 ==========
         // 豆包聊天消息通常在特定容器中，统计消息数量
         var msgSelectors = [
+          '[data-message-id]',
           '[class*="message-item"]',
           '[class*="messageItem"]',
           '[class*="chat-message"]',
@@ -2359,13 +2588,21 @@ export async function getResultUrl(webview: WebviewHandle, timeoutMs: number = 1
 
 // ==================== 导航到豆包聊天页 ====================
 
+function getPlatformChatRoot(webview: WebviewHandle): string | null {
+  const currentUrl = webview.getURL();
+  if (/^https?:\/\/([^/]+\.)?dola\.com\//i.test(currentUrl)) return 'https://www.dola.com/chat';
+  if (/^https?:\/\/([^/]+\.)?doubao\.com\//i.test(currentUrl)) return 'https://www.doubao.com/chat/';
+  return null;
+}
+
 /**
  * 确保 webview 在豆包聊天页面
  */
 export function navigateToChat(webview: WebviewHandle): void {
   const currentUrl = webview.getURL();
-  if (!currentUrl.includes('/chat')) {
-    webview.loadURL('https://www.doubao.com/chat/');
+  const chatRoot = getPlatformChatRoot(webview);
+  if (chatRoot && !currentUrl.includes('/chat')) {
+    webview.loadURL(chatRoot);
   }
 }
 
@@ -2417,13 +2654,6 @@ export async function waitForChatReady(
 // ==================== 模式切换 ====================
 
 /** 生成模式对应的 URL 映射 */
-const MODE_URLS: Record<string, string> = {
-  chat: 'https://www.doubao.com/chat/',
-  image: 'https://www.doubao.com/chat/',
-  video: 'https://www.doubao.com/chat/',
-  music: 'https://www.doubao.com/chat/create-music/',
-};
-
 /**
  * 切换豆包生成模式
  *
@@ -2431,8 +2661,16 @@ const MODE_URLS: Record<string, string> = {
  * 对于 chat/music 模式：直接导航到对应 URL
  */
 export function switchMode(webview: WebviewHandle, mode: string): void {
-  const targetUrl = MODE_URLS[mode] || MODE_URLS.chat;
   const currentUrl = webview.getURL();
+  const chatRoot = getPlatformChatRoot(webview);
+  if (!chatRoot) {
+    console.warn('[doubaoBridge] 平台域名无法确认，拒绝跨平台导航');
+    return;
+  }
+  const isDola = chatRoot.includes('dola.com');
+  const targetUrl = mode === 'music' && !isDola
+    ? 'https://www.doubao.com/chat/create-music/'
+    : chatRoot;
 
   // 对于 image/video，统一导航到 /chat/ 页面（Tab 切换在 DOM 中完成）
   if (mode === 'image' || mode === 'video') {
@@ -2464,8 +2702,98 @@ export function switchMode(webview: WebviewHandle, mode: string): void {
 export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'): Promise<boolean> {
   const tabLabel = mode === 'image' ? '图像生成' : '视频生成';
   const code = `
-    (function() {
+    (async function() {
       try {
+        function sleep(ms) {
+          return new Promise(function(resolve) { setTimeout(resolve, ms); });
+        }
+        function activate(el) {
+          if (!el) return false;
+          var r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          var x = Math.round(r.left + r.width / 2);
+          var y = Math.round(r.top + r.height / 2);
+          var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+          try { el.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+          el.dispatchEvent(new MouseEvent('mousedown', opts));
+          try { el.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+          el.dispatchEvent(new MouseEvent('mouseup', opts));
+          el.dispatchEvent(new MouseEvent('click', opts));
+          return true;
+        }
+        function videoControlsReady() {
+          var model = document.querySelector('[data-input-engine-actionbar-control-key="video-model"]');
+          var composite = document.querySelector('[data-creation-params-panel-id]');
+          return Boolean(model && composite && model.getBoundingClientRect().width > 20 &&
+            composite.getBoundingClientRect().width > 20);
+        }
+        async function waitForVideoControls(timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            if (videoControlsReady()) return true;
+            await sleep(250);
+          }
+          return videoControlsReady();
+        }
+        async function waitForModeEntry(timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            var textarea = document.querySelector('textarea');
+            var textareaRect = textarea ? textarea.getBoundingClientRect() : null;
+            var entries = Array.from(document.querySelectorAll('button, [role="tab"], div, span, a'));
+            var ready = entries.some(function(el) {
+              var r = el.getBoundingClientRect();
+              var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+              var visible = r.width > 0 && r.height > 0 && r.top >= 0 && r.left > 200;
+              var nearEditor = textareaRect && r.top > textareaRect.bottom - 10 && r.top < window.innerHeight;
+              return visible && text.length < 20 && text.indexOf('${tabLabel}') >= 0 &&
+                (nearEditor || r.top > window.innerHeight * 0.5);
+            });
+            if (ready) return true;
+            await sleep(250);
+          }
+          return false;
+        }
+        async function findVisibleModeMenuOption(timeoutMs) {
+          var deadline = Date.now() + timeoutMs;
+          while (Date.now() < deadline) {
+            var options = Array.from(document.querySelectorAll('#input-engine-container button')).filter(function(el) {
+              var r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0 && (el.innerText || '').replace(/\\s+/g, ' ').trim() === '视频生成';
+            });
+            if (options.length > 0) return options[options.length - 1];
+            await sleep(250);
+          }
+          return null;
+        }
+        async function finishVideoModeSelection(initialMethod, initialTag, initialRect) {
+          if ('${mode}' !== 'video') {
+            return { ok: true, method: initialMethod, tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
+          }
+          if (await waitForVideoControls(1500)) {
+            return { ok: true, method: initialMethod + '-verified', tag: initialTag, pos: Math.round(initialRect.left) + ',' + Math.round(initialRect.top) };
+          }
+
+          // 2026-08 新版首击只展开“模式”菜单，并不会真正选中视频模式。
+          // 必须从当前模式触发器再次打开菜单，再点击菜单内的精确“视频生成”，
+          // 并以模型/组合控件实际挂载作为唯一成功证据。
+          var modeTrigger = document.querySelector('[data-valid-btn="mode-select-action-btn"]');
+          if (modeTrigger && modeTrigger.getBoundingClientRect().width > 0) {
+            activate(modeTrigger);
+          }
+          var option = await findVisibleModeMenuOption(5000);
+          if (!activate(option)) {
+            return { ok: false, error: '视频模式菜单选项不可见' };
+          }
+          if (!await waitForVideoControls(15000)) {
+            return { ok: false, error: '视频模式已点击但参数控件未挂载' };
+          }
+          var optionRect = option.getBoundingClientRect();
+          return { ok: true, method: initialMethod + '-menu-confirmed', tag: option.tagName, pos: Math.round(optionRect.left) + ',' + Math.round(optionRect.top) };
+        }
+        if (!await waitForModeEntry(15000)) {
+          return { ok: false, error: '${tabLabel}模式入口未在等待窗口内挂载' };
+        }
         var allEls = document.querySelectorAll('button, [role="tab"], div, span, a');
 
         // 先找到 textarea 输入框的位置
@@ -2512,8 +2840,8 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.isButton && c.nearTextarea && c.notInSidebar) {
-            c.el.click();
-            return { ok: true, method: 'button-near-textarea', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+            activate(c.el);
+            return await finishVideoModeSelection('button-near-textarea', c.tag, c.rect);
           }
         }
 
@@ -2521,8 +2849,8 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.isButton && c.inBottomHalf && c.notInSidebar) {
-            c.el.click();
-            return { ok: true, method: 'button-bottom', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+            activate(c.el);
+            return await finishVideoModeSelection('button-bottom', c.tag, c.rect);
           }
         }
 
@@ -2530,8 +2858,8 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.nearTextarea && c.notInSidebar && c.isSmall) {
-            c.el.click();
-            return { ok: true, method: 'near-textarea', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+            activate(c.el);
+            return await finishVideoModeSelection('near-textarea', c.tag, c.rect);
           }
         }
 
@@ -2539,8 +2867,8 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
         for (var i = 0; i < candidates.length; i++) {
           var c = candidates[i];
           if (c.notInSidebar) {
-            c.el.click();
-            return { ok: true, method: 'not-sidebar', tag: c.tag, pos: Math.round(c.rect.left) + ',' + Math.round(c.rect.top) };
+            activate(c.el);
+            return await finishVideoModeSelection('not-sidebar', c.tag, c.rect);
           }
         }
 
@@ -2563,7 +2891,7 @@ export async function clickAITab(webview: WebviewHandle, mode: 'image' | 'video'
 
   try {
     const result = await safeExecuteJS<{ ok: boolean; error?: string; method?: string; tag?: string; pos?: string }>(
-      webview, code, 5000, 'clickAITab'
+      webview, code, 40000, 'clickAITab'
     );
     if (result.ok) {
       console.log(`[doubaoBridge] 已点击${tabLabel}Tab, 方法: ${result.method}, tag: ${result.tag}, pos: ${result.pos}`);
@@ -2634,6 +2962,11 @@ export async function configureVideoOptions(
   webview: WebviewHandle,
   config: { model: string; duration: string; aspectRatio: string }
 ): Promise<void> {
+  // 2026-08 新版创作页把“比例 + 时长”收敛为同一个弹层；旧版三个
+  // 独立下拉的兜底会在未回读时误报成功。统一走新版可见控件并逐项回读。
+  return configureVideoOptionsV2(webview, config);
+
+  /* istanbul ignore next -- 保留旧版适配作为历史参考，V2 失败一律抛错而不回退。 */
   // 模型名称映射（豆包页面显示的文本）
   const modelLabels: Record<string, string[]> = {
     'seedance-2.5': ['Seedance 2.5', '2.5'],
@@ -3276,6 +3609,435 @@ export async function configureVideoOptions(
   await ensureVideoConfigBar();
 }
 
+/** 新版页面显示名的唯一权威映射；禁止以 Fast/Mini 之类片段做宽松匹配。 */
+export const VIDEO_MODEL_UI_LABELS: Readonly<Record<string, string>> = {
+  'seedance-2.5': 'Seedance 2.5',
+  'seedance-2.0': 'Seedance 2.0',
+  'seedance-2.0-fast': 'Seedance 2.0 Fast',
+  'seedance-2.0-mini': 'Seedance 2.0 Mini',
+};
+
+export function getVideoModelUiLabel(model: string): string | null {
+  return VIDEO_MODEL_UI_LABELS[model] ?? null;
+}
+
+export function getVideoCompositeLabel(aspectRatio: string, duration: string): string {
+  return `${aspectRatio} · ${duration}`;
+}
+
+export type MaterialAuthorizationResult = 'absent' | 'confirmed' | 'blocked';
+
+/**
+ * 豆包上传参考素材后可能在 composer 内弹出一次“安全确认”。该确认只解除
+ * 发送控件遮挡，不会提交生成。仅当面板同时包含完整素材授权语义、拒绝和确认
+ * 两个动作时，才点击精确的“确认”；结构不完整时 fail-closed。
+ */
+export async function confirmMaterialAuthorizationIfPresent(
+  webview: WebviewHandle,
+): Promise<MaterialAuthorizationResult> {
+  try {
+    const result = await safeExecuteJS<{ present: boolean; confirmed: boolean }>(webview, `
+      (function () {
+        var buttons = Array.from(document.querySelectorAll('button,[role="button"]')).filter(function (el) {
+          var r = el.getBoundingClientRect();
+          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+          return r.width > 20 && r.height > 20 && el.offsetParent !== null && (text === '确认' || text === '拒绝');
+        });
+        var confirm = buttons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '确认'; });
+        var reject = buttons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '拒绝'; });
+        if (!confirm && !reject) return { present: false, confirmed: false };
+        if (!confirm || !reject) return { present: true, confirmed: false };
+        var root = confirm.parentElement;
+        var matched = null;
+        for (var depth = 0; root && depth < 10; depth++, root = root.parentElement) {
+          var text = (root.innerText || '').replace(/\\s+/g, ' ').trim();
+          if (text.indexOf('安全确认') !== -1 && text.indexOf('上传、使用的素材') !== -1 &&
+              text.indexOf('充分授权') !== -1 && text.indexOf('拒绝') !== -1 && text.indexOf('确认') !== -1) {
+            matched = root;
+            break;
+          }
+        }
+        if (!matched || !matched.contains(reject)) return { present: true, confirmed: false };
+        var r = confirm.getBoundingClientRect();
+        var x = r.left + r.width / 2; var y = r.top + r.height / 2;
+        var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+        try { confirm.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+        confirm.dispatchEvent(new MouseEvent('mousedown', opts));
+        try { confirm.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+        confirm.dispatchEvent(new MouseEvent('mouseup', opts));
+        confirm.dispatchEvent(new MouseEvent('click', opts));
+        return { present: true, confirmed: true };
+      })()
+    `, 5000, 'confirm_material_authorization');
+    if (!result.present) return 'absent';
+    if (!result.confirmed) return 'blocked';
+    await sleep(350);
+    const stillVisible = await safeExecuteJS<boolean>(webview, `
+      (function () {
+        return Array.from(document.querySelectorAll('button,[role="button"]')).some(function (el) {
+          return el.offsetParent !== null && (el.innerText || '').replace(/\\s+/g, ' ').trim() === '拒绝';
+        }) && (document.body.innerText || '').indexOf('安全确认') !== -1;
+      })()
+    `, 5000, 'verify_material_authorization');
+    return stillVisible ? 'blocked' : 'confirmed';
+  } catch {
+    return 'blocked';
+  }
+}
+
+/** 豆包 2026-08 创作栏稳定结构属性；文本定位仅作为受限回退。 */
+export const VIDEO_MODEL_CONTROL_SELECTOR = '[data-input-engine-actionbar-control-key="video-model"]';
+export const VIDEO_COMPOSITE_CONTROL_SELECTOR = '[data-creation-params-panel-id]';
+
+export async function pollUntilReady(
+  check: () => boolean | Promise<boolean>,
+  options: {
+    timeoutMs: number;
+    intervalMs?: number;
+    now?: () => number;
+    wait?: (ms: number) => Promise<void>;
+  },
+): Promise<boolean> {
+  const now = options.now ?? Date.now;
+  const wait = options.wait ?? sleep;
+  const intervalMs = options.intervalMs ?? 250;
+  const deadline = now() + options.timeoutMs;
+  do {
+    if (await check()) return true;
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    await wait(Math.min(intervalMs, remaining));
+  } while (now() <= deadline);
+  return false;
+}
+
+export function isVideoModelControlText(text: string, expectedModel: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  return normalized.startsWith('模型 ') && normalized.slice(3).trim() === expectedModel;
+}
+
+export function isVideoCompositeControlText(text: string): boolean {
+  return /^(?:自动|[0-9]+:[0-9]+)\s*·\s*[0-9]+s$/.test(text.replace(/\s+/g, ' ').trim());
+}
+
+/**
+ * 豆包 2026-08 创作页适配器。
+ * 只点击用户已经看得见的页面控件；每次点击后的页面回读都是提交前置条件。
+ */
+async function configureVideoOptionsV2(
+  webview: WebviewHandle,
+  config: { model: string; duration: string; aspectRatio: string },
+): Promise<void> {
+  const modelLabel = getVideoModelUiLabel(config.model);
+  const durationSeconds = Number.parseInt(config.duration.replace(/s$/i, ''), 10);
+  if (!modelLabel || !Number.isInteger(durationSeconds) || durationSeconds < 4 || durationSeconds > 15 ||
+      !/^(?:auto|[0-9]+:[0-9]+)$/i.test(config.aspectRatio)) {
+    throw new Error('视频配置无效，已在提交前停止');
+  }
+
+  const click = async (position: string | undefined, label: string): Promise<void> => {
+    if (!position) throw new Error(`${label}不可见，已在提交前停止`);
+    const [x, y] = position.split(',').map(Number);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`${label}坐标无效，已在提交前停止`);
+    // webview.sendInputEvent 的坐标在新版嵌套页面会落到宿主视口而非创作页。
+    // 这里按页面内命中元素派发完整指针/鼠标序列，仍只触发用户可见控件。
+    const activated = await safeExecuteJS<boolean>(webview, `
+      (function () {
+        var x = ${x}; var y = ${y};
+        var target = document.elementFromPoint(x, y);
+        if (!target) return false;
+        var r = target.getBoundingClientRect();
+        if (r.width <= 0 || r.height <= 0) return false;
+        var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+        try { target.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+        target.dispatchEvent(new MouseEvent('mousedown', opts));
+        try { target.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
+        target.dispatchEvent(new MouseEvent('mouseup', opts));
+        target.dispatchEvent(new MouseEvent('click', opts));
+        return true;
+      })()
+    `, 5000, `activate_${label}`);
+    if (!activated) throw new Error(`${label}无法激活，已在提交前停止`);
+    await sleep(80);
+  };
+
+  const page = async <T>(code: string, label: string): Promise<T> =>
+    safeExecuteJS<T>(webview, code, 5000, label);
+
+  const membershipBlocked = async (): Promise<boolean> => page<boolean>(`
+    (function () {
+      var nodes = Array.from(document.querySelectorAll('[role="dialog"], [role="alert"], [class*="modal"], [class*="toast"], [class*="popover"]'));
+      var visiblePrompt = nodes.some(function (node) {
+        var r = node.getBoundingClientRect();
+        var text = (node.innerText || '').replace(/\\s+/g, '');
+        return r.width > 0 && r.height > 0 && /升级会员|开通会员|会员专享|权益不足|购买会员/.test(text);
+      });
+      if (visiblePrompt) return true;
+      // 2026-08 页面把升级面板放进跨源 iframe，父文档无法读取 innerText；
+      // 只能依据可见 iframe 自身的 title/name/src 做安全判定，不能把它误报成模型回读失败。
+      return Array.from(document.querySelectorAll('iframe')).some(function (frame) {
+        var r = frame.getBoundingClientRect();
+        var descriptor = [frame.title, frame.name, frame.getAttribute('aria-label'), frame.src].filter(Boolean).join(' ');
+        return r.width > 0 && r.height > 0 && /订阅|会员|升级|subscribe|membership|upgrade/i.test(descriptor);
+      });
+    })()
+  `, 'video_membership_probe').catch(() => false);
+
+  // 模式切换后 React 会先显示创作栏、再挂载参数控件。必须等两个权威控件
+  // 都实际可用后才继续；15 秒后仍未挂载则 fail-closed，不猜测、更不提交。
+  const waitForAuthoritativeControls = async (): Promise<boolean> => {
+    return pollUntilReady(async () => page<boolean>(`
+        (function () {
+          function usable(el) {
+            if (!el) return false;
+            var r = el.getBoundingClientRect();
+            return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
+              r.bottom <= window.innerHeight + 1 && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+          }
+          var model = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
+          var composite = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
+          var compositeText = composite ? (composite.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+          return usable(model) && usable(composite) && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(compositeText);
+        })()
+      `, 'wait_video_controls').catch(() => false), { timeoutMs: 15_000 });
+  };
+
+  if (!await waitForAuthoritativeControls()) {
+    throw new Error('视频参数控件未就绪，已在提交前停止');
+  }
+
+  const findModelTrigger = async (): Promise<string | undefined> => {
+    const result = await page<{ position?: string }>(`
+      (function () {
+        function usable(el) {
+          if (!el) return false;
+          var r = el.getBoundingClientRect();
+          return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
+            r.bottom <= window.innerHeight + 1 && r.width < 320 && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+        }
+        var authoritative = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
+        if (usable(authoritative)) {
+          var authoritativeRect = authoritative.getBoundingClientRect();
+          return { position: Math.round(authoritativeRect.left + authoritativeRect.width / 2) + ',' + Math.round(authoritativeRect.top + authoritativeRect.height / 2) };
+        }
+        var candidates = Array.from(document.querySelectorAll('button,[role="button"],div')).filter(function (el) {
+          var r = el.getBoundingClientRect();
+          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+          return usable(el) && /^模型(?:\\s|$)/.test(text);
+        });
+        candidates.sort(function (a, b) { return a.getBoundingClientRect().top - b.getBoundingClientRect().top; });
+        var el = candidates[candidates.length - 1];
+        if (!el) return {};
+        var r = el.getBoundingClientRect();
+        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
+      })()
+    `, 'find_video_model_trigger');
+    return result.position;
+  };
+
+  const selectExactOverlayOption = async (expected: string, label: string): Promise<string | undefined> => {
+    const result = await page<{ position?: string }>(`
+      (function () {
+        var expected = ${JSON.stringify(expected)};
+        // 新版比例面板的选项不是扁平 button：文字经常嵌在多层 div/span 中。
+        // 选择“精确文本的最内层可见节点”，不能再以 children.length 猜测结构。
+        var leaves = Array.from(document.querySelectorAll('[role="option"],[role="menuitem"],button,[role="button"],li,div,span')).filter(function (el) {
+          var r = el.getBoundingClientRect();
+          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+          if (r.width <= 8 || r.height <= 8 || text !== expected) return false;
+          return !Array.from(el.children).some(function (child) {
+            return (child.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
+          });
+        });
+        leaves.sort(function (a, b) { return a.getBoundingClientRect().width * a.getBoundingClientRect().height - b.getBoundingClientRect().width * b.getBoundingClientRect().height; });
+        var el = leaves[0];
+        if (!el) return {};
+        var r = el.getBoundingClientRect();
+        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
+      })()
+    `, `select_${label}`);
+    return result.position;
+  };
+
+  const waitForExactOverlayOption = async (expected: string, label: string): Promise<string | undefined> => {
+    let found: string | undefined;
+    await pollUntilReady(async () => {
+      const position = await selectExactOverlayOption(expected, label).catch(() => undefined);
+      if (position) {
+        found = position;
+        return true;
+      }
+      if (await membershipBlocked()) {
+        throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
+      }
+      return false;
+    }, { timeoutMs: 10_000 });
+    return found;
+  };
+
+  const verifyModel = async (): Promise<boolean> => page<boolean>(`
+    (function () {
+      function matches(el) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
+          text.indexOf('模型 ') === 0 && text.slice(3).trim() === ${JSON.stringify(modelLabel)};
+      }
+      var authoritative = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
+      if (matches(authoritative)) return true;
+      return Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (el) {
+        return matches(el);
+      });
+    })()
+  `, 'verify_video_model');
+
+  const waitForModelVerification = async (): Promise<boolean> => {
+    return pollUntilReady(() => verifyModel().catch(() => false), { timeoutMs: 10_000 });
+  };
+
+  const findCompositeTrigger = async (): Promise<string | undefined> => {
+    const result = await page<{ position?: string }>(`
+      (function () {
+        function usable(el) {
+          if (!el) return false;
+          var r = el.getBoundingClientRect();
+          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+          return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
+            r.bottom <= window.innerHeight + 1 && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(text);
+        }
+        var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
+        if (usable(authoritative)) {
+          var authoritativeRect = authoritative.getBoundingClientRect();
+          return { position: Math.round(authoritativeRect.left + authoritativeRect.width / 2) + ',' + Math.round(authoritativeRect.top + authoritativeRect.height / 2) };
+        }
+        var buttons = Array.from(document.querySelectorAll('button[aria-haspopup],button,[role="button"],div')).filter(function (el) {
+          return usable(el);
+        });
+        buttons.sort(function (a, b) { return b.getBoundingClientRect().top - a.getBoundingClientRect().top; });
+        var el = buttons[0];
+        if (!el) return {};
+        var r = el.getBoundingClientRect();
+        if (!${JSON.stringify(typeof webview.sendInputEvent === 'function')}) el.click();
+        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
+      })()
+    `, 'find_video_composite_trigger');
+    return result.position;
+  };
+
+  const openComposite = async (): Promise<void> => {
+    const position = await findCompositeTrigger();
+    await click(position, '比例与时长控件');
+    await sleep(350);
+  };
+
+  // 模型：已与目标一致时绝不重开菜单。新版页面会在触发器文本中直接回显
+  // 当前模型，重复选择反而会因菜单动画而制造“选项不可见”的假失败。
+  if (!await verifyModel()) {
+    await click(await findModelTrigger(), '视频模型控件');
+    if (await membershipBlocked()) throw new Error('membership_required: 视频模型需要会员操作，已停止提交');
+    await click(await waitForExactOverlayOption(modelLabel, 'video_model'), '视频模型选项');
+    if (!await waitForModelVerification()) throw new Error(`视频模型配置回读失败: ${config.model}`);
+  }
+
+  const currentCompositeLabel = async (): Promise<string | undefined> => page<string | undefined>(`
+    (function () {
+      function label(el) {
+        if (!el) return undefined;
+        var r = el.getBoundingClientRect();
+        var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+        return r.width > 20 && r.height > 20 && r.top > window.innerHeight * 0.5 &&
+          /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(text) ? text : undefined;
+      }
+      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
+      var authoritativeLabel = label(authoritative);
+      if (authoritativeLabel) return authoritativeLabel;
+      var buttons = Array.from(document.querySelectorAll('button[aria-haspopup],button,[role="button"],div')).filter(function (el) {
+        return Boolean(label(el));
+      });
+      buttons.sort(function (a, b) { return b.getBoundingClientRect().top - a.getBoundingClientRect().top; });
+      return buttons[0] ? label(buttons[0]) : undefined;
+    })()
+  `, 'read_video_composite');
+
+  // 比例已经正确时不要再次点击同一选项。豆包弹层会保持打开，随后再次点击
+  // 组合触发器等价于把弹层关掉，旧代码因此误报“视频时长控件不可见”。
+  const beforeComposite = await currentCompositeLabel();
+  if (!beforeComposite?.startsWith(`${config.aspectRatio} ·`)) {
+    await openComposite();
+    if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
+    await click(await waitForExactOverlayOption(config.aspectRatio, 'video_ratio'), '视频比例选项');
+    await sleep(250);
+  }
+  // 比例切换后，豆包会保留当前时长。截图已证明 10s 会直接回显为
+  // “9:16 · 10s”；此时新版面板的滑条没有 role=slider，也不应把
+  // 已满足的配置误判为失败。
+  const expectedComposite = getVideoCompositeLabel(config.aspectRatio, config.duration);
+  const isCompositeAlreadyConfigured = async (): Promise<boolean> => page<boolean>(`
+    (function () {
+      var expected = ${JSON.stringify(expectedComposite)};
+      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
+      if (authoritative && (authoritative.innerText || '').replace(/\\s+/g, ' ').trim() === expected) return true;
+      return Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (node) {
+        var r = node.getBoundingClientRect();
+        return r.width > 20 && r.height > 20 && (node.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
+      });
+    })()
+  `, 'verify_video_composite_before_slider');
+  if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
+  if (await isCompositeAlreadyConfigured()) return;
+
+  const findDurationSlider = async (): Promise<{ position?: string }> => page<{ position?: string }>(`
+      (function () {
+        var el = Array.from(document.querySelectorAll('[role="slider"]')).find(function (node) {
+          var r = node.getBoundingClientRect();
+          return r.width > 0 && r.height > 0 && node.getAttribute('aria-valuemin') === '0' && node.getAttribute('aria-valuemax') === '11';
+        });
+        if (!el) return {};
+        var r = el.getBoundingClientRect();
+        el.focus();
+        if (!${JSON.stringify(typeof webview.sendInputEvent === 'function')}) {
+          el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+          for (var i = 0; i < ${durationSeconds - 4}; i++) el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+        }
+        return { position: Math.round(r.left + r.width / 2) + ',' + Math.round(r.top + r.height / 2) };
+      })()
+    `, 'find_video_duration_slider');
+  let slider = await findDurationSlider();
+  if (!slider.position) {
+    await openComposite();
+    slider = await findDurationSlider();
+  }
+  if (!slider.position) throw new Error(`视频时长控件不可见: ${config.duration}`);
+  if (typeof webview.sendInputEvent === 'function') {
+    await click(slider.position, '视频时长控件');
+    webview.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
+    webview.sendInputEvent({ type: 'keyUp', keyCode: 'Home' });
+    for (let index = 0; index < durationSeconds - 4; index += 1) {
+      webview.sendInputEvent({ type: 'keyDown', keyCode: 'Right' });
+      webview.sendInputEvent({ type: 'keyUp', keyCode: 'Right' });
+    }
+  }
+  await sleep(350);
+  const configured = await page<{ slider: boolean; composite: boolean }>(`
+    (function () {
+      var slider = Array.from(document.querySelectorAll('[role="slider"]')).some(function (node) {
+        return node.getAttribute('aria-valuemin') === '0' && node.getAttribute('aria-valuemax') === '11' && Number(node.getAttribute('aria-valuenow')) === ${durationSeconds - 4};
+      });
+      var expected = ${JSON.stringify(expectedComposite)};
+      var authoritative = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
+      var composite = Boolean(authoritative && (authoritative.innerText || '').replace(/\\s+/g, ' ').trim() === expected) || Array.from(document.querySelectorAll('button,[role="button"],div')).some(function (node) {
+        return (node.innerText || '').replace(/\\s+/g, ' ').trim() === expected;
+      });
+      return { slider: slider, composite: composite };
+    })()
+  `, 'verify_video_composite');
+  if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
+  if (!configured.slider || !configured.composite) {
+    throw new Error(`视频比例或时长配置回读失败: ${getVideoCompositeLabel(config.aspectRatio, config.duration)}`);
+  }
+}
+
 
 /**
  * 上传参考图片
@@ -3823,42 +4585,85 @@ export async function inject15sVideoPatch(webview: WebviewHandle): Promise<boole
 /**
  * 每个自动化任务开始前创建独立新对话，避免产物和缓存串到上一条会话。
  */
-export async function startNewConversation(webview: WebviewHandle): Promise<boolean> {
+/**
+ * 新对话就绪状态机结果。
+ * ok=false 时必须携带脱敏、可定位的 reason，禁止把失败当作可继续发送。
+ */
+export interface NewConversationResult {
+  ok: boolean;
+  /** 脱敏失败原因（如 PAGE_NOT_READY / EDITOR_NOT_FOUND / SESSION_NOT_EMPTY），不含页面内部 ID */
+  reason?: string;
+}
+
+/**
+ * 创建新对话（P0-1 状态机）。
+ *
+ * 以真实页面状态为依据，不猜测按钮、不点击任意页面控件：
+ * 1. 导航到豆包官方新会话入口（/chat/ 根路径即新会话）；
+ * 2. 等待聊天输入框可用（textarea 或 contenteditable 可见）；
+ * 3. 校验输入框可聚焦（可写入）；
+ * 4. 校验当前会话没有历史用户内容（新会话语义），避免把旧会话当新会话继续。
+ *
+ * 任一状态不满足 → ok=false + 脱敏 reason（fail-closed）。
+ */
+export async function startNewConversation(webview: WebviewHandle, readinessTimeoutMs: number = 20000): Promise<NewConversationResult> {
   try {
-    webview.loadURL(`https://www.doubao.com/chat/?doubao_studio_new=${Date.now()}`);
-    const ready = await waitForChatReady(webview, 20000);
-    if (!ready) return false;
+    const chatRoot = getPlatformChatRoot(webview);
+    if (!chatRoot) return { ok: false, reason: 'PLATFORM_UNRECOGNIZED' };
+    webview.loadURL(chatRoot);
+    const ready = await waitForChatReady(webview, readinessTimeoutMs);
+    if (!ready) {
+      return { ok: false, reason: 'PAGE_NOT_READY' };
+    }
 
     const code = `
       (function() {
-        var all = document.querySelectorAll('button, a, [role="button"], div, span');
-        var candidates = [];
-        for (var i = 0; i < all.length; i++) {
-          var el = all[i];
-          var text = (el.innerText || el.textContent || '').trim();
-          if (text !== '新对话' && text !== '新建对话' && text !== '开启新对话') continue;
-          if (el.offsetParent === null) continue;
-          var rect = el.getBoundingClientRect();
-          if (rect.width < 20 || rect.height < 20 || rect.left > 500) continue;
-          candidates.push({ el: el, area: rect.width * rect.height });
+        var editor = null;
+        var textareas = document.querySelectorAll('textarea');
+        for (var i = 0; i < textareas.length; i++) {
+          if (textareas[i].offsetParent !== null && !textareas[i].disabled) { editor = textareas[i]; break; }
         }
-        candidates.sort(function(a, b) { return a.area - b.area; });
-        if (candidates.length > 0) {
-          var target = candidates[0].el;
-          target.click();
-          return { ok: true, method: 'click-new-chat' };
+        if (!editor) {
+          var editables = document.querySelectorAll('[contenteditable="true"], [contenteditable=""]');
+          for (var j = 0; j < editables.length; j++) {
+            if (editables[j].offsetParent !== null) { editor = editables[j]; break; }
+          }
         }
-        // 根路径本身通常已经是空白新对话，找不到按钮时仍可继续。
-        return { ok: true, method: 'root-chat' };
+        if (!editor) return { ok: false, reason: 'EDITOR_NOT_FOUND' };
+        editor.focus();
+        var focusable = document.activeElement === editor || editor.contains(document.activeElement);
+        if (!focusable) return { ok: false, reason: 'EDITOR_NOT_FOCUSABLE' };
+        // 新会话语义校验：会话区不应已存在用户气泡（推荐/欢迎内容不计）。
+        var userBubbles = document.querySelectorAll('[class*="user"], [class*="User"], [data-role="user"]');
+        var hasUserContent = false;
+        for (var u = 0; u < userBubbles.length; u++) {
+          var b = userBubbles[u];
+          if (b.offsetParent === null) continue;
+          var r = b.getBoundingClientRect();
+          if (r.width < 40 || r.height < 20) continue;
+          var bt = String(b.innerText || '').replace(/\\s+/g, ' ').trim();
+          if (bt.length > 2) { hasUserContent = true; break; }
+        }
+        return { ok: true, reason: hasUserContent ? 'SESSION_NOT_EMPTY' : 'READY', focusable: focusable };
       })();
     `;
-    const result = await safeExecuteJS<{ ok: boolean; method: string }>(webview, code, 5000, 'startNewConversation');
+    const result = await safeExecuteJS<{ ok: boolean; reason: string }>(webview, code, 8000, 'startNewConversation');
+    if (!result || result.ok !== true) {
+      const reason = (result && result.reason) || 'PAGE_UNKNOWN';
+      console.warn('[doubaoBridge] 新对话未就绪:', reason);
+      return { ok: false, reason };
+    }
+    if (result.reason === 'SESSION_NOT_EMPTY') {
+      // 导航后页面恢复了旧会话：不点击任何按钮，按失败处理并提示。
+      console.warn('[doubaoBridge] 新对话页面包含已有用户内容，拒绝继续');
+      return { ok: false, reason: 'SESSION_NOT_EMPTY' };
+    }
     await new Promise((resolve) => setTimeout(resolve, 800));
-    console.log('[doubaoBridge] 新对话已就绪:', result?.method);
-    return result?.ok !== false;
+    console.log('[doubaoBridge] 新对话已就绪（页面状态机验证通过）');
+    return { ok: true };
   } catch (err: any) {
     console.warn('[doubaoBridge] 创建新对话失败:', err.message);
-    return false;
+    return { ok: false, reason: 'EXECUTION_FAILED' };
   }
 }
 
@@ -4903,6 +5708,42 @@ async function scanConversationStructured(
       for (var v = 0; v < videoBlocks.length && v < 20; v++) {
         try {
           var node = videoBlocks[v];
+          var videoData = null;
+          // 新版卡片把 video 放在父级 DOM 的 __reactProps$ children 中，而不是
+          // block-video 自身 fiber.pendingProps。受限递归只提取公开媒体标识，
+          // 不序列化组件树、Cookie 或账号状态。
+          var visited = new WeakSet();
+          var inspected = 0;
+          var findVideoInProps = function(value, depth) {
+            if (!value || typeof value !== 'object' || depth > 10 || inspected++ > 800) return null;
+            if (visited.has(value)) return null;
+            visited.add(value);
+            if (typeof value.vid === 'string' && value.vid.trim()) return value;
+            var keys = Array.isArray(value) ? Object.keys(value) : Object.keys(value);
+            for (var k = 0; k < keys.length; k++) {
+              if (keys[k] === '_owner' || keys[k] === 'stateNode' || keys[k] === 'return' || keys[k] === 'alternate') continue;
+              var found = findVideoInProps(value[keys[k]], depth + 1);
+              if (found) return found;
+            }
+            return null;
+          };
+          var ancestor = node;
+          for (var ancestorDepth = 0; ancestor && ancestorDepth < 8 && !videoData; ancestorDepth++, ancestor = ancestor.parentElement) {
+            var ancestorNames = Object.getOwnPropertyNames(ancestor);
+            for (var an = 0; an < ancestorNames.length; an++) {
+              if (ancestorNames[an].indexOf('__reactProps$') !== 0) continue;
+              var propsVideo = findVideoInProps(ancestor[ancestorNames[an]], 0);
+              if (propsVideo) {
+                videoData = {
+                  vid: propsVideo.vid.trim(),
+                  creation_task_id: typeof propsVideo.creation_task_id === 'string' ? propsVideo.creation_task_id : undefined,
+                  message_id: typeof propsVideo.messageId === 'string' ? propsVideo.messageId : undefined
+                };
+                break;
+              }
+            }
+          }
+
           var propertyNames = Object.getOwnPropertyNames(node);
           var fiberKey = '';
           for (var p = 0; p < propertyNames.length; p++) {
@@ -4911,26 +5752,26 @@ async function scanConversationStructured(
               break;
             }
           }
-          if (!fiberKey) continue;
-          var fiber = node[fiberKey];
-          var videoData = null;
-          for (var depth = 0; fiber && depth < 12; depth++) {
-            var pendingVideo = fiber.pendingProps && fiber.pendingProps.video;
-            var memoizedVideo = fiber.memoizedProps && fiber.memoizedProps.video;
-            var candidateVideo = pendingVideo || memoizedVideo;
-            if (candidateVideo && typeof candidateVideo.vid === 'string' && candidateVideo.vid.trim()) {
-              videoData = {
-                vid: candidateVideo.vid.trim(),
-                creation_task_id: typeof candidateVideo.creation_task_id === 'string'
-                  ? candidateVideo.creation_task_id
-                  : undefined,
-                message_id: typeof candidateVideo.messageId === 'string'
-                  ? candidateVideo.messageId
-                  : undefined
-              };
-              break;
+          if (fiberKey && !videoData) {
+            var fiber = node[fiberKey];
+            for (var depth = 0; fiber && depth < 12; depth++) {
+              var pendingVideo = fiber.pendingProps && fiber.pendingProps.video;
+              var memoizedVideo = fiber.memoizedProps && fiber.memoizedProps.video;
+              var candidateVideo = pendingVideo || memoizedVideo;
+              if (candidateVideo && typeof candidateVideo.vid === 'string' && candidateVideo.vid.trim()) {
+                videoData = {
+                  vid: candidateVideo.vid.trim(),
+                  creation_task_id: typeof candidateVideo.creation_task_id === 'string'
+                    ? candidateVideo.creation_task_id
+                    : undefined,
+                  message_id: typeof candidateVideo.messageId === 'string'
+                    ? candidateVideo.messageId
+                    : undefined
+                };
+                break;
+              }
+              fiber = fiber.return;
             }
-            fiber = fiber.return;
           }
           if (videoData) results.push({ video: videoData });
         } catch(e) {}

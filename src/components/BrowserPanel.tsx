@@ -9,8 +9,8 @@
  */
 
 import React, { useRef, useEffect, useCallback, useState } from 'react';
-import { message, Tooltip, Switch, Modal } from 'antd';
-import type { Account, Task, TaskUpdateInput } from '../types';
+import { Input, message, Modal, notification, Switch, Tooltip } from 'antd';
+import type { Account, AccountAvailability, AccountAvailabilitySource, Task, TaskUpdateInput } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import type { AutomationState } from '../store/useTaskStore';
@@ -18,10 +18,11 @@ import { classifyTaskError } from '../utils/taskRuntime';
 import { evaluateVideoCapability, isRestrictionFailure } from '../utils/videoCapability';
 import { automationEngine } from '../automation/AutomationEngine';
 import { runAdapterSelfCheck } from '../automation/doubaoAdapter';
-import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 import {
   injectPrompt,
-  submitPrompt,
+  verifyPromptReadyForSubmission,
+  submitPromptWithNativeClick,
+  confirmMaterialAuthorizationIfPresent,
   checkGeneratingDetailed,
   getResultUrl,
   switchMode,
@@ -34,18 +35,31 @@ import {
   refreshBlockerBaseline,
   detectVideoGenerationBlocker,
   injectGenerationMonitor,
-  getCachedVideoUrl,
-  getVideoPlayUrl,
+  getGenerationStartTime,
+  getConversationText,
+  getSubmissionMessageCount,
+  getSubmissionEvidence,
   startNewConversation,
   detectRobotVerification,
   resolveVideoArtifact,
   manualResolveVideoArtifact,
 } from '../utils/doubaoBridge';
 import type { VideoArtifactResolution } from '../utils/videoArtifactResolver';
+import {
+  canAttemptSubmission,
+  classifySubmissionReadback,
+  evaluateTerminal,
+  matchesSubmissionConversation,
+  requiresSubmissionReconciliation,
+  updateStableStreak,
+} from '../utils/realSendStateMachine';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
+import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
+import { availabilityBlocksAutomation, probeAccountAvailability } from '../utils/accountAvailability';
+import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 
-/** 将解析结果转换为用户可读的消息 */
+/** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
   const sourceLabels: Record<string, string> = {
     platform_download_info: '创作空间下载信息',
@@ -74,6 +88,38 @@ interface BrowserPanelProps {
   refreshKey: number;
 }
 
+function getAccountHome(account: Pick<Account, 'platform'>): string {
+  return account.platform === 'dola' ? 'https://www.dola.com/chat' : 'https://www.doubao.com/chat/';
+}
+
+function getAccountHost(account: Pick<Account, 'platform'>): string {
+  return account.platform === 'dola' ? 'dola.com' : 'doubao.com';
+}
+
+function getAccountSessionPartition(account: Pick<Account, 'platform' | 'partition'>): string {
+  const platform = account.platform === 'dola' ? 'dola' : 'doubao';
+  return `persist:${platform}_${account.partition}`;
+}
+
+/** 已经可能产生外部副作用，自动化必须暂停并禁止重试。 */
+class SubmissionSafetyPauseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SubmissionSafetyPauseError';
+  }
+}
+
+/** 页面明确需要用户处理；任务进入等待处理态，禁止继续或自动重发。 */
+class AccountAvailabilityPauseError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = 'AccountAvailabilityPauseError';
+  }
+}
+
 const BrowserPanel: React.FC<BrowserPanelProps> = ({
   accounts,
   activeAccount,
@@ -86,17 +132,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
   const manualVideoUsageRef = useRef<Set<string>>(new Set());
+  const submissionReconcileRef = useRef<Set<string>>(new Set());
+  const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
+  const availabilityRequestHandledRef = useRef<Record<string, number>>({});
+  const availabilityProbeSequenceRef = useRef<Record<string, number>>({});
   /** 每个账号的 webview 监听器与定时器作用域。 */
   const resourceScopesRef = useRef<Map<string, WebviewResourceScope>>(new Map());
 
   const [activeLoading, setActiveLoading] = useState(true);
   const [loadText, setLoadText] = useState('加载豆包中...');
+  /** webview 注册完成时递增，确保已预留的任务会在页面实例出现后重新路由。 */
+  const [webviewEpoch, setWebviewEpoch] = useState(0);
   const [manualVideoExtracting, setManualVideoExtracting] = useState(false);
-  /** 实验开关（默认关闭；用户显式开启后，官方授权失败时尝试直接提取源文件） */
+  const [publicShareDialogOpen, setPublicShareDialogOpen] = useState(false);
+  const [publicShareUrl, setPublicShareUrl] = useState('');
   const [experimentalNoWatermark, setExperimentalNoWatermark] = useState<boolean>(() => isExperimentalNoWatermarkEnabled());
 
-  /** 切换实验开关：开启需二次确认（对抗平台能力，有账号风控风险）。 */
-  const toggleExperimentalNoWatermark = (enabled: boolean) => {
+  /** 实验直取默认关闭；开启时明确提示平台条款与账号风控风险。 */
+  const toggleExperimentalNoWatermark = (enabled: boolean): void => {
     if (!enabled) {
       setExperimentalNoWatermarkEnabled(false);
       setExperimentalNoWatermark(false);
@@ -105,15 +158,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     Modal.confirm({
       title: '开启实验模式：直接提取源文件？',
       content:
-        '该模式在豆包官方未开放无水印下载时，尝试绕过官方授权直接提取源文件。' +
-        '风险：可能违反豆包服务条款、触发账号风控；提取结果可能仍含水印或无法播放。' +
+        '该模式在豆包官方未开放无水印下载时，尝试从当前对话直接提取源文件。' +
+        '可能违反平台条款或触发账号风控，结果也可能仍含水印或无法播放。' +
         '仅对手动提取生效，自动任务不受影响。确定开启？',
       okText: '知晓风险，开启',
       cancelText: '取消',
       onOk: () => {
         setExperimentalNoWatermarkEnabled(true);
         setExperimentalNoWatermark(true);
-        message.warning('实验模式已开启：官方未授权时将以实验通道提取源文件（结果未经官方确认）');
+        message.warning('实验模式已开启，仅手动提取会使用实验通道');
       },
     });
   };
@@ -123,6 +176,76 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const accountAutoMsg = useTaskStore((s) => s.accountAutoMessage);
   const executingTasks = useTaskStore((s) => s.executingTasks);
   const tasks = useTaskStore((s) => s.tasks);
+  const availabilityCheckRequests = useAccountStore((s) => s.availabilityCheckRequests);
+
+  /** 真实读取指定账号当前页面并持久化可用性；不读取 Cookie 或页面内部身份数据。 */
+  const performAvailabilityCheck = useCallback(async (
+    accountId: string,
+    webview: HTMLWebViewElement,
+    source: AccountAvailabilitySource,
+  ): Promise<AccountAvailability> => {
+    const accountState = useAccountStore.getState();
+    const account = accountState.accounts.find((item) => item.id === accountId);
+    if (!account) {
+      return {
+        state: 'unavailable', reason: 'account_missing', message: '账号不存在',
+        checkedAt: new Date().toISOString(), source,
+      };
+    }
+    accountState.setAvailabilityChecking(accountId, true);
+    const sequence = (availabilityProbeSequenceRef.current[accountId] || 0) + 1;
+    availabilityProbeSequenceRef.current[accountId] = sequence;
+    try {
+      const availability = await probeAccountAvailability(webview, account.platform || 'doubao', source);
+      // webview 被刷新/删除时丢弃旧实例的迟到结果。
+      if (
+        registryRef.current.get(accountId) !== webview ||
+        availabilityProbeSequenceRef.current[accountId] !== sequence
+      ) return availability;
+      await useAccountStore.getState().setAccountAvailability(accountId, availability);
+      if (availability.state === 'ready') {
+        setTimeout(() => useTaskStore.getState().processQueue(), 0);
+      }
+      if (source === 'manual') {
+        if (availability.state === 'ready') message.success(`${account.name}：检测通过，可执行自动化`);
+        else message.warning(`${account.name}：${availability.message}`);
+      }
+      return availability;
+    } finally {
+      if (availabilityProbeSequenceRef.current[accountId] === sequence) {
+        useAccountStore.getState().setAvailabilityChecking(accountId, false);
+      }
+    }
+  }, []);
+
+  /** 启动探测完成后合并提醒，避免多账号逐条弹窗轰炸用户。 */
+  const availabilityAlertSignature = accounts
+    .filter((account) => ['action_required', 'login_required', 'unavailable'].includes(account.health?.availability?.state || ''))
+    .map((account) => `${account.id}:${account.health?.availability?.state}:${account.health?.availability?.reason}`)
+    .sort()
+    .join('|');
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const blocked = useAccountStore.getState().accounts.filter((account) =>
+        ['action_required', 'login_required', 'unavailable'].includes(account.health?.availability?.state || ''),
+      );
+      if (blocked.length === 0) {
+        notification.destroy('account-availability-summary');
+        return;
+      }
+      const preview = blocked.slice(0, 4).map((account) =>
+        `${account.name}：${account.health?.availability?.message || '需要处理'}`,
+      ).join('；');
+      notification.warning({
+        key: 'account-availability-summary',
+        message: `${blocked.length} 个账号需要处理`,
+        description: `${preview}${blocked.length > 4 ? `；另有 ${blocked.length - 4} 个` : ''}。点击左侧账号进入对应页面处理。`,
+        duration: 0,
+        placement: 'topRight',
+      });
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [availabilityAlertSignature]);
 
   const normalizeVideoUrls = (urls: string[]): string[] => {
     const seen = new Set<string>();
@@ -192,6 +315,103 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     };
   }, []);
 
+  // 已可能提交的任务只能沿原会话只读核对产物，绝不重新注入或点击发送。
+  useEffect(() => {
+    const handleSubmissionReconcile = async (event: Event): Promise<void> => {
+      const taskId = (event as CustomEvent<{ taskId: string }>).detail?.taskId;
+      if (!taskId || submissionReconcileRef.current.has(taskId)) return;
+      const task = useTaskStore.getState().tasks.find((item) => item.id === taskId);
+      if (!requiresSubmissionReconciliation(task)) {
+        message.warning('该任务没有需要核对的提交记录');
+        return;
+      }
+      const accountId = task?.assignedAccountId;
+      const webview = accountId ? registryRef.current.get(accountId) : undefined;
+      const storedConversationUrl = task?.runtime?.conversationUrl;
+      if (!task || !accountId || !webview || !storedConversationUrl) {
+        message.error('缺少原账号页面或原对话地址，已保持暂停且未重新发送');
+        return;
+      }
+
+      submissionReconcileRef.current.add(taskId);
+      useAccountStore.getState().selectAccount(accountId);
+      useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
+      try {
+        const currentUrl = webview.getURL();
+        const storedIsGenericChat = /^https:\/\/www\.(doubao|dola)\.com\/chat\/?$/i.test(storedConversationUrl);
+        const currentIsConcreteChat = /^https:\/\/www\.(doubao|dola)\.com\/chat\/[^/?#]+/i.test(currentUrl);
+        // 旧运行在发送前只保存了 /chat/。平台随后分配的具体会话 URL 已在同账号
+        // webview 中，必须优先回读它；仍用根地址会丢失刚生成的会话。
+        const conversationUrl = storedIsGenericChat && currentIsConcreteChat ? currentUrl : storedConversationUrl;
+        if (currentUrl !== conversationUrl) {
+          webview.loadURL(conversationUrl);
+        }
+        // loadURL 是异步导航；旧实现立即读取会误读上一页并判失败。轮询只读取
+        // URL/会话文本，不触发任何点击、键盘或表单动作。
+        let conversationMatched = false;
+        for (let attempt = 0; attempt < 40; attempt++) {
+          if (webview.getURL() === conversationUrl) {
+            const conversationText = await getConversationText(webview);
+            if (matchesSubmissionConversation(task.prompt, conversationText)) {
+              conversationMatched = true;
+              break;
+            }
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!conversationMatched) {
+          throw new Error('原对话未同时匹配任务提示词前缀与平台提交回执，无法安全绑定结果');
+        }
+        if (conversationUrl !== storedConversationUrl) {
+          await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { conversationUrl } });
+        }
+        // 任务台账只要求绑定平台真实可播放产物；无水印授权属于手动下载能力，
+        // 不能把 without_watermark=false 误判为“视频没有生成”。
+        const resolution = await resolveVideoArtifact(webview, {
+          conversationUrl,
+          timeoutMs: 45_000,
+          isManual: true,
+        });
+        const outputs = resolution.status === 'resolved' && resolution.url
+          ? normalizeVideoUrls([resolution.url])
+          : [];
+        if (outputs.length === 0) {
+          const pendingMessage = `平台已确认提交，暂未读取到产物；请稍后再次核对（${formatResolutionMessage(resolution)}）`;
+          await useTaskStore.getState().updateTaskRuntime(taskId, {
+            status: 'paused',
+            result: pendingMessage,
+            errorInfo: { code: 'submission_uncertain', message: pendingMessage, recoverable: true, detectedAt: new Date().toISOString() },
+            runtime: { stage: 'paused', message: pendingMessage, lastHeartbeatAt: new Date().toISOString() },
+          });
+          message.warning(pendingMessage);
+          return;
+        }
+        if (!submissionReconcileUsageRef.current.has(taskId)) {
+          submissionReconcileUsageRef.current.add(taskId);
+          await useAccountStore.getState().recordSeedanceUsage(accountId, getVideoQuotaUsageUnits(task.videoConfig?.duration));
+        }
+        await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
+        await useTaskStore.getState().completeAutomation(taskId, accountId, outputs[0], outputs);
+        message.success('平台产物核对成功，任务台账已恢复完成；未重新发送');
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const pauseMessage = `核对未完成：${reason}；任务保持暂停，未重新发送`;
+        await useTaskStore.getState().updateTaskRuntime(taskId, {
+          status: 'paused',
+          result: pauseMessage,
+          errorInfo: { code: 'submission_uncertain', message: pauseMessage, recoverable: true, detectedAt: new Date().toISOString() },
+          runtime: { stage: 'paused', message: pauseMessage, lastHeartbeatAt: new Date().toISOString() },
+        });
+        message.error(pauseMessage);
+      } finally {
+        submissionReconcileRef.current.delete(taskId);
+        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+      }
+    };
+    window.addEventListener('reconcile-task-submission', handleSubmissionReconcile);
+    return () => window.removeEventListener('reconcile-task-submission', handleSubmissionReconcile);
+  }, []);
+
   /** 幂等释放指定账号的 webview、监听器和定时器。 */
   const disposeAccountWebview = (accountId: string): void => {
     resourceScopesRef.current.get(accountId)?.dispose();
@@ -259,8 +479,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     loadingMapRef.current.set(accId, true);
 
     const webview = document.createElement('webview') as HTMLWebViewElement;
-    webview.setAttribute('src', 'https://www.doubao.com/chat/');
-    webview.setAttribute('partition', `persist:doubao_${account.partition}`);
+    webview.setAttribute('src', getAccountHome(account));
+    webview.setAttribute('partition', getAccountSessionPartition(account));
     webview.setAttribute('allowpopups', 'true');
     webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;';
     webview.style.visibility = 'hidden';
@@ -268,6 +488,33 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     let pollInterval: ReturnType<typeof setInterval> | undefined;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let availabilityTimer: ReturnType<typeof setTimeout> | undefined;
+    let availabilitySettleTimer: ReturnType<typeof setTimeout> | undefined;
+    let availabilityFinalTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const scheduleAvailabilityCheck = (source: AccountAvailabilitySource, delayMs: number = 600): void => {
+      scope.clearTimer(availabilityTimer);
+      scope.clearTimer(availabilitySettleTimer);
+      scope.clearTimer(availabilityFinalTimer);
+      availabilityTimer = setTimeout(() => {
+        if (!scope.active || registryRef.current.get(accId) !== webview) return;
+        void performAvailabilityCheck(accId, webview, source);
+      }, delayMs);
+      scope.trackTimer(availabilityTimer);
+      // 豆包 SPA 常在 dom-ready 后数秒才渲染“登录”/验证层。第二次稳定化检测
+      // 防止把匿名页先出现的输入框误判为已登录。
+      availabilitySettleTimer = setTimeout(() => {
+        if (!scope.active || registryRef.current.get(accId) !== webview) return;
+        void performAvailabilityCheck(accId, webview, source);
+      }, Math.max(3500, delayMs + 3000));
+      scope.trackTimer(availabilitySettleTimer);
+      // 多账号同时打开时，隐藏 webview 的账号壳可能需要更长时间才稳定。
+      availabilityFinalTimer = setTimeout(() => {
+        if (!scope.active || registryRef.current.get(accId) !== webview) return;
+        void performAvailabilityCheck(accId, webview, source);
+      }, Math.max(15_000, delayMs + 12_000));
+      scope.trackTimer(availabilityFinalTimer);
+    };
 
     // 统一加载完成处理
     const markLoaded = (evt: string) => {
@@ -294,12 +541,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
 
-    scope.listen(webview, 'did-finish-load', () => markLoaded('did-finish-load'));
-    scope.listen(webview, 'did-stop-loading', () => markLoaded('did-stop-loading'));
-    scope.listen(webview, 'did-navigate', () => markLoaded('did-navigate'));
-    scope.listen(webview, 'did-navigate-in-page', () => markLoaded('did-navigate-in-page'));
+    scope.listen(webview, 'did-finish-load', () => { markLoaded('did-finish-load'); scheduleAvailabilityCheck('navigation'); });
+    scope.listen(webview, 'did-stop-loading', () => { markLoaded('did-stop-loading'); scheduleAvailabilityCheck('navigation'); });
+    scope.listen(webview, 'did-navigate', () => { markLoaded('did-navigate'); scheduleAvailabilityCheck('navigation'); });
+    scope.listen(webview, 'did-navigate-in-page', () => { markLoaded('did-navigate-in-page'); scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'dom-ready', () => {
       markLoaded('dom-ready');
+      scheduleAvailabilityCheck(account.health?.availability ? 'navigation' : 'startup');
     });
     scope.listen(webview, 'did-fail-load', () => {
       if (!scope.active) return;
@@ -310,10 +558,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         setActiveLoading(false);
         setLoadText('加载失败');
       }
+      scheduleAvailabilityCheck('navigation', 0);
     });
 
     container.appendChild(webview);
     registryRef.current.set(accId, webview);
+    setWebviewEpoch((value) => value + 1);
     console.log(`[BrowserPanel] webview 已创建: ${accId}, src=${webview.getAttribute('src')}, partition=${webview.getAttribute('partition')}, inDOM=${container.contains(webview)}`);
 
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
@@ -328,7 +578,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const url = wv.getURL?.() || '';
       const isLoaded = loadingMapRef.current.get(accId);
       
-      if (isLoaded && url.startsWith('http') && url.includes('doubao.com')) {
+      if (isLoaded && url.startsWith('http') && url.includes(getAccountHost(account))) {
         console.log(`[BrowserPanel] 轮询检测到 webview 已加载: ${accId}, url=${url}`);
         markLoaded('poll');
       }
@@ -349,6 +599,35 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     scope.trackTimer(timeoutId);
   };
 
+  // 账号菜单中的“立即检测”请求由 BrowserPanel 使用该账号的隔离 webview 执行。
+  useEffect(() => {
+    for (const [accountId, requestId] of Object.entries(availabilityCheckRequests)) {
+      if (!requestId || requestId <= (availabilityRequestHandledRef.current[accountId] || 0)) continue;
+      const webview = registryRef.current.get(accountId);
+      if (!webview) continue;
+      availabilityRequestHandledRef.current[accountId] = requestId;
+      void performAvailabilityCheck(accountId, webview, 'manual');
+    }
+  }, [availabilityCheckRequests, performAvailabilityCheck, webviewEpoch]);
+
+  // 用户正在查看的页面可能在不导航的情况下弹出验证或完成登录。
+  // 低频只读复检可及时更新提醒；任务执行期间由 pre_task/pre_submit 专用门禁接管。
+  useEffect(() => {
+    const accountId = activeAccount?.id;
+    if (!accountId) return;
+    const recheck = () => {
+      if (useTaskStore.getState().accountBusy[accountId]) return;
+      const webview = registryRef.current.get(accountId);
+      if (webview) void performAvailabilityCheck(accountId, webview, 'navigation');
+    };
+    const initialTimer = setTimeout(recheck, 2000);
+    const interval = setInterval(recheck, 30_000);
+    return () => {
+      clearTimeout(initialTimer);
+      clearInterval(interval);
+    };
+  }, [activeAccount?.id, performAvailabilityCheck, webviewEpoch]);
+
   // ---- 切换可见性 ----
   useEffect(() => {
     if (!activeAccount) return;
@@ -366,6 +645,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     });
   }, [activeAccount?.id]);
 
+  /** 从当前账号的可见对话手动提取视频；实验通道只在显式开关开启时参与。 */
   const handleExtractCurrentVideo = async (): Promise<void> => {
     if (!activeAccount) return;
     const accountId = activeAccount.id;
@@ -380,12 +660,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
 
     setManualVideoExtracting(true);
-    useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在查询豆包官方无水印下载...');
+    useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在解析当前对话视频...');
     try {
       const result = await manualResolveVideoArtifact(webview, {
         conversationUrl: webview.getURL(),
         timeoutMs: 30_000,
         isManual: true,
+        experimentalNoWatermark: isExperimentalNoWatermarkEnabled(),
       });
       const outputs = result.status === 'resolved' && result.url
         ? normalizeVideoUrls([result.url])
@@ -397,20 +678,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       const manualTaskId = `manual-${Date.now().toString(36)}`;
-      const download = await window.electronAPI.tasks.downloadOutputs([
-        {
-          taskId: manualTaskId,
-          prompt: '手动对话视频',
-          outputs,
-          accountId,
-          mode: 'video',
-        },
-      ]);
-      if (!download.success) {
-        throw new Error(download.error || '视频地址已提取，但下载失败');
-      }
+      const download = await window.electronAPI.tasks.downloadOutputs([{
+        taskId: manualTaskId,
+        prompt: '手动对话视频',
+        outputs,
+        accountId,
+        mode: 'video',
+      }]);
+      if (!download.success) throw new Error(download.error || '视频地址已提取，但下载失败');
 
-      // 同一会话产物在本次应用会话内只计入一次，避免重复点击让额度预测虚减。
       const usageKey = `${accountId}:${result.vid || outputs[0]}`;
       if (!manualVideoUsageRef.current.has(usageKey)) {
         manualVideoUsageRef.current.add(usageKey);
@@ -418,12 +694,37 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
       useTaskStore.getState().setAccountAutomationState(accountId, 'completed', `视频已下载（来源：${result.source || 'unknown'}）`);
-      message.success(`已下载 ${download.count} 个视频，并更新 Seedance 额度预测`);
-    } catch (err: unknown) {
-      const error = err instanceof Error ? err.message : String(err);
-      console.error('[BrowserPanel] 手动视频提取失败：', err);
-      message.error(`提取或下载失败：${error}`);
+      message.success(`已下载 ${download.count} 个视频`);
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error('[BrowserPanel] 手动视频提取失败：', error);
+      message.error(`提取或下载失败：${reason}`);
       useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
+    } finally {
+      setManualVideoExtracting(false);
+    }
+  };
+
+  const handleDownloadPublicShareMedia = async (): Promise<void> => {
+    const shareUrl = publicShareUrl.trim();
+    if (!shareUrl) {
+      message.warning('请先粘贴豆包公开分享链接');
+      return;
+    }
+    setManualVideoExtracting(true);
+    try {
+      const settings = await window.electronAPI.settings.get();
+      const download = await window.electronAPI.tasks.downloadPublicShareMedia(shareUrl, settings.downloadDir || undefined);
+      if (!download.success) {
+        message.error(`公开媒体下载失败：${download.error || '未找到可验证的视频流'}`);
+        return;
+      }
+      setPublicShareDialogOpen(false);
+      setPublicShareUrl('');
+      const size = download.contentLength ? `，${Math.ceil(download.contentLength / 1024 / 1024)} MB` : '';
+      message.success(`已下载页面公开媒体流（${download.sourceHost || '公开来源'}${size}）。该文件保留平台可能附带的水印。`);
+    } catch (err: unknown) {
+      message.error(`公开媒体下载失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setManualVideoExtracting(false);
     }
@@ -449,74 +750,6 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     window.addEventListener('cancel-task-automation', handleCancelAutomation);
     return () => window.removeEventListener('cancel-task-automation', handleCancelAutomation);
-  }, []);
-
-  // ---- 手动补抓视频产物/去水印 ----
-  useEffect(() => {
-    const handleManualExtract = async (event: Event) => {
-      const customEvent = event as CustomEvent<{ task: Task }>;
-      const task = customEvent.detail?.task;
-      if (!task || task.mode !== 'video') return;
-
-      const accountId = task.assignedAccountId;
-      const webview = accountId ? registryRef.current.get(accountId) : null;
-      if (!accountId || !webview) {
-        message.error('未找到该任务对应的账号页面');
-        return;
-      }
-      if (useTaskStore.getState().accountBusy[accountId]) {
-        message.warning('该账号正在执行其他任务，请暂停或等待完成后再提取');
-        return;
-      }
-
-      try {
-        useAccountStore.getState().selectAccount(accountId);
-        useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在查询豆包官方无水印下载...');
-        const conversationUrl = task.runtime?.conversationUrl;
-        if (conversationUrl && webview.getURL() !== conversationUrl) {
-          message.info('正在打开该任务对应的豆包对话...');
-          webview.loadURL(conversationUrl);
-          await waitForWebviewReady(webview, 20_000);
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
-        }
-        // 使用手动提取（有限重试 + 15s 超时）
-        const result = await manualResolveVideoArtifact(webview, {
-          conversationUrl: task.runtime?.conversationUrl,
-          runId: task.runtime?.runId,
-          timeoutMs: 15000,
-          isManual: true,
-          experimentalNoWatermark: isExperimentalNoWatermarkEnabled(),
-        });
-        if (result.status === 'resolved' && result.url) {
-          const outputs = normalizeVideoUrls([result.url]);
-          if (outputs.length > 0) {
-            await useTaskStore.getState().updateTaskStatus(task.id, 'done', outputs[0], outputs);
-            // 自动流程在成功完成时已记账；仅为此前未完成、现在由人工补提取成功的任务补记一次额度。
-            if (task.status !== 'done') {
-              const usageKey = `${accountId}:${task.id}:${result.vid || outputs[0]}`;
-              if (!manualVideoUsageRef.current.has(usageKey)) {
-                manualVideoUsageRef.current.add(usageKey);
-                const units = task.videoConfig?.model === 'seedance-2.0' ? 2 : 1;
-                await useAccountStore.getState().recordSeedanceUsage(accountId, units);
-              }
-            }
-            useTaskStore.getState().setAccountAutomationState(accountId, 'completed', `视频地址已提取（来源：${result.source}）`);
-            message.success(`已为该任务绑定视频地址（来源：${result.source}）`);
-            return;
-          }
-        }
-        // 解析失败，显示结构化原因
-        const failMsg = formatResolutionMessage(result);
-        message.warning(`暂未提取到视频地址：${failMsg}`);
-        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
-      } catch (err: any) {
-        message.error(`提取失败：${err.message || err}`);
-        useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
-      }
-    };
-
-    window.addEventListener('manual-extract-video-output', handleManualExtract);
-    return () => window.removeEventListener('manual-extract-video-output', handleManualExtract);
   }, []);
 
   useEffect(() => {
@@ -572,10 +805,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const task = tasks.find((t) => t.id === taskId);
       if (!task) return;
       console.log(`[BrowserPanel] 路由任务 ${taskId} → ${accountId}`);
+      // 调度器取得执行锁后，必须由这里激活对应账号；不能依赖用户先手动点开。
+      useAccountStore.getState().selectAccount(accountId);
       runningRef.current.add(accountId);
       executeAutomation(accountId, taskId, task.prompt, task.mode || "chat", webview, task.videoConfig, task.attachments, task.audioAttachment);
     });
-  }, [accountBusy, executingTasks]);
+  }, [accountBusy, executingTasks, tasks, webviewEpoch]);
 
   // ---- 自动化执行 ----
   const executeAutomation = async (
@@ -590,6 +825,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   ) => {
     const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask } =
       useTaskStore.getState();
+    const expectedRunId = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.runId;
     let controller: AbortController;
     try {
       controller = automationEngine.createController(taskId, accountId);
@@ -603,6 +839,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
     try {
       console.log(`[Automation:${accountId}] 开始`);
+
+      setAccountAutomationState(accountId, 'injecting', '正在检测账号可用性...', 'preparing_account');
+      const preTaskAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
+      if (availabilityBlocksAutomation(preTaskAvailability)) {
+        useAccountStore.getState().selectAccount(accountId);
+        throw new AccountAvailabilityPauseError(preTaskAvailability.message, preTaskAvailability.reason);
+      }
 
       // 视频能力预检：在提交前基于本地已知状态判断是否允许提交
       if (mode === 'video' && videoConfig) {
@@ -630,10 +873,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       let taskConversationUrl: string | undefined;
-      for (let submissionAttempt = 0; submissionAttempt < 3; submissionAttempt++) {
+      let initialMsgCount = 0;
+      let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
-      const newConversationReady = await startNewConversation(webview);
-      if (!newConversationReady) throw new Error('创建新对话失败');
+      const newConversationResult = await startNewConversation(webview);
+      if (!newConversationResult.ok) {
+        const failedAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
+        if (failedAvailability.state !== 'ready') {
+          useAccountStore.getState().selectAccount(accountId);
+          throw new AccountAvailabilityPauseError(failedAvailability.message, failedAvailability.reason);
+        }
+        // reason 为脱敏状态码（如 PAGE_NOT_READY/EDITOR_NOT_FOUND/SESSION_NOT_EMPTY），不泄露页面细节。
+        throw new Error(`创建新对话失败（${newConversationResult.reason || 'PAGE_UNKNOWN'}）`);
+      }
       await waitForWebviewReady(webview, 15000);
       taskConversationUrl = webview.getURL();
       await updateTaskRuntime(taskId, { runtime: { conversationUrl: taskConversationUrl } });
@@ -647,7 +899,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // image/video 模式：在 AI 创作页面点击 Tab 切换
         if (mode === 'image' || mode === 'video') {
           setAccountAutomationState(accountId, 'injecting', '点击' + modeLabel + 'Tab...', 'switching_mode');
-          await clickAITab(webview, mode);
+          const switched = await clickAITab(webview, mode);
+          if (!switched) {
+            throw new Error(`${modeLabel}模式入口未就绪，已在提交前停止`);
+          }
           await pause(1500); // 等待 Tab 切换动画
         }
 
@@ -706,6 +961,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         await waitForWebviewReady(webview, 15000);
       }
 
+      const preSubmitAvailability = await performAvailabilityCheck(accountId, webview, 'pre_submit');
+      if (preSubmitAvailability.state !== 'ready') {
+        useAccountStore.getState().selectAccount(accountId);
+        throw new AccountAvailabilityPauseError(preSubmitAvailability.message, preSubmitAvailability.reason);
+      }
+
       // 注入生成状态网络监听器（后台 webview 也能准确检测生成完成）
       await injectGenerationMonitor(webview);
       if (mode === 'video') {
@@ -719,16 +980,90 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       ]);
       if (!injected) throw new Error('注入失败');
       await pause(800);
+      if (!await verifyPromptReadyForSubmission(webview, prompt)) {
+        throw new Error('提示词全文回读不一致，可能存在截断或台词缺失；已在提交前停止');
+      }
 
+      // 某些账号的素材确认会自动继续此前被拦截的发送。确认前先取只读基线，
+      // 确认后若用户消息已进入会话，则后续绝不能再点一次发送。
+      const generationStartTimeBeforeSubmit = await getGenerationStartTime(webview);
+      initialMsgCount = await getSubmissionMessageCount(webview);
+      let authorizationTriggeredSubmission = false;
+
+      // 参考素材首次用于某个账号时，新版页面会用“安全确认”遮挡发送按钮。
+      // 必须在写入 submittedAt 之前精确处理并回读；结构异常时提交前停止。
+      if (mode === 'video' && attachments && attachments.length > 0) {
+        const authorization = await confirmMaterialAuthorizationIfPresent(webview);
+        if (authorization === 'blocked') {
+          throw new AccountAvailabilityPauseError('素材安全确认未完成，请检查右侧页面；本次尚未提交', 'material_authorization_required');
+        }
+        if (authorization === 'confirmed') {
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            await pause(500);
+            const evidence = await getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+            if (classifySubmissionReadback(evidence) === 'confirmed') {
+              authorizationTriggeredSubmission = true;
+              break;
+            }
+          }
+        }
+      }
+
+      // P0：真实发送是不可重复副作用。先从当前任务快照核对 runId/submittedAt，
+      // 再把本次提交意图持久化；写入失败或运行已变化时绝不点击页面。
+      const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
+      if (!canAttemptSubmission(expectedRunId, currentRuntime?.runId, currentRuntime?.submittedAt)) {
+        throw new SubmissionSafetyPauseError('本次运行已存在发送记录或运行身份已变化；系统已停止，未再次发送');
+      }
+      const submissionMarkedAt = new Date().toISOString();
+      await updateTaskRuntime(taskId, {
+        runtime: {
+          stage: 'submitting',
+          message: '正在发送...',
+          stageStartedAt: submissionMarkedAt,
+          lastHeartbeatAt: submissionMarkedAt,
+          submittedAt: submissionMarkedAt,
+        },
+      });
+      const persistedRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
+      if (persistedRuntime?.runId !== expectedRunId || persistedRuntime?.submittedAt !== submissionMarkedAt) {
+        throw new Error('提交意图持久化失败；为避免重复发送，本次未执行页面提交');
+      }
       setAccountAutomationState(accountId, 'submitting', '正在发送...', 'submitting');
-      let submitted = false;
+      // 必须和提交回读使用同一个 DOM 选择器；综合生成检测可能因为网络状态
+      // 提前返回而没有消息计数，不能把旧会话消息误当成本次发送回执。
+      let submitted = authorizationTriggeredSubmission;
       // 视频/图片模式下直接用发送按钮提交（聊天+标签模式，发送按钮就是提交）
       // 之前的"生成视频"文字按钮会发送默认提示词，不是输入框内容
-      submitted = await Promise.race([
-        submitPrompt(webview),
-        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
-      ]);
-      if (!submitted) throw new Error('提交失败');
+      if (!authorizationTriggeredSubmission) {
+        try {
+          submitted = await Promise.race([
+            submitPromptWithNativeClick(webview),
+            new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('提交超时')), 10000)),
+          ]);
+        } catch {
+          throw new SubmissionSafetyPauseError('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
+        }
+      }
+      if (!submitted) {
+        throw new SubmissionSafetyPauseError('发送按钮不可用或点击结果不确定；系统已停止且未自动重发');
+      }
+
+      let submissionConfirmed = false;
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await pause(500);
+        const evidence = await getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+        if (classifySubmissionReadback(evidence) === 'confirmed') {
+          submissionConfirmed = true;
+          break;
+        }
+      }
+      if (!submissionConfirmed) {
+        throw new SubmissionSafetyPauseError('发送状态不确定，请人工核对豆包会话；系统未自动重发');
+      }
+      // 新版页面不总是暴露 data-message-id 或网络监听状态；保存“用户消息已进入
+      // 会话后”的文本基线，后续仅把新的会话内容认定为助手回复终态。
+      conversationTextAfterSubmit = await getConversationText(webview);
 
       // 提交成功后刷新阻断检测基线。
       // resetVideoCaptureCache 在注入提示词前设置基线，此时用户消息尚未渲染。
@@ -750,27 +1085,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       if (verificationDetected) {
-        await useAccountStore.getState().recordAccountOutcome(accountId, 'verification', 'verification');
+        await useAccountStore.getState().setAccountAvailability(accountId, {
+          state: 'action_required',
+          reason: 'human_verification',
+          message: '需要在右侧页面完成人机验证，然后重新检测',
+          checkedAt: new Date().toISOString(),
+          source: 'pre_submit',
+        });
         useAccountStore.getState().selectAccount(accountId);
-        setAccountAutomationState(accountId, 'submitting', '请手动完成机器人验证，完成后将自动重新提交...', 'waiting_verification');
-        let clearChecks = 0;
-        for (let waitCheck = 0; waitCheck < 900; waitCheck++) {
-          await pause(1000);
-          if (await detectRobotVerification(webview)) {
-            clearChecks = 0;
-          } else {
-            clearChecks++;
-            if (clearChecks >= 2) break;
-          }
-        }
-        if (clearChecks < 2) throw new Error('等待机器人验证超时');
-        if (submissionAttempt >= 2) throw new Error('机器人验证后连续重新提交失败');
-        setAccountAutomationState(accountId, 'injecting', '验证已完成，正在新对话中重新上传并提交...', 'new_conversation');
-        await pause(1000);
-        continue;
-      }
-
-      break;
+        throw new AccountAvailabilityPauseError('检测到机器人验证，请人工处理并核对会话；系统不会自动重新提交', 'human_verification');
       }
 
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...', 'generating');
@@ -779,19 +1102,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         runtime: { conversationUrl: webview.getURL(), lastHeartbeatAt: new Date().toISOString() },
       });
 
-      // 记录初始消息数（用于兜底判断）
-      let initialMsgCount = 0;
-      try {
-        const initial = await checkGeneratingDetailed(webview);
-        initialMsgCount = initial.messageCount || 0;
-      } catch {}
-
       let generating = true;
       let imageUrls: string[] = [];
       const generationWaitStartedAt = Date.now();
       const generationWaitBudgetMs = mode === 'video' ? 60 * 60 * 1000 : 10 * 60 * 1000;
       let unknownCount = 0;
       const maxUnknown = 10; // 连续 10 次无法确定（约 30 秒）触发兜底
+      // P0-3：chat 模式真实回复终态——提交后基线文本的净增长 + 连续稳定采样。
+      let stableStreak = 0;
+      let lastConversationText = conversationTextAfterSubmit;
 
       while (Date.now() - generationWaitStartedAt < generationWaitBudgetMs) {
         await pause(3000);
@@ -801,18 +1120,47 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             new Promise<never>((_, rej) => setTimeout(() => rej(new Error('检测超时')), 8000)),
           ]);
 
-          if (detail.status === 'detected') {
-            // 明确检测到结果
+          if (mode === 'chat') {
+            // P0-3：只把“提交后基线文本的净增长 + 稳定终态”认定为助手回复。
+            // 历史消息/欢迎语/推荐内容都落在提交后基线内，不计为回复；
+            // 消息数量仅作补充证据，不单独作为完成依据。
+            const currentConversationText = await getConversationText(webview);
+            stableStreak = updateStableStreak(lastConversationText, currentConversationText, stableStreak);
+            lastConversationText = currentConversationText;
+            const networkFinished = detail.status === 'detected' && !detail.generating;
+            const decision = evaluateTerminal({
+              baselineText: conversationTextAfterSubmit,
+              currentText: currentConversationText,
+              networkFinished,
+              messageCountDelta: Math.max(0, (detail.messageCount || 0) - initialMsgCount),
+              stableStreak,
+            });
+            if (decision === 'completed') {
+              console.log(`[Automation:${accountId}] 真实回复终态确认：基线后新增回复内容且已稳定`);
+              generating = false;
+            }
+            unknownCount = 0;
+          } else if (detail.status === 'detected') {
+            // 明确检测到结果（video/image 保留既有语义）
             generating = detail.generating;
             unknownCount = 0;
           } else {
-            // 无法确定，使用消息数量兜底
+            // 无法确定，使用消息数量兜底（video/image）
             unknownCount++;
             const currentMsgCount = detail.messageCount || 0;
             // 如果消息数增加了（说明有新回复），且最新消息有产物或输入框可用，认为完成
             if (unknownCount >= maxUnknown && currentMsgCount > initialMsgCount) {
               console.log(`[Automation:${accountId}] 兜底检测：消息数从 ${initialMsgCount} → ${currentMsgCount}，认为生成完成`);
               generating = false;
+            }
+            if (unknownCount >= maxUnknown && !generating) {
+              // 保持原消息计数路径的语义；无需额外读取。
+            } else if (unknownCount >= maxUnknown) {
+              const currentConversationText = await getConversationText(webview);
+              if (conversationTextAfterSubmit && currentConversationText.length > conversationTextAfterSubmit.length && currentConversationText.startsWith(conversationTextAfterSubmit)) {
+                console.log(`[Automation:${accountId}] 新版页面回读：会话内容已在提交后新增，认为生成完成`);
+                generating = false;
+              }
             }
           }
         } catch {
@@ -899,7 +1247,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new DOMException('任务已取消', 'AbortError');
       }
       if (mode === 'video') {
-        const usageUnits = videoConfig?.model === 'seedance-2.0' ? 2 : 1;
+        const usageUnits = getVideoQuotaUsageUnits(videoConfig?.duration);
         await useAccountStore.getState().recordSeedanceUsage(accountId, usageUnits);
       }
       await useAccountStore.getState().recordAccountOutcome(accountId, 'success');
@@ -907,6 +1255,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await completeAutomation(taskId, accountId, imageUrls[0] || '', imageUrls);
     } catch (err: any) {
       const cancelled = err?.name === 'AbortError';
+      const safetyPaused = err instanceof SubmissionSafetyPauseError;
+      const availabilityPaused = err instanceof AccountAvailabilityPauseError;
       const errorMessage = cancelled ? '用户已取消等待' : (err.message || String(err));
       const errorInfo = classifyTaskError(errorMessage);
       // 限制类失败（会员/额度/真人脸/内容审核）不扣减 Seedance 额度，
@@ -917,12 +1267,21 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (mode === 'video' && errorInfo.code === 'quota_exhausted') {
         await useAccountStore.getState().markSeedanceExhausted(accountId);
       }
-      if (!cancelled) {
+      if (!cancelled && !safetyPaused && !availabilityPaused) {
         await useAccountStore.getState().recordAccountOutcome(accountId, 'failure', errorInfo.code);
       }
-      console.error(`[Automation:${accountId}] ${cancelled ? '已取消' : '失败'}:`, errorMessage);
-      if (cancelled) {
-        await pauseAutomation(taskId, accountId, '用户已暂停，可随时重新执行');
+      console.error(`[Automation:${accountId}] ${cancelled || safetyPaused || availabilityPaused ? '已暂停' : '失败'}:`, errorMessage);
+      if (cancelled || safetyPaused || availabilityPaused) {
+        await pauseAutomation(
+          taskId,
+          accountId,
+          cancelled ? '用户已暂停，可随时重新执行' : errorMessage,
+          availabilityPaused
+            ? { status: 'waiting_verification', code: err.code }
+            : safetyPaused
+              ? { status: 'paused', code: 'submission_uncertain' }
+              : undefined,
+        );
       } else {
         setAccountAutomationState(accountId, 'failed', errorMessage, 'failed');
         await failAutomation(taskId, accountId, errorMessage, errorInfo);
@@ -952,24 +1311,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const handleRefresh = useCallback(() => { getActiveWebview()?.reload(); }, [getActiveWebview]);
   const handleGoBack = useCallback(() => { const w = getActiveWebview(); if (w?.canGoBack()) w.goBack(); }, [getActiveWebview]);
   const handleGoForward = useCallback(() => { const w = getActiveWebview(); if (w?.canGoForward()) w.goForward(); }, [getActiveWebview]);
-  const handleGoHome = useCallback(() => { getActiveWebview()?.loadURL('https://www.doubao.com/chat/'); }, [getActiveWebview]);
-
-  if (!activeAccount) {
-    return (
-      <div className="browser-panel-empty">
-        <div className="browser-empty-content">
-          <svg width="64" height="64" viewBox="0 0 64 64" fill="none">
-            <rect x="4" y="8" width="56" height="40" rx="4" stroke="#38385a" strokeWidth="2" />
-            <path d="M4 16h56" stroke="#38385a" strokeWidth="2" />
-            <circle cx="12" cy="12" r="2" fill="#38385a" />
-            <circle cx="19" cy="12" r="2" fill="#38385a" />
-            <circle cx="26" cy="12" r="2" fill="#38385a" />
-          </svg>
-          <p>选择一个账号以打开浏览器</p>
-        </div>
-      </div>
-    );
-  }
+  const handleGoHome = useCallback(() => {
+    if (activeAccount) getActiveWebview()?.loadURL(getAccountHome(activeAccount));
+  }, [activeAccount, getActiveWebview]);
 
   const showOverlay = activeAutoState && activeAutoState !== 'idle' && activeAutoState !== 'completed' && activeAutoState !== 'failed';
 
@@ -993,20 +1337,20 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               <path d="M2 3v3h3M14 13v-3h-3" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-          <button onClick={handleGoHome} title="回到豆包首页">
+          <button onClick={handleGoHome} title={`回到${activeAccount?.platform === 'dola' ? ' Dola' : '豆包'}首页`}>
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
               <path d="M2 6l6-4.5L14 6v7.5a.5.5 0 01-.5.5h-3.5V9H6v5H2.5a.5.5 0 01-.5-.5V6z" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinejoin="round" />
             </svg>
           </button>
         </div>
         <div className="browser-url-bar">
-          <span className="browser-url-text">doubao.com</span>
+          <span className="browser-url-text">{activeAccount ? getAccountHost(activeAccount) : 'doubao.com'}</span>
         </div>
-        <Tooltip title="仅在豆包官方明确开放无水印下载时提取；不可用时不会下载替代视频">
+        <Tooltip title="粘贴豆包公开分享链接，下载该页面实际公开提供的视频流；不移除平台水印">
           <button
-            onClick={() => void handleExtractCurrentVideo()}
-            title="提取官方无水印视频"
-            disabled={manualVideoExtracting || !!accountBusy[activeAccount.id]}
+            onClick={() => setPublicShareDialogOpen(true)}
+            title="解析公开分享链接"
+            disabled={manualVideoExtracting}
             style={{
               width: 30,
               height: 30,
@@ -1014,7 +1358,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               alignItems: 'center',
               justifyContent: 'center',
               color: '#b8b4ff',
-              opacity: manualVideoExtracting || accountBusy[activeAccount.id] ? 0.45 : 1,
+              opacity: manualVideoExtracting ? 0.45 : 1,
             }}
           >
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -1022,14 +1366,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             </svg>
           </button>
         </Tooltip>
+        <Tooltip title="从当前账号的可见对话提取视频；实验直取仅在右侧开关显式开启后参与">
+          <button
+            onClick={() => void handleExtractCurrentVideo()}
+            title="提取当前对话视频"
+            disabled={manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id])}
+            style={{
+              width: 30,
+              height: 30,
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: experimentalNoWatermark ? '#f59e0b' : '#b8b4ff',
+              opacity: manualVideoExtracting || !activeAccount || !!(activeAccount && accountBusy[activeAccount.id]) ? 0.45 : 1,
+            }}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M4 6h16v12H4zM9 9l6 3-6 3V9z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </Tooltip>
         <Tooltip
-          title={
-            experimentalNoWatermark
-              ? '实验模式已开启：官方未授权时将以实验通道提取源文件（有账号风控风险）'
-              : '实验模式（默认关闭）：官方未授权时尝试直接提取源文件，有账号风控风险'
-          }
+          title={experimentalNoWatermark
+            ? '实验直取已开启：手动提取可能触发平台风控'
+            : '实验直取默认关闭；开启需确认平台条款与账号风险'}
         >
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginLeft: 6 }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginLeft: 4 }}>
             <Switch
               size="small"
               checked={experimentalNoWatermark}
@@ -1043,7 +1405,30 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         </Tooltip>
       </div>
 
+      <Modal
+        open={publicShareDialogOpen}
+        title="解析公开分享链接"
+        okText="解析并下载公开流"
+        cancelText="取消"
+        confirmLoading={manualVideoExtracting}
+        onOk={() => void handleDownloadPublicShareMedia()}
+        onCancel={() => !manualVideoExtracting && setPublicShareDialogOpen(false)}
+      >
+        <p style={{ color: '#9898b8' }}>仅解析豆包公开分享页实际声明的媒体流，不使用账号 Cookie，不探测隐藏接口，也不会移除水印。</p>
+        <Input
+          value={publicShareUrl}
+          onChange={(event) => setPublicShareUrl(event.target.value)}
+          placeholder="粘贴 https://www.doubao.com/... 公开分享链接"
+          autoFocus
+        />
+      </Modal>
+
       <div className="browser-viewport">
+        {!activeAccount && (
+          <div className="browser-panel-empty" style={{ position: 'absolute', inset: 0, zIndex: 1 }}>
+            <div className="browser-empty-content"><p>正在为任务准备账号页面…</p></div>
+          </div>
+        )}
         {activeLoading && (
           <div className="browser-loading-overlay">
             <div className="browser-loading-spinner" />

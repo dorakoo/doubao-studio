@@ -20,6 +20,7 @@ import type {
   Account,
   TaskErrorCode,
 } from '../types';
+import { getVideoQuotaRemaining, getVideoQuotaUsageUnits } from './videoQuota';
 
 // ==================== 类型定义 ====================
 
@@ -169,10 +170,14 @@ export function evaluateVideoCapability(input: VideoCapabilityInput): VideoCapab
   }
 
   // ---- 6. 额度耗尽 ----
-  if (input.seedanceQuota?.exhausted) {
+  const requiredUnits = getVideoQuotaUsageUnits(input.duration);
+  const remainingUnits = getVideoQuotaRemaining(input.seedanceQuota);
+  if (input.seedanceQuota?.exhausted || remainingUnits < requiredUnits) {
     issues.push({
       code: 'quota_exhausted',
-      message: '账号当日视频生成额度已耗尽，请明日再试或更换账号',
+      message: input.seedanceQuota?.exhausted
+        ? '账号当日视频额度已耗尽，请明日再试或更换账号'
+        : `账号当日视频额度不足：本任务需 ${requiredUnits} 单位，当前剩余 ${remainingUnits} 单位`,
       blocking: true,
     });
   }

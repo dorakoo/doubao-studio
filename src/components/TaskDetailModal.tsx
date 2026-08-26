@@ -25,7 +25,6 @@ import {
   CalendarOutlined,
   LinkOutlined,
   InfoCircleOutlined,
-  DownloadOutlined,
   EditOutlined,
   StopOutlined,
 } from '@ant-design/icons';
@@ -38,6 +37,7 @@ import {
 } from '../types';
 import { useTaskStore } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
+import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
 
 // ==================== 组件 ====================
 
@@ -83,15 +83,11 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
   const statusCfg = TASK_STATUS_CONFIG[task.status];
   const assignedAccount = accounts.find((a) => a.id === task.assignedAccountId);
 
-  const canRetry = task.status === 'fail' || task.status === 'done' || task.status === 'paused' || task.status === 'cancelled';
+  const mustReconcile = requiresSubmissionReconciliation(task);
+  const canRetry = !mustReconcile && (task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
+    task.status === 'cancelled' || task.status === 'waiting_verification');
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
-  const canManualExtractVideo =
-    task.mode === 'video' &&
-    !!task.assignedAccountId &&
-    task.status !== 'executing' &&
-    task.status !== 'generating' &&
-    task.status !== 'waiting_verification';
 
   // ---- 操作处理 ----
 
@@ -183,10 +179,22 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           )}
           {canRetry && (
             <Button type="primary" icon={<ReloadOutlined />} onClick={handleRetry}>
-              重新执行
+              {task.status === 'waiting_verification' ? '完成处理后重新执行' : '重新执行'}
             </Button>
           )}
-          <Button
+          {mustReconcile && (
+            <Button
+              type="primary"
+              icon={<SyncOutlined />}
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } }));
+                onClose();
+              }}
+            >
+              核对平台结果（不重新发送）
+            </Button>
+          )}
+          {!mustReconcile && <Button
             icon={<EditOutlined />}
             onClick={() => {
               onClose();
@@ -194,8 +202,8 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
             }}
           >
             编辑重跑
-          </Button>
-          {(task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification') && (
+          </Button>}
+          {(task.status === 'executing' || task.status === 'generating') && (
             <Button
               danger
               icon={<StopOutlined />}
@@ -205,17 +213,6 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               }}
             >
               暂停任务
-            </Button>
-          )}
-          {canManualExtractVideo && (
-            <Button
-              icon={<DownloadOutlined />}
-              onClick={() => {
-                window.dispatchEvent(new CustomEvent('manual-extract-video-output', { detail: { task } }));
-                message.info('正在尝试提取视频地址...');
-              }}
-            >
-              提取视频
             </Button>
           )}
           <Button onClick={onClose}>关闭</Button>

@@ -9,6 +9,7 @@ import { readJSON, writeJSON } from '../utils/store';
 import { normalizeAccounts } from '../utils/persistenceNormalization';
 import { v4 as uuidv4 } from 'uuid';
 import { replaceIpcHandlers } from './lifecycle';
+import { applyVideoQuotaAction, VIDEO_DAILY_UNITS } from '../utils/videoQuota';
 import type {
   Account,
   AccountAddParams,
@@ -18,7 +19,9 @@ import type {
   AccountSetPinnedParams,
   AccountUpdateSeedanceQuotaParams,
   AccountUpdateHealthParams,
+  AccountSetAvailabilityParams,
   AccountUpdateSchedulingParams,
+  AccountPlatform,
 } from '@doubao-studio/contracts';
 
 // ==================== 类型定义 ====================
@@ -31,7 +34,15 @@ export type { Account };
 // ==================== 数据持久化 ====================
 
 const STORE_FILE = 'accounts.json';
-const DEFAULT_SEEDANCE_DAILY_UNITS = 10;
+const DEFAULT_SEEDANCE_DAILY_UNITS = VIDEO_DAILY_UNITS;
+
+function accountPlatform(account: Pick<Account, 'platform'>): AccountPlatform {
+  return account.platform === 'dola' ? 'dola' : 'doubao';
+}
+
+function sessionPartition(platform: AccountPlatform, partition: string): string {
+  return `persist:${platform}_${partition}`;
+}
 
 function localDateKey(): string {
   const now = new Date();
@@ -47,10 +58,13 @@ function normalizeQuota(account: Account): void {
     account.seedanceQuota = {
       date: today,
       usedUnits: 0,
-      estimatedTotalUnits: account.seedanceQuota?.estimatedTotalUnits || DEFAULT_SEEDANCE_DAILY_UNITS,
+      estimatedTotalUnits: DEFAULT_SEEDANCE_DAILY_UNITS,
       exhausted: false,
       updatedAt: new Date().toISOString(),
     };
+  } else {
+    account.seedanceQuota.estimatedTotalUnits = DEFAULT_SEEDANCE_DAILY_UNITS;
+    account.seedanceQuota.exhausted = account.seedanceQuota.exhausted || account.seedanceQuota.usedUnits >= DEFAULT_SEEDANCE_DAILY_UNITS;
   }
 }
 
@@ -65,6 +79,7 @@ function normalizeHealth(account: Account): void {
     lastFailureAt: account.health?.lastFailureAt,
     lastErrorCode: account.health?.lastErrorCode,
     cooldownUntil: account.health?.cooldownUntil,
+    availability: account.health?.availability,
   };
   if (account.health.cooldownUntil && new Date(account.health.cooldownUntil).getTime() <= Date.now()) {
     account.health.cooldownUntil = undefined;
@@ -112,8 +127,8 @@ const activePartitions = new Set<string>();
  * 为指定账号创建独立的 Electron Session
  * 通过 partition 实现 Cookie/Storage 完全隔离
  */
-function getSessionForAccount(accountId: string, partition: string): Electron.Session {
-  const sess = session.fromPartition(`persist:doubao_${partition}`);
+function getSessionForAccount(accountId: string, partition: string, platform: AccountPlatform): Electron.Session {
+  const sess = session.fromPartition(sessionPartition(platform, partition));
   activePartitions.add(partition);
 
   // 配置 User-Agent（模拟 Chrome 浏览器）
@@ -128,8 +143,8 @@ function getSessionForAccount(accountId: string, partition: string): Electron.Se
 /**
  * 清除指定账号的 Session 数据（Cookie/Storage）
  */
-async function clearAccountSession(partition: string): Promise<void> {
-  const sess = session.fromPartition(`persist:doubao_${partition}`);
+async function clearAccountSession(partition: string, platform: AccountPlatform): Promise<void> {
+  const sess = session.fromPartition(sessionPartition(platform, partition));
   try {
     await sess.clearStorageData();
     await sess.clearCache();
@@ -144,7 +159,7 @@ async function clearAccountSession(partition: string): Promise<void> {
 const ACCOUNT_IPC_CHANNELS = [
   'accounts:list', 'accounts:add', 'accounts:update', 'accounts:delete',
   'accounts:refresh', 'accounts:setStatus', 'accounts:setPinned',
-  'accounts:updateScheduling', 'accounts:updateHealth',
+  'accounts:updateScheduling', 'accounts:updateHealth', 'accounts:setAvailability',
   'accounts:updateSeedanceQuota', 'accounts:getPartition',
 ] as const;
 
@@ -169,13 +184,15 @@ export function registerAccountIPC(): () => void {
         const accounts = loadAccounts();
 
         // 检查同名账号
-        if (accounts.some((a) => a.name === trimmedName)) {
+        const platform: AccountPlatform = params.platform === 'dola' ? 'dola' : 'doubao';
+        if (accounts.some((a) => a.name === trimmedName && accountPlatform(a) === platform)) {
           return { success: false, error: `账号「${trimmedName}」已存在` };
         }
 
         const newAccount: Account = {
           id: uuidv4(),
           name: trimmedName,
+          platform,
           avatar: '', // 后续从豆包页面抓取
           partition: `account_${uuidv4().slice(0, 8)}`,
           status: 'idle',
@@ -200,7 +217,7 @@ export function registerAccountIPC(): () => void {
         };
 
         // 预创建独立 Session
-        getSessionForAccount(newAccount.id, newAccount.partition);
+        getSessionForAccount(newAccount.id, newAccount.partition, platform);
 
         accounts.push(newAccount);
         if (!saveAccounts(accounts)) {
@@ -212,6 +229,58 @@ export function registerAccountIPC(): () => void {
         return { success: false, error: err.message };
       }
     }
+  );
+
+  // ---- 持久化网页真实可用性探测（不修改历史成功/失败计数） ----
+  ipcMain.handle(
+    'accounts:setAvailability',
+    async (_event, params: AccountSetAvailabilityParams): Promise<{ success: boolean; account?: Account; error?: string }> => {
+      const accounts = loadAccounts();
+      const account = accounts.find((item) => item.id === params.id);
+      if (!account) return { success: false, error: '账号不存在' };
+      normalizeHealth(account);
+      const health = account.health;
+      if (!health) return { success: false, error: '账号健康状态初始化失败' };
+      const allowedStates = new Set(['unknown', 'ready', 'action_required', 'login_required', 'unavailable']);
+      const allowedSources = new Set(['startup', 'navigation', 'pre_task', 'pre_submit', 'manual']);
+      const availability = params.availability;
+      if (
+        !availability || !allowedStates.has(availability.state) || !allowedSources.has(availability.source) ||
+        typeof availability.reason !== 'string' || typeof availability.message !== 'string' ||
+        !Number.isFinite(new Date(availability.checkedAt).getTime())
+      ) {
+        return { success: false, error: '账号可用性检测结果无效' };
+      }
+
+      const previousErrorCode = health.lastErrorCode;
+      health.availability = {
+        ...availability,
+        reason: availability.reason.slice(0, 100),
+        message: availability.message.slice(0, 300),
+      };
+      if (availability.state === 'ready') {
+        health.loginState = 'ok';
+        health.verificationRequired = false;
+        if (['verification', 'human_verification', 'login_required'].includes(previousErrorCode || '')) {
+          health.lastErrorCode = undefined;
+          health.cooldownUntil = undefined;
+        }
+      } else if (availability.state === 'action_required') {
+        health.verificationRequired = true;
+        health.lastErrorCode = availability.reason;
+      } else if (availability.state === 'login_required') {
+        health.loginState = 'expired';
+        health.verificationRequired = false;
+        health.lastErrorCode = availability.reason;
+      } else if (availability.state === 'unavailable') {
+        health.lastErrorCode = availability.reason;
+      }
+      account.updatedAt = new Date().toISOString();
+      if (!saveAccounts(accounts)) {
+        return { success: false, error: '账号可用性写入失败，请检查磁盘空间和数据目录权限' };
+      }
+      return { success: true, account };
+    },
   );
 
   // ---- 编辑账号名称 ----
@@ -230,7 +299,7 @@ export function registerAccountIPC(): () => void {
       }
 
       // 排除自身后查重
-      if (accounts.some((a) => a.id !== params.id && a.name === trimmedName)) {
+      if (accounts.some((a) => a.id !== params.id && a.name === trimmedName && accountPlatform(a) === accountPlatform(account))) {
         return { success: false, error: `账号「${trimmedName}」已存在` };
       }
 
@@ -267,7 +336,7 @@ export function registerAccountIPC(): () => void {
       }
 
       // 先持久化删除，再清理不可回滚的登录数据，避免写盘失败却把现有账号登出。
-      await clearAccountSession(removed.partition);
+      await clearAccountSession(removed.partition, accountPlatform(removed));
       return { success: true };
     }
   );
@@ -282,9 +351,9 @@ export function registerAccountIPC(): () => void {
         return { success: false, error: '账号不存在' };
       }
 
-      await clearAccountSession(account.partition);
+      await clearAccountSession(account.partition, accountPlatform(account));
       // 重新创建 Session
-      getSessionForAccount(account.id, account.partition);
+      getSessionForAccount(account.id, account.partition, accountPlatform(account));
       account.status = 'idle';
       account.updatedAt = new Date().toISOString();
       if (!saveAccounts(accounts)) {
@@ -396,16 +465,9 @@ export function registerAccountIPC(): () => void {
       const account = accounts.find((item) => item.id === params.id);
       if (!account) return { success: false };
       normalizeQuota(account);
-      const quota = account.seedanceQuota!;
-      if (params.action === 'consume') {
-        quota.usedUnits += Math.max(1, Math.round(params.units || 1));
-        quota.exhausted = false;
-      } else {
-        quota.exhausted = true;
-        if (quota.usedUnits > 0) quota.estimatedTotalUnits = quota.usedUnits;
-      }
-      quota.updatedAt = new Date().toISOString();
-      account.updatedAt = quota.updatedAt;
+      const updatedAt = new Date().toISOString();
+      account.seedanceQuota = applyVideoQuotaAction(account.seedanceQuota!, params.action, params.units, updatedAt);
+      account.updatedAt = updatedAt;
       if (!saveAccounts(accounts)) {
         return { success: false, error: '账号数据写入失败，请检查磁盘空间和数据目录权限' };
       }

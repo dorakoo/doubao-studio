@@ -5,8 +5,8 @@
  * 复用 domain 中的领域模型，不引入运行时值。
  */
 
-import type { Account, AccountScheduling } from '../domain';
-import type { AccountStatus } from '../enums';
+import type { Account, AccountAvailability, AccountScheduling } from '../domain';
+import type { AccountPlatform, AccountStatus } from '../enums';
 
 // ==================== 通用返回值 ====================
 
@@ -27,6 +27,7 @@ export interface AccountResult {
 
 export interface AccountAddParams {
   name: string;
+  platform?: AccountPlatform;
 }
 
 export interface AccountUpdateParams {
@@ -65,6 +66,11 @@ export interface AccountUpdateHealthParams {
    * 因为历史 JSON 和 IPC 传入的值可能包含未知错误码。
    */
   errorCode?: string;
+}
+
+export interface AccountSetAvailabilityParams {
+  id: string;
+  availability: AccountAvailability;
 }
 
 export interface AccountUpdateSchedulingParams {

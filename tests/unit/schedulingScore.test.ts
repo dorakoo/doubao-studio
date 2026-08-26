@@ -124,12 +124,44 @@ describe('getAccountSchedulingScore', () => {
     expect(getAccountSchedulingScore(accW2, 2, 'chat', NOW)).toBeLessThan(getAccountSchedulingScore(accW1, 2, 'chat', NOW));
   });
 
-  it('video 模式有剩余额度时获得 quotaBonus（分数更低）', () => {
-    const accNoQuota = makeAccount({});
-    const accWithQuota = makeAccount({
-      seedanceQuota: { date: '2025-01-01', usedUnits: 0, estimatedTotalUnits: 10, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
+  it('video 模式剩余额度更多时获得 quotaBonus（分数更低）', () => {
+    const accLowQuota = makeAccount({
+      seedanceQuota: { date: '2025-01-01', usedUnits: 5, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
     });
-    expect(getAccountSchedulingScore(accWithQuota, 0, 'video', NOW)).toBeLessThan(getAccountSchedulingScore(accNoQuota, 0, 'video', NOW));
+    const accWithQuota = makeAccount({
+      seedanceQuota: { date: '2025-01-01', usedUnits: 0, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
+    });
+    expect(getAccountSchedulingScore(accWithQuota, 0, 'video', NOW)).toBeLessThan(getAccountSchedulingScore(accLowQuota, 0, 'video', NOW));
+  });
+
+  it.each(['unknown', 'action_required', 'login_required', 'unavailable'] as const)(
+    '可用性状态 %s 不参与自动指派',
+    (state) => {
+      const acc = makeAccount({
+        health: {
+          loginState: 'ok', verificationRequired: false, consecutiveFailures: 0, successCount: 0, failureCount: 0,
+          availability: { state, reason: state, message: state, checkedAt: '2025-01-01T11:59:00.000Z', source: 'startup' },
+        },
+      });
+      expect(getAccountSchedulingScore(acc, 0, 'chat', NOW)).toBe(Number.POSITIVE_INFINITY);
+    },
+  );
+
+  it('可用性 ready 保持有限分数', () => {
+    const acc = makeAccount({
+      health: {
+        loginState: 'ok', verificationRequired: false, consecutiveFailures: 0, successCount: 0, failureCount: 0,
+        availability: { state: 'ready', reason: 'ready', message: '可用', checkedAt: '2025-01-01T11:59:00.000Z', source: 'startup' },
+      },
+    });
+    expect(getAccountSchedulingScore(acc, 0, 'chat', NOW)).not.toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('10 秒任务需要 2 单位，剩余 1 单位时不可自动指派', () => {
+    const acc = makeAccount({
+      seedanceQuota: { date: '2025-01-01', usedUnits: 5, estimatedTotalUnits: 6, exhausted: false, updatedAt: '2025-01-01T00:00:00.000Z' },
+    });
+    expect(getAccountSchedulingScore(acc, 0, 'video', NOW, 2)).toBe(Number.POSITIVE_INFINITY);
   });
 
   it('chat 模式不获得 quotaBonus', () => {
