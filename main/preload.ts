@@ -5,7 +5,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron';
-import type { ElectronAPI, Account, Task, GenerationMode } from '@doubao-studio/contracts';
+import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, GenerationMode } from '@doubao-studio/contracts';
 
 // ==================== 暴露 API ====================
 
@@ -19,8 +19,8 @@ const electronAPI = {
   // ---- 账号管理 ----
   accounts: {
     list: (): Promise<Account[]> => ipcRenderer.invoke('accounts:list'),
-    add: (name: string): Promise<{ success: boolean; account?: Account; error?: string }> =>
-      ipcRenderer.invoke('accounts:add', { name }),
+    add: (name: string, platform?: AccountPlatform): Promise<{ success: boolean; account?: Account; error?: string }> =>
+      ipcRenderer.invoke('accounts:add', { name, platform }),
     update: (id: string, name: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('accounts:update', { id, name }),
     delete: (id: string): Promise<{ success: boolean; error?: string }> =>
@@ -35,6 +35,8 @@ const electronAPI = {
       ipcRenderer.invoke('accounts:updateSeedanceQuota', { id, action, units }),
     updateHealth: (id: string, action: 'success' | 'failure' | 'verification' | 'login_expired' | 'clear', errorCode?: string): Promise<{ success: boolean; account?: Account }> =>
       ipcRenderer.invoke('accounts:updateHealth', { id, action, errorCode }),
+    setAvailability: (id: string, availability: AccountAvailability): Promise<{ success: boolean; account?: Account }> =>
+      ipcRenderer.invoke('accounts:setAvailability', { id, availability }),
     updateScheduling: (id: string, updates: Record<string, any>): Promise<any> => ipcRenderer.invoke('accounts:updateScheduling', { id, updates }),
     getPartition: (id: string): Promise<string | null> =>
       ipcRenderer.invoke('accounts:getPartition', { id }),
@@ -94,6 +96,8 @@ const electronAPI = {
       saveDir?: string
     ): Promise<{ success: boolean; count: number; failed: number; saveDir?: string; error?: string; jobIds?: string[] }> =>
       ipcRenderer.invoke('tasks:downloadOutputs', { outputs, saveDir }),
+    downloadPublicShareMedia: (shareUrl: string, saveDir?: string): Promise<any> =>
+      ipcRenderer.invoke('tasks:downloadPublicShareMedia', { shareUrl, saveDir }),
     listDownloads: (): Promise<any[]> => ipcRenderer.invoke('tasks:listDownloads'),
     exportDiagnostics: (): Promise<{ success: boolean; filePath?: string; error?: string }> =>
       ipcRenderer.invoke('tasks:exportDiagnostics'),

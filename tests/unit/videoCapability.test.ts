@@ -4,6 +4,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import {
   evaluateVideoCapability,
   suggestCompatibleVideoConfig,
@@ -13,7 +15,18 @@ import {
 import type { VideoCapabilityInput } from '../../src/utils/videoCapability';
 import type { SeedanceQuota, AccountHealth, AccountScheduling, AccountStatus } from '../../src/types';
 import { buildDoubaoCapabilitySnapshot, evaluateDryRunSelection } from '../../src/automation/doubaoCapability';
-import { inject15sVideoPatch, set15sVideoPatchEnabled } from '../../src/utils/doubaoBridge';
+import {
+  getVideoCompositeLabel,
+  getVideoModelUiLabel,
+  clickAITab,
+  inject15sVideoPatch,
+  isVideoCompositeControlText,
+  isVideoModelControlText,
+  pollUntilReady,
+  set15sVideoPatchEnabled,
+  VIDEO_COMPOSITE_CONTROL_SELECTOR,
+  VIDEO_MODEL_CONTROL_SELECTOR,
+} from '../../src/utils/doubaoBridge';
 
 // ==================== 测试数据工厂 ====================
 
@@ -70,6 +83,16 @@ describe('evaluateVideoCapability', () => {
       expect(result.canSubmit).toBe(false);
       expect(result.issues.some(i => i.code === 'quota_exhausted' && i.blocking)).toBe(true);
       expect(result.userMessage).toContain('额度已耗尽');
+    });
+
+    it('10s 需要 2 单位，剩余 1 单位时在提交前阻止', () => {
+      const result = evaluateVideoCapability(makeBaseInput({
+        duration: '10s',
+        seedanceQuota: { ...healthySeedanceQuota, usedUnits: 5, estimatedTotalUnits: 6, exhausted: false },
+      }));
+      expect(result.canSubmit).toBe(false);
+      expect(result.userMessage).toContain('需 2 单位');
+      expect(result.userMessage).toContain('剩余 1 单位');
     });
   });
 
@@ -513,5 +536,127 @@ describe('豆包新 UI 只读能力快照与 dry-run', () => {
     const forbiddenWebview = new Proxy({}, { get: () => { throw new Error('不得访问 webview'); } });
     expect(await inject15sVideoPatch(forbiddenWebview as never)).toBe(false);
     expect(await set15sVideoPatchEnabled(forbiddenWebview as never, true)).toBe(false);
+  });
+});
+
+describe('新版视频控件适配契约', () => {
+  it('视频模式首击仅展开菜单时，必须二次精确选择并等待权威控件挂载', async () => {
+    let injected = '';
+    const webview = {
+      executeJavaScript: async (code: string) => {
+        injected = code;
+        return { ok: true, method: 'button-bottom-menu-confirmed', tag: 'BUTTON', pos: '1,1' };
+      },
+      getURL: () => 'https://www.doubao.com/chat/',
+      loadURL: () => undefined,
+    };
+
+    expect(await clickAITab(webview, 'video')).toBe(true);
+    expect(injected).toContain('data-valid-btn="mode-select-action-btn"');
+    expect(injected).toContain('data-input-engine-actionbar-control-key="video-model"');
+    expect(injected).toContain('data-creation-params-panel-id');
+    expect(injected).toContain('waitForModeEntry(15000)');
+    expect(injected).toContain('findVisibleModeMenuOption(5000)');
+    expect(injected).toContain('waitForVideoControls(15000)');
+  });
+
+  it('视频入口超时返回 false，调用链必须在参数配置前 fail-closed', async () => {
+    const webview = {
+      executeJavaScript: async () => ({ ok: false, error: '视频生成模式入口未在等待窗口内挂载' }),
+      getURL: () => 'https://www.doubao.com/chat/',
+      loadURL: () => undefined,
+    };
+    expect(await clickAITab(webview, 'video')).toBe(false);
+
+    const panelSource = readFileSync(resolve(__dirname, '../../src/components/BrowserPanel.tsx'), 'utf8');
+    const switchGuard = panelSource.indexOf('const switched = await clickAITab(webview, mode)');
+    const configureCall = panelSource.indexOf('await configureVideoOptions(webview, videoConfig)');
+    expect(switchGuard).toBeGreaterThan(-1);
+    expect(panelSource.slice(switchGuard, configureCall)).toContain('if (!switched)');
+    expect(panelSource.slice(switchGuard, configureCall)).toContain('已在提交前停止');
+  });
+
+  it('权威控件和精确模型选项均采用有界轮询，不依赖固定菜单等待', () => {
+    const bridgeSource = readFileSync(resolve(__dirname, '../../src/utils/doubaoBridge.ts'), 'utf8');
+    expect(bridgeSource).toContain('{ timeoutMs: 15_000 }');
+    expect(bridgeSource).toContain("throw new Error('视频参数控件未就绪，已在提交前停止')");
+    expect(bridgeSource).toContain('const waitForExactOverlayOption = async');
+    expect(bridgeSource).toContain("waitForExactOverlayOption(modelLabel, 'video_model')");
+    expect(bridgeSource).toContain('const waitForModelVerification = async');
+  });
+
+  it('页面控件延迟挂载时持续轮询并在出现后立即成功', async () => {
+    let clock = 0;
+    let probes = 0;
+    const ready = await pollUntilReady(
+      () => ++probes === 4,
+      {
+        timeoutMs: 1_000,
+        intervalMs: 100,
+        now: () => clock,
+        wait: async (ms) => { clock += ms; },
+      },
+    );
+    expect(ready).toBe(true);
+    expect(probes).toBe(4);
+    expect(clock).toBe(300);
+  });
+
+  it('页面控件始终不挂载时在有界窗口结束并返回 false', async () => {
+    let clock = 0;
+    const ready = await pollUntilReady(
+      () => false,
+      {
+        timeoutMs: 1_000,
+        intervalMs: 250,
+        now: () => clock,
+        wait: async (ms) => { clock += ms; },
+      },
+    );
+    expect(ready).toBe(false);
+    expect(clock).toBe(1_000);
+  });
+
+  it.each([
+    ['seedance-2.5', 'Seedance 2.5'],
+    ['seedance-2.0', 'Seedance 2.0'],
+    ['seedance-2.0-fast', 'Seedance 2.0 Fast'],
+    ['seedance-2.0-mini', 'Seedance 2.0 Mini'],
+  ])('模型 %s 只映射到精确可见标签 %s', (model, expected) => {
+    expect(getVideoModelUiLabel(model)).toBe(expected);
+  });
+
+  it('未知模型不产生宽松匹配候选，必须 fail-closed', () => {
+    expect(getVideoModelUiLabel('fast')).toBeNull();
+    expect(getVideoModelUiLabel('seedance-2.0-ultra')).toBeNull();
+  });
+
+  it('新版组合控件的回读文本必须同时包含比例和时长', () => {
+    expect(getVideoCompositeLabel('9:16', '5s')).toBe('9:16 · 5s');
+    expect(getVideoCompositeLabel('自动', '10s')).toBe('自动 · 10s');
+  });
+
+  it('优先使用新版页面稳定结构属性，不依赖易变的样式类名', () => {
+    expect(VIDEO_MODEL_CONTROL_SELECTOR).toBe('[data-input-engine-actionbar-control-key="video-model"]');
+    expect(VIDEO_COMPOSITE_CONTROL_SELECTOR).toBe('[data-creation-params-panel-id]');
+  });
+
+  it.each([
+    ['模型\nSeedance 2.0 Fast', 'Seedance 2.0 Fast', true],
+    ['模型   Seedance 2.0 Fast', 'Seedance 2.0 Fast', true],
+    ['模型 Seedance 2.0', 'Seedance 2.0 Fast', false],
+    ['Seedance 2.0 Fast', 'Seedance 2.0 Fast', false],
+  ])('模型控件文本 %j 对目标 %s 的精确回读为 %s', (text, expected, matched) => {
+    expect(isVideoModelControlText(text, expected)).toBe(matched);
+  });
+
+  it.each([
+    ['自动 · 10s', true],
+    ['9:16\n·\n10s', true],
+    ['16:9 · 5s', true],
+    ['比例 · 10s', false],
+    ['9:16', false],
+  ])('组合控件文本 %j 的结构判定为 %s', (text, matched) => {
+    expect(isVideoCompositeControlText(text)).toBe(matched);
   });
 });

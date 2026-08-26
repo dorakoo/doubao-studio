@@ -15,6 +15,9 @@ export type GenerationMode = 'chat' | 'image' | 'video' | 'music';
 /** 账号状态 */
 export type AccountStatus = 'idle' | 'busy' | 'error';
 
+/** 账号所属平台；历史账号缺省按 doubao 处理。 */
+export type AccountPlatform = 'doubao' | 'dola';
+
 /**
  * 任务的队列级状态。具体执行位置记录在 runtime.stage。
  */

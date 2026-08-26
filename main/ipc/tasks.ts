@@ -8,6 +8,7 @@ import { ipcMain, dialog, session } from 'electron';
 import { readJSON, writeJSON } from '../utils/store';
 import { normalizeTasks, normalizeDownloadJobs } from '../utils/persistenceNormalization';
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
+import { resolvePublicShareMedia } from '../utils/publicShareMedia';
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
@@ -150,7 +151,7 @@ const TASK_IPC_CHANNELS = [
   'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime',
   'tasks:acquireLock', 'tasks:renewLock', 'tasks:importCsv', 'tasks:releaseLock',
   'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
-  'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:listDownloads',
+  'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:downloadPublicShareMedia', 'tasks:listDownloads',
   'tasks:exportDiagnostics', 'tasks:validateArtifact', 'tasks:saveAdapterReport',
   'tasks:selectAdapterRules', 'settings:get', 'settings:save', 'tasks:selectSaveDir',
 ] as const;
@@ -183,6 +184,66 @@ export function registerTaskIPC(): () => void {
         return { success: false, error: err.message };
       }
     }
+  );
+
+  // ---- 公开分享页媒体下载（独立临时会话，不复用账号 Cookie） ----
+  ipcMain.handle(
+    'tasks:downloadPublicShareMedia',
+    async (_event, params: { shareUrl?: unknown; saveDir?: unknown }) => {
+      if (typeof params?.shareUrl !== 'string') {
+        return { success: false, count: 0, error: '公开分享链接无效' };
+      }
+      const fs = require('fs') as typeof import('fs');
+      const path = require('path') as typeof import('path');
+      const { app } = require('electron') as typeof import('electron');
+      const transientSession = session.fromPartition(`public-share-${uuidv4()}`);
+      try {
+        const fetchPublic = (url: string, init?: Record<string, unknown>) => transientSession.fetch(url, init as RequestInit);
+        const resolution = await resolvePublicShareMedia(params.shareUrl, fetchPublic);
+        if (resolution.status !== 'resolved' || !resolution.mediaUrl || !resolution.finalShareUrl) {
+          return { success: false, count: 0, error: resolution.error || '未找到公开媒体流' };
+        }
+
+        // 分享页解析与真正下载之间不携带任何临时 Cookie。
+        await transientSession.clearStorageData({ storages: ['cookies'] });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60_000);
+        const response = await transientSession.fetch(resolution.mediaUrl, {
+          method: 'GET',
+          credentials: 'omit',
+          headers: { Referer: resolution.finalShareUrl },
+          signal: controller.signal,
+        }).finally(() => clearTimeout(timeout));
+        const buffer = Buffer.from(await response.arrayBuffer());
+        const contentType = response.headers.get('content-type') || '';
+        const validation = validateDownloadResponse(response.status, contentType, buffer.length, 'video');
+        if (!validation.valid) {
+          return { success: false, count: 0, error: validation.message || '公开媒体流下载验证失败' };
+        }
+
+        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
+        const saveDir = typeof params.saveDir === 'string' && params.saveDir.trim() ? params.saveDir : defaultDir;
+        if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+        const ext = path.extname(new URL(resolution.mediaUrl).pathname).toLowerCase() || '.mp4';
+        const filePath = getAvailableDownloadPath(fs, path, saveDir, `public-share-${Date.now()}${ext.length <= 6 ? ext : '.mp4'}`);
+        const temporaryPath = `${filePath}.${uuidv4()}.part`;
+        fs.writeFileSync(temporaryPath, buffer);
+        fs.renameSync(temporaryPath, filePath);
+        return {
+          success: true,
+          count: 1,
+          saveDir,
+          sourceHost: resolution.sourceHost,
+          contentType,
+          contentLength: buffer.length,
+        };
+      } catch (error: unknown) {
+        const classified = classifyDownloadException(error instanceof Error ? error : {});
+        return { success: false, count: 0, error: classified.message };
+      } finally {
+        await transientSession.clearStorageData().catch(() => undefined);
+      }
+    },
   );
 
   // ---- 指派任务给账号 ----
@@ -282,7 +343,7 @@ export function registerTaskIPC(): () => void {
         if (selected.canceled || !selected.filePaths[0]) return { success: false };
         const fs = require('fs');
         const raw = fs.readFileSync(selected.filePaths[0], 'utf-8');
-        const accounts = readJSON<Array<{ id: string; name: string }>>('accounts.json', []);
+        const accounts = readJSON<Array<{ id: string; name: string; platform?: 'doubao' | 'dola' }>>('accounts.json', []);
         const result = taskService.importCsv({ text: raw, accounts, projectId: params?.projectId });
         if (result.success) {
           return {

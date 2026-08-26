@@ -302,6 +302,7 @@ describe('resolveVideoArtifact 集成测试', () => {
     expect(elapsed).toBeLessThan(5000);
     expect(result.status).toBe('unavailable');
   });
+});
 
   // ---- 6. manualResolveVideoArtifact 取消 ----
 
@@ -496,6 +497,11 @@ describe('resolveVideoArtifact 集成测试', () => {
     expect(executeJavaScript).toHaveBeenCalledWith(
       expect.stringContaining('__reactFiber$'),
     );
+    const structuredProbe = (executeJavaScript as ReturnType<typeof vi.fn>).mock.calls
+      .map((args: unknown[]) => args[0])
+      .find((code: unknown) => typeof code === 'string' && code.includes('__reactFiber$')) as string;
+    expect(structuredProbe).toContain('__reactProps$');
+    expect(structuredProbe).toContain('findVideoInProps');
   });
 
   it('官方明确无水印不可用时手动入口不回退普通源媒体', async () => {
@@ -625,4 +631,3 @@ describe('resolveVideoArtifact 集成测试', () => {
     // 未获取到有效候选
     expect(result.status).toBe('unavailable');
   });
-});

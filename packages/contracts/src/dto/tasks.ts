@@ -143,6 +143,17 @@ export interface TaskDownloadOutputsResult {
   jobIds?: string[];
 }
 
+/** 公开分享页媒体下载：不使用账号 Cookie，只接受豆包页面实际公开声明的媒体流。 */
+export interface PublicShareMediaDownloadResult {
+  success: boolean;
+  count: number;
+  saveDir?: string;
+  sourceHost?: string;
+  contentType?: string;
+  contentLength?: number;
+  error?: string;
+}
+
 // ==================== 文件选择 ====================
 
 export interface FileSelectResult {

@@ -32,7 +32,7 @@ import {
   FileExcelOutlined,
 } from '@ant-design/icons';
 import { useTaskStore } from '../store/useTaskStore';
-import { getAccountSchedulingScore, useAccountStore } from '../store/useAccountStore';
+import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
 import TaskDetailModal from './TaskDetailModal';
 import type { Task, TaskUpdateInput } from '../types';
@@ -49,6 +49,9 @@ import {
   type VideoAspectRatio,
 } from '../types';
 import { evaluateVideoCapability } from '../utils/videoCapability';
+import { buildManualAssignmentOptions } from '../utils/accountAssignment';
+import { buildAutoAssignmentPlan } from '../utils/autoAssignment';
+import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
 
 const { TextArea } = Input;
 
@@ -160,6 +163,7 @@ const TaskConsole: React.FC = () => {
   useEffect(() => {
     void window.electronAPI.settings.get().then((settings) => {
       setTemplates(Array.isArray(settings.taskTemplates) ? settings.taskTemplates : []);
+      setAutoAssign(settings.autoAssignEnabled === true);
     });
   }, []);
 
@@ -206,32 +210,14 @@ const TaskConsole: React.FC = () => {
 
   // ---- 自动分配账号 ----
   const autoAssignTasks = useCallback(async (newTasks: Task[]) => {
-    // 计算每个账号当前的负载（排队中+执行中的任务数）
-    const accountLoad: Record<string, number> = {};
-    accounts.filter((a) => a.status !== 'error').forEach((a) => {
-      accountLoad[a.id] = allTasks.filter(
-        (t) => t.assignedAccountId === a.id && (t.status === 'queued' || t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification')
-      ).length;
-    });
-
-    for (const task of newTasks) {
-      const availableAccounts = accounts.filter((account) =>
-        Number.isFinite(getAccountSchedulingScore(account, accountLoad[account.id] || 0, task.mode))
-      );
-      if (availableAccounts.length === 0) continue;
-      // 综合负载、额度、连续失败、验证和登录状态选择账号。
-      let bestScore = Infinity;
-      let targetAccount = availableAccounts[0];
-      for (const acc of availableAccounts) {
-        const score = getAccountSchedulingScore(acc, accountLoad[acc.id] || 0, task.mode);
-        if (score < bestScore) {
-          bestScore = score;
-          targetAccount = acc;
-        }
-      }
-      accountLoad[targetAccount.id]++;
-      await assignTask(task.id, targetAccount.id);
+    const plan = buildAutoAssignmentPlan(newTasks, allTasks, accounts);
+    let assigned = 0;
+    let unassigned = plan.unassignedTaskIds.length;
+    for (const assignment of plan.assignments) {
+      if (await assignTask(assignment.taskId, assignment.accountId)) assigned++;
+      else unassigned++;
     }
+    return { assigned, unassigned };
   }, [accounts, allTasks, assignTask]);
 
   // ---- 添加任务 ----
@@ -245,7 +231,10 @@ const TaskConsole: React.FC = () => {
     if (newTasks && newTasks.length > 0) {
       // 自动指派
       if (autoAssign) {
-        await autoAssignTasks(newTasks);
+        const assignment = await autoAssignTasks(newTasks);
+        if (assignment.unassigned > 0) {
+          message.warning(`${assignment.unassigned} 个任务没有满足额度/健康条件的可用账号，已保留为未指派`);
+        }
       }
       setInputText('');
       setAddModalOpen(false);
@@ -263,12 +252,27 @@ const TaskConsole: React.FC = () => {
       if (useTaskStore.getState().error) message.error(useTaskStore.getState().error);
       return;
     }
+    const assignment = autoAssign && result.tasks.length > 0
+      ? await autoAssignTasks(result.tasks)
+      : { assigned: 0, unassigned: 0 };
     if (result.errors.length > 0) {
       message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
+    } else if (assignment.unassigned > 0) {
+      message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派`);
     } else {
       message.success(`已导入 ${result.imported} 条任务`);
     }
-  }, [importCsv]);
+  }, [autoAssign, autoAssignTasks, importCsv]);
+
+  const handleAutoAssignChange = useCallback(async (enabled: boolean) => {
+    setAutoAssign(enabled);
+    const settings = await window.electronAPI.settings.get();
+    const result = await window.electronAPI.settings.save({ ...settings, autoAssignEnabled: enabled });
+    if (!result.success) {
+      setAutoAssign(!enabled);
+      message.error(result.error || '自动指派设置保存失败');
+    }
+  }, []);
 
   // ---- 选择参考图片 ----
   const handleSelectImages = useCallback(async () => {
@@ -391,7 +395,11 @@ const TaskConsole: React.FC = () => {
 
   const getContextMenu = (taskId: string): MenuProps['items'] => {
     const task = tasks.find((t) => t.id === taskId);
-    const canRetry = task && (task.status === 'fail' || task.status === 'done' || task.status === 'paused' || task.status === 'cancelled');
+    const mustReconcile = requiresSubmissionReconciliation(task);
+    const canRetry = task && !mustReconcile && (
+      task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
+      task.status === 'cancelled' || task.status === 'waiting_verification'
+    );
 
     return [
       {
@@ -403,16 +411,21 @@ const TaskConsole: React.FC = () => {
           setDetailModalOpen(true);
         },
       },
-      {
+      ...(mustReconcile ? [{
+        key: 'reconcile-submission',
+        label: '核对平台结果（不重新发送）',
+        icon: <SyncOutlined />,
+        onClick: () => window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } })),
+      }] : [{
         key: 'edit-rerun',
         label: '编辑提示词并重跑',
         icon: <EditOutlined />,
         onClick: () => task && openEditAndRerun(task),
-      },
+      }]),
       ...(canRetry ? [
         {
           key: 'retry',
-          label: '重新执行',
+          label: task?.status === 'waiting_verification' ? '完成处理后重新执行' : '重新执行',
           icon: <ReloadOutlined />,
           onClick: () => useTaskStore.getState().retryTask(taskId),
         },
@@ -482,11 +495,6 @@ const TaskConsole: React.FC = () => {
     const isQueued = task.status === 'queued';
     const canStart = isQueued && task.assignedAccountId && !accountBusy[task.assignedAccountId];
     const taskMode = task.mode || 'chat';
-    const canManualExtractVideo =
-      taskMode === 'video' &&
-      !!task.assignedAccountId &&
-      !isActive &&
-      !!task.runtime?.conversationUrl;
 
     return (
       <Dropdown menu={{ items: getContextMenu(task.id) }} trigger={['contextMenu']} key={task.id}>
@@ -522,14 +530,7 @@ const TaskConsole: React.FC = () => {
               disabled={isActive}
               onClick={(e) => e.stopPropagation()}
               popupMatchSelectWidth={false}
-              options={accounts
-                .filter((account) =>
-                  Number.isFinite(getAccountSchedulingScore(account, 0, taskMode))
-                )
-                .map((a) => ({
-                  value: a.id,
-                  label: a.name,
-                }))}
+              options={buildManualAssignmentOptions(accounts, taskMode, task.videoConfig?.duration)}
             />
             <div className="task-item-actions">
               <Tooltip title="编辑提示词并重新运行">
@@ -576,18 +577,6 @@ const TaskConsole: React.FC = () => {
                 >
                   查看结果
                 </a>
-              )}
-              {canManualExtractVideo && (
-                <Button
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent('manual-extract-video-output', { detail: { task } }));
-                    message.info('正在尝试提取视频地址...');
-                  }}
-                >
-                  提取视频
-                </Button>
               )}
             </div>
           </div>
@@ -641,7 +630,7 @@ const TaskConsole: React.FC = () => {
               <Switch
                 size="small"
                 checked={autoAssign}
-                onChange={setAutoAssign}
+                onChange={(enabled) => void handleAutoAssignChange(enabled)}
               />
               <span style={{ color: '#9898b8', fontSize: 12 }}>自动指派</span>
             </div>

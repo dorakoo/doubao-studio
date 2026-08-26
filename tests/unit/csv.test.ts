@@ -61,6 +61,20 @@ describe('parseCsv', () => {
     expect(result).toEqual([['line1\nline2', 'b']]);
   });
 
+  it('C01 多行提示词完整保留英文台词和弯引号', () => {
+    const prompt = `5秒、9:16竖屏 TikTok 商品视频开场。
+
+她先看向镜头，然后清楚自然地说英文：
+“Need a better scratch spot for your indoor cat?”
+
+说完后保持自然目光约0.5秒。`;
+    const csv = `"prompt","mode","duration","aspect_ratio"\n"${prompt}","video","5s","9:16"`;
+    const result = parseCsv(csv);
+
+    expect(result[1][0]).toBe(prompt);
+    expect(result[1][0]).toContain('“Need a better scratch spot for your indoor cat?”');
+  });
+
   it('最后一个字段不需要换行符', () => {
     const result = parseCsv('a,b\nc,d');
     expect(result).toHaveLength(2);

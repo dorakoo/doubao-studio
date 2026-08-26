@@ -8,6 +8,7 @@
 export type {
   GenerationMode,
   AccountStatus,
+  AccountPlatform,
   TaskStatus,
   TaskStage,
   TaskErrorCode,
@@ -19,6 +20,9 @@ export type {
 
 export type {
   SeedanceQuota,
+  AccountAvailabilityState,
+  AccountAvailabilitySource,
+  AccountAvailability,
   AccountHealth,
   AccountScheduling,
   Account,
@@ -46,6 +50,7 @@ export type {
   AccountUpdateSeedanceQuotaParams,
   AccountHealthAction,
   AccountUpdateHealthParams,
+  AccountSetAvailabilityParams,
   AccountUpdateSchedulingParams,
 } from './dto/accounts';
 
@@ -68,6 +73,7 @@ export type {
   CompletedOutput,
   TaskDownloadOutputsParams,
   TaskDownloadOutputsResult,
+  PublicShareMediaDownloadResult,
   FileSelectResult,
   AudioSelectResult,
   ReadFileAsBase64Result,

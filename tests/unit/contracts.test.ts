@@ -363,7 +363,7 @@ describe('src/types/index.ts 兼容桥', () => {
   it('从 src/types 可导入领域模型（Account, Task, Project 等）', async () => {
     const types = await import('../../src/types/index');
     // 运行时常量仍可访问
-    expect(types.DEFAULT_VIDEO_CONFIG.model).toBe('seedance-2.0');
+    expect(types.DEFAULT_VIDEO_CONFIG.model).toBe('seedance-2.0-mini');
     expect(types.VIDEO_MODEL_LABELS['seedance-2.0']).toBe('Seedance 2.0');
     expect(types.TASK_STATUS_CONFIG.queued.label).toBe('排队中');
   });
@@ -371,7 +371,7 @@ describe('src/types/index.ts 兼容桥', () => {
   it('从 src/types 可导入 IPC DTO（TaskUpdateInput, CsvImportResult 等）', async () => {
     // 验证 re-export 路径可用：如果 src/types/index.ts 缺少 re-export，编译会失败
     const { DEFAULT_VIDEO_CONFIG } = await import('../../src/types/index');
-    expect(DEFAULT_VIDEO_CONFIG.model).toBe('seedance-2.0');
+    expect(DEFAULT_VIDEO_CONFIG.model).toBe('seedance-2.0-mini');
     // 类型从 contracts re-export，在运行时被擦除
     // 以下类型赋值仅用于编译时检查
     const _input: TaskUpdateInput = { prompt: 'test' };

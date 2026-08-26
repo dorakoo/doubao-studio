@@ -19,13 +19,14 @@ import {
   MoreOutlined,
   PushpinOutlined,
   PushpinFilled,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons';
-import { Input, Modal, Dropdown, message, Empty, Tooltip } from 'antd';
+import { Input, Modal, Dropdown, message, Empty, Tooltip, Segmented } from 'antd';
 import type { MenuProps } from 'antd';
 import { useAccountStore } from '../store/useAccountStore';
 import { useTaskStore } from '../store/useTaskStore';
 import { AUTO_STATE_DISPLAY } from '../types';
-import type { Account } from '../types';
+import type { Account, AccountPlatform } from '../types';
 import type { AutomationState } from '../store/useTaskStore';
 
 export const AccountList: React.FC = () => {
@@ -41,6 +42,8 @@ export const AccountList: React.FC = () => {
     selectAccount,
     togglePinned,
     updateScheduling,
+    availabilityChecking,
+    requestAvailabilityCheck,
     clearError,
   } = useAccountStore();
 
@@ -55,6 +58,7 @@ export const AccountList: React.FC = () => {
   // 添加账号弹窗
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [newAccountName, setNewAccountName] = useState('');
+  const [newAccountPlatform, setNewAccountPlatform] = useState<AccountPlatform>('doubao');
   const [adding, setAdding] = useState(false);
 
   // 编辑账号弹窗
@@ -80,6 +84,22 @@ export const AccountList: React.FC = () => {
       if (isBusy) {
         return { label: '忙碌', color: '#fbbf24', animated: true, detail: '' };
       }
+      if (availabilityChecking[accountId]) {
+        return { label: '检测中', color: '#60a5fa', animated: true, detail: '正在读取当前页面' };
+      }
+      const availability = account?.health?.availability;
+      if (availability?.state === 'action_required') {
+        return { label: '需要人工验证', color: '#fb923c', animated: true, detail: availability.message };
+      }
+      if (availability?.state === 'login_required') {
+        return { label: '需要登录', color: '#fb7185', animated: false, detail: availability.message };
+      }
+      if (availability?.state === 'unavailable') {
+        return { label: '自动化不可用', color: '#fb7185', animated: false, detail: availability.message };
+      }
+      if (availability?.state === 'unknown') {
+        return { label: '待确认', color: '#fbbf24', animated: false, detail: availability.message };
+      }
       if (account?.health?.loginState === 'expired') {
         return { label: '登录已失效', color: '#fb7185', animated: false, detail: '请重新登录' };
       }
@@ -98,9 +118,16 @@ export const AccountList: React.FC = () => {
           detail: `至 ${new Date(account.health.cooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`,
         };
       }
-      return { label: '空闲', color: '#4ade80', animated: false, detail: '' };
+      if (availability?.state === 'ready') {
+        const checked = new Date(availability.checkedAt);
+        const checkedLabel = Number.isFinite(checked.getTime())
+          ? `${checked.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 检测`
+          : '';
+        return { label: '自动化可用', color: '#4ade80', animated: false, detail: checkedLabel };
+      }
+      return { label: '尚未检测', color: '#94a3b8', animated: false, detail: '启动后将自动检测' };
     },
-    [accounts, accountAutomationState, accountBusy, accountAutoMessage]
+    [accounts, accountAutomationState, accountBusy, accountAutoMessage, availabilityChecking]
   );
 
   // ---- 排序逻辑 ----
@@ -114,9 +141,11 @@ export const AccountList: React.FC = () => {
     return [...filtered].sort((a, b) => {
       // 1. 不健康或冷却中的账号沉底
       const now = Date.now();
-      const aUnavailable = a.health?.loginState === 'expired' || !!a.health?.verificationRequired ||
+      const aUnavailable = ['action_required', 'login_required', 'unavailable'].includes(a.health?.availability?.state || '') ||
+        a.health?.loginState === 'expired' || !!a.health?.verificationRequired ||
         (!!a.health?.cooldownUntil && new Date(a.health.cooldownUntil).getTime() > now);
-      const bUnavailable = b.health?.loginState === 'expired' || !!b.health?.verificationRequired ||
+      const bUnavailable = ['action_required', 'login_required', 'unavailable'].includes(b.health?.availability?.state || '') ||
+        b.health?.loginState === 'expired' || !!b.health?.verificationRequired ||
         (!!b.health?.cooldownUntil && new Date(b.health.cooldownUntil).getTime() > now);
       if (aUnavailable !== bUnavailable) return aUnavailable ? 1 : -1;
       // 2. Seedance 今日额度用尽的账号统一沉底
@@ -142,17 +171,18 @@ export const AccountList: React.FC = () => {
   const handleAddAccount = useCallback(async () => {
     if (!newAccountName.trim()) return;
     setAdding(true);
-    const success = await addAccount(newAccountName.trim());
+    const success = await addAccount(newAccountName.trim(), newAccountPlatform);
     setAdding(false);
     if (success) {
       setNewAccountName('');
+      setNewAccountPlatform('doubao');
       setAddModalOpen(false);
       message.success('账号添加成功');
     } else {
       message.error(error || '添加失败');
       clearError();
     }
-  }, [newAccountName, addAccount, error, clearError]);
+  }, [newAccountName, newAccountPlatform, addAccount, error, clearError]);
 
   // ---- 编辑账号 ----
   const handleEditAccount = useCallback(async () => {
@@ -238,8 +268,18 @@ export const AccountList: React.FC = () => {
         },
       },
       {
+        key: 'availability-check',
+        label: availabilityChecking[account.id] ? '正在检测可用性…' : '立即检测可用性',
+        icon: <SafetyCertificateOutlined />,
+        disabled: !!availabilityChecking[account.id],
+        onClick: () => {
+          selectAccount(account.id);
+          requestAvailabilityCheck(account.id);
+        },
+      },
+      {
         key: 'refresh',
-        label: '刷新会话',
+        label: '清除登录并刷新',
         icon: <ReloadOutlined />,
         onClick: () => handleRefreshAccount(account),
       },
@@ -252,7 +292,7 @@ export const AccountList: React.FC = () => {
         onClick: () => handleDeleteAccount(account),
       },
     ],
-    [handleDeleteAccount, handleRefreshAccount, handleTogglePinned, updateScheduling]
+    [availabilityChecking, handleDeleteAccount, handleRefreshAccount, handleTogglePinned, requestAvailabilityCheck, selectAccount, updateScheduling]
   );
 
   return (
@@ -263,6 +303,9 @@ export const AccountList: React.FC = () => {
           <span className="panel-title">账号列表</span>
           <span className="text-xs text-db-text-muted bg-db-surface px-1.5 py-0.5 rounded-full">
             {accounts.length}
+          </span>
+          <span className="text-2xs text-db-text-muted">
+            可用 {accounts.filter((account) => account.health?.availability?.state === 'ready').length}
           </span>
         </div>
         <Tooltip title="添加账号">
@@ -350,6 +393,9 @@ export const AccountList: React.FC = () => {
                       <span className="text-sm font-medium text-db-text-primary truncate">
                         {account.name}
                       </span>
+                      <span className="text-2xs text-db-text-muted uppercase">
+                        {(account.platform || 'doubao') === 'dola' ? 'Dola' : '豆包'}
+                      </span>
                     </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       {/* 状态指示点 */}
@@ -371,7 +417,7 @@ export const AccountList: React.FC = () => {
                       <div
                         className="text-2xs mt-0.5 truncate"
                         style={{ color: account.seedanceQuota.exhausted ? '#fb7185' : '#818cf8' }}
-                        title="本地预测值：Seedance 2.0 标准模型通常按 2 个单位估算"
+                        title="每日 6 单位；每 5 秒视频消耗 1 单位"
                       >
                         {account.seedanceQuota.exhausted
                           ? 'Seedance 今日额度已用尽'
@@ -429,6 +475,7 @@ export const AccountList: React.FC = () => {
         onCancel={() => {
           setAddModalOpen(false);
           setNewAccountName('');
+          setNewAccountPlatform('doubao');
         }}
         confirmLoading={adding}
         okText="添加"
@@ -437,6 +484,14 @@ export const AccountList: React.FC = () => {
         width={400}
       >
         <div className="py-4">
+          <div className="text-xs text-db-text-muted mb-2">账号平台</div>
+          <Segmented
+            value={newAccountPlatform}
+            onChange={(value) => setNewAccountPlatform(value as AccountPlatform)}
+            options={[{ label: '豆包', value: 'doubao' }, { label: 'Dola', value: 'dola' }]}
+            block
+            style={{ marginBottom: 12 }}
+          />
           <Input
             placeholder="输入账号名称（如：工作号-01）"
             value={newAccountName}

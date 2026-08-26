@@ -20,6 +20,7 @@ import type {
   Task,
   DownloadJob,
   SeedanceQuota,
+  AccountAvailability,
   AccountHealth,
   AccountScheduling,
   TaskArtifact,
@@ -29,10 +30,12 @@ import type {
   TaskLock,
   GenerationMode,
   AccountStatus,
+  AccountPlatform,
   TaskStatus,
   TaskStage,
   DependencyPolicy,
 } from '@doubao-studio/contracts';
+import { VIDEO_DAILY_UNITS } from './videoQuota';
 
 // ==================== 公共类型 ====================
 
@@ -50,6 +53,7 @@ export interface NormalizeResult<T> {
 
 const VALID_GENERATION_MODES: readonly GenerationMode[] = ['chat', 'image', 'video', 'music'];
 const VALID_ACCOUNT_STATUSES: readonly AccountStatus[] = ['idle', 'busy', 'error'];
+const VALID_ACCOUNT_PLATFORMS: readonly AccountPlatform[] = ['doubao', 'dola'];
 const VALID_TASK_STATUSES: readonly TaskStatus[] = [
   'queued', 'executing', 'generating', 'waiting_verification',
   'paused', 'done', 'fail', 'cancelled',
@@ -65,6 +69,8 @@ const VALID_DOWNLOAD_STATUSES = ['queued', 'downloading', 'done', 'failed'] as c
 const VALID_ARTIFACT_KINDS = ['image', 'video', 'file'] as const;
 const VALID_ARTIFACT_SOURCES = ['network', 'page', 'manual'] as const;
 const VALID_LOGIN_STATES = ['unknown', 'ok', 'expired'] as const;
+const VALID_AVAILABILITY_STATES = ['unknown', 'ready', 'action_required', 'login_required', 'unavailable'] as const;
+const VALID_AVAILABILITY_SOURCES = ['startup', 'navigation', 'pre_task', 'pre_submit', 'manual'] as const;
 const VALID_RUN_OUTCOMES = ['done', 'failed', 'paused', 'cancelled'] as const;
 const VALID_TASK_SOURCES = ['manual', 'csv', 'workflow'] as const;
 const VALID_VIDEO_MODELS = ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'] as const;
@@ -72,7 +78,7 @@ const VALID_VIDEO_DURATIONS = ['4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s',
 const VALID_VIDEO_ASPECT_RATIOS = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'] as const;
 const VALID_VALIDATION_STATES = ['unknown', 'valid', 'expired', 'invalid'] as const;
 
-const DEFAULT_SEEDANCE_DAILY_UNITS = 10;
+const DEFAULT_SEEDANCE_DAILY_UNITS = VIDEO_DAILY_UNITS;
 
 // ==================== 基础类型辅助函数 ====================
 
@@ -163,9 +169,7 @@ export function normalizeAccountQuota(account: Account, now: string): void {
     account.seedanceQuota = {
       date: today,
       usedUnits: 0,
-      estimatedTotalUnits: isObject(quota) && typeof quota.estimatedTotalUnits === 'number' && quota.estimatedTotalUnits > 0
-        ? quota.estimatedTotalUnits
-        : DEFAULT_SEEDANCE_DAILY_UNITS,
+      estimatedTotalUnits: DEFAULT_SEEDANCE_DAILY_UNITS,
       exhausted: false,
       updatedAt: now,
     };
@@ -173,11 +177,12 @@ export function normalizeAccountQuota(account: Account, now: string): void {
   }
 
   // quota 存在且日期为今日 — 修正非法数值
+  const usedUnits = asNonNegativeNumber(quota.usedUnits, 0);
   const fixed: SeedanceQuota = {
     date: today,
-    usedUnits: asNonNegativeNumber(quota.usedUnits, 0),
-    estimatedTotalUnits: asNonNegativeNumber(quota.estimatedTotalUnits, DEFAULT_SEEDANCE_DAILY_UNITS),
-    exhausted: asBoolean(quota.exhausted, false),
+    usedUnits,
+    estimatedTotalUnits: DEFAULT_SEEDANCE_DAILY_UNITS,
+    exhausted: asBoolean(quota.exhausted, false) || usedUnits >= DEFAULT_SEEDANCE_DAILY_UNITS,
     updatedAt: asISODate(quota.updatedAt, now),
   };
   account.seedanceQuota = fixed;
@@ -195,6 +200,17 @@ export function normalizeAccountHealth(account: Account, now: string): void {
   const lastSuccessAt = raw?.lastSuccessAt;
   const lastFailureAt = raw?.lastFailureAt;
   const cooldownUntil = raw?.cooldownUntil;
+  const rawAvailability = raw?.availability;
+  let availability: AccountAvailability | undefined;
+  if (isObject(rawAvailability)) {
+    availability = {
+      state: oneOf(rawAvailability.state, VALID_AVAILABILITY_STATES, 'unknown'),
+      reason: asString(rawAvailability.reason, 'unknown').slice(0, 100),
+      message: asString(rawAvailability.message, '账号可用性尚未确认').slice(0, 300),
+      checkedAt: asISODate(rawAvailability.checkedAt, now),
+      source: oneOf(rawAvailability.source, VALID_AVAILABILITY_SOURCES, 'startup'),
+    };
+  }
 
   const health: AccountHealth = {
     loginState: oneOf(raw?.loginState, VALID_LOGIN_STATES, 'unknown') as AccountHealth['loginState'],
@@ -207,6 +223,7 @@ export function normalizeAccountHealth(account: Account, now: string): void {
     // lastErrorCode 保持 string，不校验为 TaskErrorCode 联合
     lastErrorCode: typeof raw?.lastErrorCode === 'string' ? raw.lastErrorCode : undefined,
     cooldownUntil: isValidISODate(cooldownUntil) ? cooldownUntil : undefined,
+    availability,
   };
 
   // 已过期的 cooldown 清除
@@ -255,6 +272,7 @@ function normalizeAccountObject(raw: Record<string, unknown>, now: string): Acco
   // 基础字段
   account.id = asNonEmptyString(raw.id) ?? `recovered-${now}-${Math.random().toString(36).slice(2, 10)}`;
   account.name = asString(raw.name, '');
+  account.platform = oneOf(raw.platform, VALID_ACCOUNT_PLATFORMS, 'doubao');
   account.avatar = asString(raw.avatar, '');
   account.partition = asNonEmptyString(raw.partition) ?? `account_${account.id.slice(0, 8)}`;
   account.status = oneOf(raw.status, VALID_ACCOUNT_STATUSES, 'idle');

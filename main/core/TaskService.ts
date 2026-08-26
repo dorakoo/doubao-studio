@@ -18,9 +18,10 @@ import type {
   TaskRunRecord,
   TaskValidateArtifactParams,
   CompletedOutput,
+  AccountPlatform,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
-import { parseCsv, normalizeCsvMode } from '../utils/csv';
+import { parseCsv } from '../utils/csv';
 
 export interface TaskStore {
   read(): Task[];
@@ -48,10 +49,20 @@ export interface TaskRecoverySummary {
   clearedLocks: number;
 }
 
+const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
+
+function requiresSubmissionReconciliation(task: Task): boolean {
+  if (!task.runtime?.submittedAt) return false;
+  if (!['paused', 'waiting_verification', 'fail', 'cancelled'].includes(task.status)) return false;
+  if (task.errorInfo?.code === 'submission_uncertain') return true;
+  return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
+}
+
 /** CSV 导入时传入 Core 的最小账号投影 */
 export interface TaskCsvAccountProjection {
   id: string;
   name: string;
+  platform?: AccountPlatform;
 }
 
 /** CSV 导入命令：纯文本 + 账号投影 + 可选项目 ID */
@@ -95,6 +106,43 @@ const RELEASE_WRITE_ERROR = '任务锁释放写入失败';
 const TERMINAL_STATUSES: ReadonlyArray<Task['status']> = ['done', 'fail', 'paused', 'cancelled'];
 const VALID_MODELS: readonly VideoModel[] = ['seedance-2.5', 'seedance-2.0', 'seedance-2.0-fast', 'seedance-2.0-mini'];
 const VALID_RATIOS: readonly VideoAspectRatio[] = ['1:1', '3:4', '4:3', '9:16', '16:9', '21:9'];
+const VALID_DURATIONS: readonly VideoDuration[] = ['4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s', '13s', '14s', '15s'];
+
+function parseCsvModeStrict(value: string): GenerationMode | null {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return 'chat';
+  if (['chat', '对话'].includes(normalized)) return 'chat';
+  if (['image', '图片'].includes(normalized)) return 'image';
+  if (['video', '视频'].includes(normalized)) return 'video';
+  if (['music', '音乐'].includes(normalized)) return 'music';
+  return null;
+}
+
+function resolveCsvAccount(
+  value: string,
+  accounts: readonly TaskCsvAccountProjection[],
+): { account?: TaskCsvAccountProjection; error?: string } {
+  const input = value.trim();
+  if (!input) return {};
+  const byId = accounts.find((account) => account.id === input);
+  if (byId) return { account: byId };
+
+  let platform: AccountPlatform | undefined;
+  let name = input;
+  const prefixMatch = /^(doubao|dola):(.*)$/i.exec(input);
+  if (prefixMatch) {
+    platform = prefixMatch[1].toLowerCase() as AccountPlatform;
+    name = prefixMatch[2].trim();
+    if (!name) return { error: `账号标识「${input}」缺少账号名称` };
+  }
+
+  const matches = accounts.filter((account) =>
+    account.name === name && (!platform || (account.platform || 'doubao') === platform)
+  );
+  if (matches.length === 1) return { account: matches[0] };
+  if (matches.length > 1) return { error: `账号「${input}」存在重名，请使用平台前缀或账号 ID` };
+  return { error: `未找到账号「${input}」` };
+}
 
 function artifactId(url: string): string {
   let hash = 5381;
@@ -245,7 +293,14 @@ export class TaskService {
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === taskId);
     if (!task) return { success: false, error: '任务不存在' };
-    if (ACTIVE.has(task.status)) return { success: false, error: '任务正在执行中，无法重试' };
+    if (requiresSubmissionReconciliation(task)) {
+      return { success: false, error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送' };
+    }
+    // waiting_verification 已释放执行锁和账号忙状态，用户完成登录/验证后
+    // 必须能从这里重新入队；真正仍在执行/生成的任务继续拒绝重试。
+    if (task.status === 'executing' || task.status === 'generating') {
+      return { success: false, error: '任务正在执行中，无法重试' };
+    }
     this.resetTaskForQueue(task, this.now());
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
@@ -353,7 +408,15 @@ export class TaskService {
       if (!task.runtime && !params.runtime.runId) {
         return { success: false, error: '运行快照尚未初始化' };
       }
-      task.runtime = { ...(task.runtime || {}), ...params.runtime } as TaskRunSnapshot;
+      const startsNewRun = Boolean(
+        params.runtime.runId && task.runtime?.runId && params.runtime.runId !== task.runtime.runId,
+      );
+      // 新 run 必须替换而不是合并旧快照。否则旧 submittedAt/conversationUrl 会
+      // 穿透到改派后的新运行，防重复门禁会把安全的新提交误判为二次发送。
+      // 旧 run 的不可变证据仍保留在 runHistory 中。
+      task.runtime = (startsNewRun
+        ? { ...params.runtime }
+        : { ...(task.runtime || {}), ...params.runtime }) as TaskRunSnapshot;
       const runtime = task.runtime;
       task.runHistory = task.runHistory || [];
       let record = task.runHistory.find((item) => item.runId === runtime.runId);
@@ -491,28 +554,53 @@ export class TaskService {
         errors.push(`第 ${dataIndex + 1} 行：提示词为空`);
         continue;
       }
-      const mode: GenerationMode = modeIndex >= 0 ? normalizeCsvMode(row[modeIndex] || '') : 'chat';
-      const model = row[modelIndex] as VideoModel;
-      const duration = row[durationIndex] as VideoDuration;
-      const aspectRatio = row[ratioIndex] as VideoAspectRatio;
+      const rawMode = modeIndex >= 0 ? row[modeIndex] || '' : '';
+      const mode = parseCsvModeStrict(rawMode);
+      if (!mode) {
+        errors.push(`第 ${dataIndex + 1} 行：模式「${rawMode.trim()}」无效`);
+        continue;
+      }
+      const rawModel = modelIndex >= 0 ? (row[modelIndex] || '').trim() : '';
+      const rawDuration = durationIndex >= 0 ? (row[durationIndex] || '').trim() : '';
+      const rawAspectRatio = ratioIndex >= 0 ? (row[ratioIndex] || '').trim() : '';
+      if (mode === 'video' && rawModel && !VALID_MODELS.includes(rawModel as VideoModel)) {
+        errors.push(`第 ${dataIndex + 1} 行：视频模型「${rawModel}」无效`);
+        continue;
+      }
+      if (mode === 'video' && rawDuration && !VALID_DURATIONS.includes(rawDuration as VideoDuration)) {
+        errors.push(`第 ${dataIndex + 1} 行：视频时长「${rawDuration}」无效`);
+        continue;
+      }
+      if (mode === 'video' && rawAspectRatio && !VALID_RATIOS.includes(rawAspectRatio as VideoAspectRatio)) {
+        errors.push(`第 ${dataIndex + 1} 行：画面比例「${rawAspectRatio}」无效`);
+        continue;
+      }
       const accountName = accountIndex >= 0 ? (row[accountIndex] || '').trim() : '';
-      const account = accountName ? command.accounts.find((item) => item.name === accountName) : undefined;
-      if (accountName && !account) errors.push(`第 ${dataIndex + 1} 行：未找到账号「${accountName}」，任务保持未指派`);
+      const accountResolution = resolveCsvAccount(accountName, command.accounts);
+      if (accountResolution.error) {
+        errors.push(`第 ${dataIndex + 1} 行：${accountResolution.error}`);
+        continue;
+      }
+      const rawPolicy = policyIndex >= 0 ? (row[policyIndex] || '').trim() : '';
+      if (rawPolicy && rawPolicy !== 'all_done' && rawPolicy !== 'all_finished') {
+        errors.push(`第 ${dataIndex + 1} 行：依赖策略「${rawPolicy}」无效`);
+        continue;
+      }
 
       partialTasks.push({
         prompt,
         mode,
-        assignedAccountId: account?.id || null,
+        assignedAccountId: accountResolution.account?.id || null,
         videoConfig: mode === 'video' ? {
-          model: VALID_MODELS.includes(model) ? model : 'seedance-2.0',
-          duration: /^(?:[4-9]|1[0-5])s$/.test(duration) ? duration : '10s',
-          aspectRatio: VALID_RATIOS.includes(aspectRatio) ? aspectRatio : '16:9',
+          model: (rawModel || 'seedance-2.0-mini') as VideoModel,
+          duration: (rawDuration || '10s') as VideoDuration,
+          aspectRatio: (rawAspectRatio || '16:9') as VideoAspectRatio,
         } : undefined,
         attachments: attachmentsIndex >= 0
           ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean)
           : undefined,
         audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
-        dependencyPolicy: policyIndex >= 0 && row[policyIndex] === 'all_finished' ? 'all_finished' : 'all_done',
+        dependencyPolicy: rawPolicy === 'all_finished' ? 'all_finished' : 'all_done',
         dependsOnRaw: dependsIndex >= 0 ? (row[dependsIndex] || '') : '',
       });
       sourceRows.push(dataIndex + 1);

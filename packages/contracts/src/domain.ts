@@ -12,6 +12,7 @@
 import type {
   GenerationMode,
   AccountStatus,
+  AccountPlatform,
   TaskStatus,
   TaskStage,
   VideoModel,
@@ -31,6 +32,31 @@ export interface SeedanceQuota {
   updatedAt: string;
 }
 
+/** 账号网页自动化可用性状态。 */
+export type AccountAvailabilityState =
+  | 'unknown'
+  | 'ready'
+  | 'action_required'
+  | 'login_required'
+  | 'unavailable';
+
+/** 可用性检测触发点。 */
+export type AccountAvailabilitySource =
+  | 'startup'
+  | 'navigation'
+  | 'pre_task'
+  | 'pre_submit'
+  | 'manual';
+
+/** 最近一次账号网页可用性检测结果。 */
+export interface AccountAvailability {
+  state: AccountAvailabilityState;
+  reason: string;
+  message: string;
+  checkedAt: string;
+  source: AccountAvailabilitySource;
+}
+
 /** 账号健康状态 */
 export interface AccountHealth {
   loginState: 'unknown' | 'ok' | 'expired';
@@ -46,6 +72,8 @@ export interface AccountHealth {
    */
   lastErrorCode?: string;
   cooldownUntil?: string;
+  /** 网页真实状态探测；与历史任务成功/失败计数分离。 */
+  availability?: AccountAvailability;
 }
 
 /** 账号调度配置 */
@@ -60,6 +88,8 @@ export interface AccountScheduling {
 export interface Account {
   id: string;
   name: string;
+  /** 账号所属平台；旧数据缺失时按 doubao 归一化。 */
+  platform?: AccountPlatform;
   /** 头像 URL（豆包默认头像） */
   avatar: string;
   /** Session 分区名（每个账号独立） */
