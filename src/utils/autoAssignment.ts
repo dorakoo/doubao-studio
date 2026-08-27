@@ -2,7 +2,7 @@ import type { Account, Task } from '../types';
 import { getAccountSchedulingScore } from './schedulingScore';
 import { getVideoQuotaUsageUnits } from './videoQuota';
 
-const ACTIVE_STATUSES = new Set<Task['status']>(['queued', 'executing', 'generating', 'waiting_verification']);
+const ACTIVE_STATUSES = new Set<Task['status']>(['queued', 'executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation']);
 
 export interface AutoAssignmentPlan {
   assignments: Array<{ taskId: string; accountId: string }>;

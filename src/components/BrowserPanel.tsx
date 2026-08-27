@@ -23,6 +23,7 @@ import {
   verifyPromptReadyForSubmission,
   submitPromptWithNativeClick,
   inspectMaterialAuthorization,
+  inspectGenerationConfirmation,
   checkGeneratingDetailed,
   getResultUrl,
   switchMode,
@@ -62,6 +63,8 @@ import { availabilityBlocksAutomation, probeAccountAvailability } from '../utils
 import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
 import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
+import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
+import { VideoControlReadinessError } from '../utils/videoControlReadiness';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -121,6 +124,14 @@ class AccountAvailabilityPauseError extends Error {
   ) {
     super(message);
     this.name = 'AccountAvailabilityPauseError';
+  }
+}
+
+/** 平台已收到提示词但要求用户确认参数；永久禁止自动回复确认或重发。 */
+class GenerationConfirmationPauseError extends Error {
+  constructor(readonly evidence: GenerationConfirmationEvidence) {
+    super('平台正在等待视频生成参数确认；请在原豆包会话中人工确认，系统不会代答或重复发送');
+    this.name = 'GenerationConfirmationPauseError';
   }
 }
 
@@ -342,11 +353,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
       try {
         const currentUrl = webview.getURL();
-        const storedIsGenericChat = /^https:\/\/www\.(doubao|dola)\.com\/chat\/?$/i.test(storedConversationUrl);
-        const currentIsConcreteChat = /^https:\/\/www\.(doubao|dola)\.com\/chat\/[^/?#]+/i.test(currentUrl);
-        // 旧运行在发送前只保存了 /chat/。平台随后分配的具体会话 URL 已在同账号
-        // webview 中，必须优先回读它；仍用根地址会丢失刚生成的会话。
-        const conversationUrl = storedIsGenericChat && currentIsConcreteChat ? currentUrl : storedConversationUrl;
+        // 只允许回到台账在原提交链中保存的会话 URL。即使同账号 WebView 当前停在
+        // 另一个具体会话，也不得把它猜作目标会话，避免错绑产物或间接放开重发。
+        const conversationUrl = storedConversationUrl;
         if (currentUrl !== conversationUrl) {
           webview.loadURL(conversationUrl);
         }
@@ -366,14 +375,55 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (!conversationMatched) {
           throw new Error('原对话未同时匹配任务提示词前缀与平台提交回执，无法安全绑定结果');
         }
-        if (conversationUrl !== storedConversationUrl) {
-          await useTaskStore.getState().updateTaskRuntime(taskId, { runtime: { conversationUrl } });
+        const confirmation = await inspectGenerationConfirmation(webview);
+        if (confirmation.state === 'present') {
+          const waitingMessage = '平台仍在等待视频生成参数确认；请人工确认后再次执行只读回读，系统不会代答或重发';
+          await useTaskStore.getState().updateTaskRuntime(taskId, {
+            status: 'waiting_generation_confirmation',
+            result: waitingMessage,
+            errorInfo: { code: 'generation_confirmation_required', message: waitingMessage, recoverable: true, detectedAt: confirmation.detectedAt },
+            runtime: {
+              stage: 'waiting_generation_confirmation',
+              message: waitingMessage,
+              lastHeartbeatAt: new Date().toISOString(),
+              generationConfirmation: {
+                detectedAt: confirmation.detectedAt,
+                marker: confirmation.marker || 'confirm_before_generation',
+                model: confirmation.model,
+                duration: confirmation.duration,
+                aspectRatio: confirmation.aspectRatio,
+              },
+            },
+          });
+          message.warning(waitingMessage);
+          return;
+        }
+        if (task.status === 'waiting_generation_confirmation') {
+          const latestConversationText = await getConversationText(webview);
+          const generationStartedAt = await getGenerationStartTime(webview);
+          const hasConfirmationReceipt = /视频生成已提交|正在生成|生成中|你的视频生成好了/.test(latestConversationText) || generationStartedAt > 0;
+          if (!hasConfirmationReceipt) {
+            const waitingMessage = '确认页已不可见，但尚未取得生成回执；任务继续等待，不会自动重发';
+            await useTaskStore.getState().updateTaskRuntime(taskId, {
+              status: 'waiting_generation_confirmation',
+              result: waitingMessage,
+              errorInfo: { code: 'generation_confirmation_required', message: waitingMessage, recoverable: true, detectedAt: new Date().toISOString() },
+              runtime: { stage: 'waiting_generation_confirmation', message: waitingMessage, lastHeartbeatAt: new Date().toISOString() },
+            });
+            message.warning(waitingMessage);
+            return;
+          }
+          await useTaskStore.getState().updateTaskRuntime(taskId, {
+            status: 'generating',
+            result: '已确认生成，正在只读等待原会话产物',
+            runtime: { stage: 'generating', message: '已确认生成，正在只读等待原会话产物', lastHeartbeatAt: new Date().toISOString() },
+          });
         }
         // 任务台账只要求绑定平台真实可播放产物；无水印授权属于手动下载能力，
         // 不能把 without_watermark=false 误判为“视频没有生成”。
         const resolution = await resolveVideoArtifact(webview, {
           conversationUrl,
-          timeoutMs: 45_000,
+          timeoutMs: task.status === 'waiting_generation_confirmation' ? 15 * 60_000 : 45_000,
           isManual: true,
         });
         const outputs = resolution.status === 'resolved' && resolution.url
@@ -894,6 +944,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       let taskConversationUrl: string | undefined;
+      let modeEntryElapsedMs: number | undefined;
       let initialMsgCount = 0;
       let conversationTextAfterSubmit = '';
       setAccountAutomationState(accountId, 'injecting', '正在创建新对话...', 'new_conversation');
@@ -922,8 +973,15 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // image/video 模式：在 AI 创作页面点击 Tab 切换
         if (mode === 'image' || mode === 'video') {
           setAccountAutomationState(accountId, 'injecting', '点击' + modeLabel + 'Tab...', 'switching_mode');
+          const modeEntryStartedAt = Date.now();
           const switched = await clickAITab(webview, mode);
+          modeEntryElapsedMs = Date.now() - modeEntryStartedAt;
           if (!switched) {
+            if (mode === 'video') {
+              throw new VideoControlReadinessError('mode_entry', {
+                ready: false, failureStage: 'mode_entry', attempts: 1, elapsedMs: modeEntryElapsedMs,
+              });
+            }
             throw new Error(`${modeLabel}模式入口未就绪，已在提交前停止`);
           }
           await pause(1500); // 等待 Tab 切换动画
@@ -933,7 +991,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (mode === 'video') {
           if (videoConfig) {
             setAccountAutomationState(accountId, 'injecting', '配置视频参数...', 'configuring');
-            await configureVideoOptions(webview, videoConfig);
+            await configureVideoOptions(webview, videoConfig, {
+              onReadiness: async (diagnostic) => {
+                await updateTaskRuntime(taskId, {
+                  runtime: {
+                    controlReadiness: {
+                      modeEntryElapsedMs,
+                      attempts: diagnostic.attempts,
+                      elapsedMs: diagnostic.elapsedMs,
+                      modelVisibleAtMs: diagnostic.modelVisibleAtMs,
+                      compositeVisibleAtMs: diagnostic.compositeVisibleAtMs,
+                      stableAtMs: diagnostic.stableAtMs,
+                      failureStage: diagnostic.failureStage,
+                    },
+                    lastHeartbeatAt: new Date().toISOString(),
+                  },
+                });
+              },
+            });
             await pause(500);
           }
         }
@@ -1205,6 +1280,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
       while (Date.now() - generationWaitStartedAt < generationWaitBudgetMs) {
         await pause(3000);
+        if (mode === 'video') {
+          const confirmation = await inspectGenerationConfirmation(webview);
+          if (confirmation.state === 'present') throw new GenerationConfirmationPauseError(confirmation);
+        }
         try {
           const detail = await Promise.race([
             checkGeneratingDetailed(webview),
@@ -1348,8 +1427,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const cancelled = err?.name === 'AbortError';
       const safetyPaused = err instanceof SubmissionSafetyPauseError;
       const availabilityPaused = err instanceof AccountAvailabilityPauseError;
+      const confirmationPaused = err instanceof GenerationConfirmationPauseError;
+      const controlReadinessFailure = err instanceof VideoControlReadinessError;
       const errorMessage = cancelled ? '用户已取消等待' : (err.message || String(err));
-      const errorInfo = classifyTaskError(errorMessage);
+      const errorInfo = controlReadinessFailure
+        ? { code: err.code, message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() }
+        : classifyTaskError(errorMessage);
       // 限制类失败（会员/额度/真人脸/内容审核）不扣减 Seedance 额度，
       // 也不应继续等待视频产物。recordSeedanceUsage 仅在成功路径调用。
       if (mode === 'video' && isRestrictionFailure(errorInfo.code)) {
@@ -1357,16 +1440,28 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       const quotaExhausted = mode === 'video' && errorInfo.code === 'quota_exhausted';
       if (quotaExhausted) await useAccountStore.getState().markSeedanceExhausted(accountId);
-      if (!cancelled && !safetyPaused && !availabilityPaused) {
+      if (!cancelled && !safetyPaused && !availabilityPaused && !confirmationPaused && !controlReadinessFailure) {
         await useAccountStore.getState().recordAccountOutcome(accountId, 'failure', errorInfo.code);
       }
-      console.error(`[Automation:${accountId}] ${cancelled || safetyPaused || availabilityPaused ? '已暂停' : '失败'}:`, errorMessage);
-      if (cancelled || safetyPaused || availabilityPaused) {
+      console.error(`[Automation:${accountId}] ${cancelled || safetyPaused || availabilityPaused || confirmationPaused ? '已暂停' : '失败'}:`, errorMessage);
+      if (cancelled || safetyPaused || availabilityPaused || confirmationPaused) {
         await pauseAutomation(
           taskId,
           accountId,
           cancelled ? '用户已暂停，可随时重新执行' : errorMessage,
-          availabilityPaused
+          confirmationPaused
+            ? {
+                status: 'waiting_generation_confirmation',
+                code: 'generation_confirmation_required',
+                generationConfirmation: {
+                  detectedAt: err.evidence.detectedAt,
+                  marker: err.evidence.marker || 'confirm_before_generation',
+                  model: err.evidence.model,
+                  duration: err.evidence.duration,
+                  aspectRatio: err.evidence.aspectRatio,
+                },
+              }
+            : availabilityPaused
             ? { status: 'waiting_verification', code: err.code }
             : safetyPaused
               ? { status: 'paused', code: 'submission_uncertain' }

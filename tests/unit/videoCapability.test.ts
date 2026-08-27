@@ -578,8 +578,9 @@ describe('新版视频控件适配契约', () => {
 
   it('权威控件和精确模型选项均采用有界轮询，不依赖固定菜单等待', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '../../src/utils/doubaoBridge.ts'), 'utf8');
-    expect(bridgeSource).toContain('{ timeoutMs: 15_000 }');
-    expect(bridgeSource).toContain("throw new Error('视频参数控件未就绪，已在提交前停止')");
+    expect(bridgeSource).toContain('{ timeoutMs: 30_000, stableSamples: 3 }');
+    expect(bridgeSource).toContain('throw new VideoControlReadinessError');
+    expect(bridgeSource).toContain("'final_readback'");
     expect(bridgeSource).toContain('const waitForExactOverlayOption = async');
     expect(bridgeSource).toContain("waitForExactOverlayOption(modelLabel, 'video_model')");
     expect(bridgeSource).toContain('const waitForModelVerification = async');

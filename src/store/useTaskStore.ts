@@ -80,7 +80,11 @@ interface TaskState {
     taskId: string,
     accountId: string,
     message?: string,
-    options?: { status: 'paused' | 'waiting_verification'; code?: string },
+    options?: {
+      status: 'paused' | 'waiting_verification' | 'waiting_generation_confirmation';
+      code?: string;
+      generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
+    },
   ) => Promise<void>;
   failAutomation: (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => Promise<void>;
 
@@ -404,6 +408,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
 
     // 检查账号是否忙碌
+    const reservedTask = get().tasks.find((item) =>
+      item.id !== taskId && item.assignedAccountId === accountId &&
+      ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation'].includes(item.status),
+    );
+    if (reservedTask) {
+      set({ error: '该账号仍绑定等待生成确认的原会话；请先在原任务中完成只读回读或人工取消' });
+      return false;
+    }
     if (get().accountBusy[accountId]) {
       console.log('[TaskStore] 账号', accountId, '忙碌，任务排队');
       return false;
@@ -474,8 +486,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const previousState = get().accountAutomationState[accountId];
     const taskId = get().executingTasks[accountId];
     const now = new Date().toISOString();
-    const status: TaskStatus | undefined = stage === 'waiting_verification'
-      ? 'waiting_verification'
+    const status: TaskStatus | undefined = stage === 'waiting_verification' || stage === 'waiting_generation_confirmation'
+      ? stage
       : state === 'generating'
         ? 'generating'
         : state === 'injecting' || state === 'submitting'
@@ -612,12 +624,20 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     taskId: string,
     accountId: string,
     pauseMessage = '用户已暂停',
-    options?: { status: 'paused' | 'waiting_verification'; code?: string },
+    options?: {
+      status: 'paused' | 'waiting_verification' | 'waiting_generation_confirmation';
+      code?: string;
+      generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
+    },
   ) => {
     void window.electronAPI.logs.append({ level: 'warn', scope: 'automation', message: pauseMessage, taskId, accountId });
     const now = new Date().toISOString();
     const targetStatus: TaskStatus = options?.status || 'paused';
-    const targetStage: TaskStage = targetStatus === 'waiting_verification' ? 'waiting_verification' : 'paused';
+    const targetStage: TaskStage = targetStatus === 'waiting_verification'
+      ? 'waiting_verification'
+      : targetStatus === 'waiting_generation_confirmation'
+        ? 'waiting_generation_confirmation'
+        : 'paused';
     const errorInfo: TaskErrorInfo = {
       code: options?.code || 'cancelled',
       message: pauseMessage,
@@ -628,7 +648,13 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       status: targetStatus,
       result: pauseMessage,
       errorInfo,
-      runtime: { stage: targetStage, message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now },
+      runtime: {
+        stage: targetStage,
+        message: pauseMessage,
+        stageStartedAt: now,
+        lastHeartbeatAt: now,
+        generationConfirmation: options?.generationConfirmation,
+      },
     });
 
     const newExecuting = { ...get().executingTasks };
@@ -641,7 +667,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         status: targetStatus,
         result: pauseMessage,
         errorInfo,
-        runtime: task.runtime ? { ...task.runtime, stage: targetStage, message: pauseMessage, stageStartedAt: now, lastHeartbeatAt: now } : task.runtime,
+        runtime: task.runtime ? {
+          ...task.runtime,
+          stage: targetStage,
+          message: pauseMessage,
+          stageStartedAt: now,
+          lastHeartbeatAt: now,
+          generationConfirmation: options?.generationConfirmation,
+        } : task.runtime,
         updatedAt: now,
       } : task),
       executingTasks: newExecuting,

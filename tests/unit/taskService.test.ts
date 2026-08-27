@@ -240,6 +240,26 @@ describe('TaskService batchPause', () => {
     expect(task.result).toBe('批量暂停');
   });
 
+  it('等待生成确认已释放执行锁，批量暂停保持确认状态与禁止重发证据', () => {
+    const item = withRuntime(base('confirm-wait', 'waiting_generation_confirmation'), 'waiting_generation_confirmation');
+    item.runtime!.submittedAt = 'submitted';
+    item.runtime!.generationConfirmation = { detectedAt: 'detected', marker: 'confirm_before_generation' };
+    item.errorInfo = {
+      code: 'generation_confirmation_required',
+      message: '等待人工确认',
+      recoverable: true,
+      detectedAt: 'detected',
+    };
+    const { service, stored } = fixture([item]);
+
+    expect(service.batchPause()).toEqual({ success: true });
+    expect(stored()[0]).toEqual(item);
+    expect(service.retry('confirm-wait')).toEqual({
+      success: false,
+      error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送',
+    });
+  });
+
   it('无关字段保持不变', () => {
     const item = withRuntime(base('t1', 'executing'), 'generating');
     item.runHistory = [{ runId: 'r', attempt: 1, startedAt: 'old' }];
@@ -723,6 +743,33 @@ describe('TaskService recoverInterruptedTasks', () => {
       expect(task.runtime?.input).toEqual({ prompt: 't1', mode: 'video', attachments: [] });
     },
   );
+
+  it('等待生成确认跨重启保持原状态，仅清理底层执行锁', () => {
+    const item = activeTask('confirm-1', 'waiting_generation_confirmation');
+    item.runtime!.stage = 'waiting_generation_confirmation';
+    item.runtime!.submittedAt = '2026-08-12T00:00:10.000Z';
+    item.errorInfo = { code: 'generation_confirmation_required', message: '等待确认', recoverable: true, detectedAt: RECOVERY_STARTED_AT };
+    const { service, stored } = recoveryFixture([item]);
+    const result = service.recoverInterruptedTasks();
+    expect(result).toEqual({ success: true, data: { recoveredTasks: 0, clearedLocks: 1 } });
+    expect(stored()[0].status).toBe('waiting_generation_confirmation');
+    expect(stored()[0].runtime?.stage).toBe('waiting_generation_confirmation');
+    expect(stored()[0].lock).toBeUndefined();
+    expect(stored()[0].runHistory?.[0].finishedAt).toBeUndefined();
+  });
+
+  it('等待生成确认即使缺失 submittedAt 也拒绝 retry，防止自动重发', () => {
+    const item = activeTask('confirm-2', 'waiting_generation_confirmation');
+    item.runtime!.stage = 'waiting_generation_confirmation';
+    item.runtime!.submittedAt = undefined;
+    const { service, stored, writeCount } = recoveryFixture([item]);
+    expect(service.retry('confirm-2')).toEqual({
+      success: false,
+      error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送',
+    });
+    expect(stored()[0].status).toBe('waiting_generation_confirmation');
+    expect(writeCount()).toBe(0);
+  });
 
   it('非活动任务只清除遗留 lock，无 lock 时完全不变', () => {
     const withLock = base('t1', 'done');

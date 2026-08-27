@@ -45,9 +45,10 @@ const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定
  * 兼容修复前被错误记录为 cancelled 的任务，确保现场中的 C01-A 也被保护。
  */
 export function requiresSubmissionReconciliation(task: SubmissionRecoveryTask | undefined): boolean {
+  if (task?.status === 'waiting_generation_confirmation') return true;
   if (!task?.runtime?.submittedAt) return false;
-  if (!['paused', 'waiting_verification', 'fail', 'cancelled'].includes(task.status || '')) return false;
-  if (task.errorInfo?.code === 'submission_uncertain') return true;
+  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'fail', 'cancelled'].includes(task.status || '')) return false;
+  if (task.errorInfo?.code === 'submission_uncertain' || task.errorInfo?.code === 'generation_confirmation_required') return true;
   return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
 }
 
@@ -60,7 +61,7 @@ export function matchesSubmissionConversation(prompt: string, conversationText: 
   const promptKey = canonicalizeSubmissionText(prompt).slice(0, 36);
   if (promptKey.length < 16) return false;
   const conversationKey = canonicalizeSubmissionText(conversationText);
-  const hasPlatformReceipt = /视频生成已提交|你的视频生成好了/.test(conversationText);
+  const hasPlatformReceipt = /视频生成已提交|你的视频生成好了|视频生成参数确认|确认后.{0,16}(?:开始|进行|为你)?生成视频/.test(conversationText);
   return hasPlatformReceipt && conversationKey.includes(promptKey);
 }
 

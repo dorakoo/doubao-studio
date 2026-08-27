@@ -416,7 +416,7 @@ const TaskConsole: React.FC = () => {
         : undefined,
       audioAttachment: editingTask.mode === 'video' ? editingAudioAttachment || undefined : undefined,
     };
-    const isActive = editingTask.status === 'executing' || editingTask.status === 'generating' || editingTask.status === 'waiting_verification';
+    const isActive = editingTask.status === 'executing' || editingTask.status === 'generating' || editingTask.status === 'waiting_verification' || editingTask.status === 'waiting_generation_confirmation';
     if (isActive) {
       window.dispatchEvent(new CustomEvent('cancel-task-automation', {
         detail: { taskId: editingTask.id, restartTask: updates },
@@ -456,7 +456,7 @@ const TaskConsole: React.FC = () => {
       },
       ...(mustReconcile ? [{
         key: 'reconcile-submission',
-        label: '核对平台结果（不重新发送）',
+        label: task?.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）',
         icon: <SyncOutlined />,
         onClick: () => window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId } })),
       }] : [{
@@ -514,6 +514,7 @@ const TaskConsole: React.FC = () => {
         {status === 'generating' && <SyncOutlined spin style={{ marginRight: 4 }} />}
         {status === 'executing' && <ThunderboltOutlined style={{ marginRight: 4 }} />}
         {status === 'waiting_verification' && <LoadingOutlined spin style={{ marginRight: 4 }} />}
+        {status === 'waiting_generation_confirmation' && <ClockCircleOutlined style={{ marginRight: 4 }} />}
         {(status === 'paused' || status === 'cancelled') && <PauseCircleOutlined style={{ marginRight: 4 }} />}
         {status === 'queued' && <ClockCircleOutlined style={{ marginRight: 4 }} />}
         {status === 'done' && <CheckCircleOutlined style={{ marginRight: 4 }} />}
@@ -540,7 +541,7 @@ const TaskConsole: React.FC = () => {
   // ---- 渲染任务项 ----
 
   const renderTaskItem = (task: (typeof tasks)[0]) => {
-    const isActive = task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification';
+    const isActive = task.status === 'executing' || task.status === 'generating' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation';
     const isQueued = task.status === 'queued';
     const canStart = isQueued && task.assignedAccountId && !accountBusy[task.assignedAccountId];
     const taskMode = task.mode || 'chat';
@@ -641,7 +642,7 @@ const TaskConsole: React.FC = () => {
 
   const queuedCount = tasks.filter((t) => t.status === 'queued').length;
   const runningCount = tasks.filter(
-    (t) => t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification'
+    (t) => t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification' || t.status === 'waiting_generation_confirmation'
   ).length;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
   const failCount = tasks.filter((t) => t.status === 'fail').length;

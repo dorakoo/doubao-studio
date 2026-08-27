@@ -629,6 +629,24 @@ describe('normalizeTasks', () => {
     expect(task.projectId).toBe(DEFAULT_PROJECT_ID);
   });
 
+  it('等待生成确认状态及脱敏确认/控件证据跨重启保留', () => {
+    const task = makeValidTask();
+    task.status = 'waiting_generation_confirmation';
+    task.runtime = {
+      runId: 'run-confirm', attempt: 1, stage: 'waiting_generation_confirmation', message: '等待确认',
+      startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, submittedAt: NOW,
+      conversationUrl: 'https://www.doubao.com/chat/conversation-1',
+      input: { prompt: task.prompt, mode: 'video', attachments: [] },
+      controlReadiness: { attempts: 5, elapsedMs: 3250, modelVisibleAtMs: 250, compositeVisibleAtMs: 750, stableAtMs: 3250 },
+      generationConfirmation: { detectedAt: NOW, marker: 'parameter_confirmation', model: 'Seedance 2.0 Fast', duration: '5s', aspectRatio: '9:16' },
+    };
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.status).toBe('waiting_generation_confirmation');
+    expect(normalized.runtime?.stage).toBe('waiting_generation_confirmation');
+    expect(normalized.runtime?.generationConfirmation).toEqual(task.runtime.generationConfirmation);
+    expect(normalized.runtime?.controlReadiness).toMatchObject({ attempts: 5, elapsedMs: 3250, stableAtMs: 3250 });
+  });
+
   // ---- 测试 7: 重复任务 ID 去重 ----
   it('重复任务 ID 只保留第一个且记录警告', () => {
     const t1 = makeValidTask(); t1.id = 'dup-task'; t1.prompt = '任务1';

@@ -4,7 +4,7 @@ import { useProjectStore } from '../store/useProjectStore';
 import { useTaskStore } from '../store/useTaskStore';
 
 const DEFAULT_PROJECT_ID = 'default-project';
-const RUNNING_STATUSES = new Set(['executing', 'generating', 'waiting_verification']);
+const RUNNING_STATUSES = new Set(['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation']);
 
 export const ProjectManagementModal: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClose }) => {
   const { projects, activeProjectId, selectProject, updateProject, deleteProject } = useProjectStore();

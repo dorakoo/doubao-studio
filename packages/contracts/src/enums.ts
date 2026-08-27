@@ -26,6 +26,7 @@ export type TaskStatus =
   | 'executing'
   | 'generating'
   | 'waiting_verification'
+  | 'waiting_generation_confirmation'
   | 'paused'
   | 'done'
   | 'fail'
@@ -42,6 +43,7 @@ export type TaskStage =
   | 'injecting_prompt'
   | 'submitting'
   | 'waiting_verification'
+  | 'waiting_generation_confirmation'
   | 'generating'
   | 'extracting_outputs'
   | 'completed'
@@ -63,6 +65,13 @@ export type TaskErrorCode =
   | 'submission_failed'
   | 'generation_failed'
   | 'output_missing'
+  | 'submission_uncertain'
+  | 'generation_confirmation_required'
+  | 'video_mode_entry_not_ready'
+  | 'video_model_control_not_ready'
+  | 'video_composite_control_not_ready'
+  | 'video_stable_readback_not_ready'
+  | 'video_final_readback_not_ready'
   | 'unknown';
 
 /** 视频生成模型 */
