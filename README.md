@@ -6,7 +6,8 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Version](https://img.shields.io/badge/version-2.3.0-6d5dfc)](https://github.com/dorakoo/doubao-studio/releases)
+[![Source Version](https://img.shields.io/badge/source-2.3.0-6d5dfc)](CHANGELOG.md)
+[![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
 [![React](https://img.shields.io/badge/React-18-149eca?logo=react)](https://react.dev/)
@@ -20,6 +21,12 @@
 ![豆包工作室多账号内容生产工作台](docs/assets/README-hero.svg)
 
 豆包工作室不会替代豆包网页。它保留平台原生界面和人工处理能力，同时为重复生产增加项目隔离、多账号 Session、任务队列、运行状态、提交门禁、产物管理和恢复机制。适合短视频团队、批量素材生产、多个内容主题或客户项目并行管理。
+
+| 渠道 | 当前状态 |
+| --- | --- |
+| `main` 源码 | `2.3.0` 开发线，包含 README 所列最新工作流改进 |
+| GitHub Release | 以页面显示的 Latest Release 为准；安装包可能晚于 `main` |
+| 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
 > [!IMPORTANT]
 > 本项目是社区开发的非官方工具，与字节跳动或豆包官方无隶属关系。网页自动化能力会随平台页面变化而需要适配；请遵守平台服务条款、内容规范和所在地法律法规。
@@ -61,6 +68,9 @@
 - **额度感知调度**：默认按每个账号每天 6 个免费额度单位、每 5 秒视频 1 单位估算；平台明确提示耗尽后立即把当日预测剩余归零并安全改派。
 - **自然日刷新**：按运行机器本地时区每日 00:00 刷新预测额度并重新处理等待队列。
 - **Dola 兼容边界**：账号、Session 和调度模型不写死显示名称；实际页面能力仍需通过兼容性自检，未确认控件时保持 fail-closed。
+
+> [!WARNING]
+> **Dola 当前尚未验证可用性。** 现阶段只完成账号平台字段、独立 Session/URL 边界和 CSV 中 `dola:账号名` 的匹配支持；真实登录、对话/图片/视频提交、生成等待、产物绑定与下载尚未完成端到端人工验收。请勿把 Dola 标记理解为生产可用承诺。
 
 ### 交互体验
 
@@ -145,14 +155,15 @@ flowchart LR
 - 主进程使用原子任务锁，阻止重复点击、热更新和竞态造成重复执行。
 - 最近 20 次运行记录保留结果、错误类型和实际耗时。
 
-### 视频生成与 15 秒模式
+### 视频生成与长时长门禁
 
 - 自动确认模型、比例和时长，减少下拉菜单选择失败。
-- 15 秒视频通过可控制的请求补丁实现，自动任务和手动网页操作均可使用。
+- 11–15 秒只在当前账号页面真实显示对应可选控件时继续；无法确认或出现会员窗口时在提交前停止。
+- 历史“请求改写”入口已永久禁用，不修改平台请求、不绕过会员、额度或风控限制。
 - 视频生成可以长时间等待，同时支持随时暂停和手动提取。
 - 识别明确的额度不足、会员限制、人脸限制和生成失败提示，停止无意义等待。
 
-> 15 秒模式依赖豆包当前网页请求结构，豆包更新后可能需要同步适配。
+> 可选时长以豆包当前页面和账号权益为准。任务配置允许表达 4–15 秒，但实时门禁有权拒绝当前页面无法证明可用的配置。
 
 ### 产物与下载
 
@@ -180,6 +191,8 @@ flowchart LR
 - 原始地址与普通播放地址分开标记，不把普通播放地址误报为无水印原始文件。
 
 ### CSV 批量导入
+
+![CSV 构建准则：从表头到导入前检查](docs/assets/README-csv-guide.svg)
 
 - 从 CSV 批量导入提示词、模式、视频模型、时长、比例、素材和账号。
 - 可点击 CSV 按钮选择文件，也可把单个 `.csv` 文件直接拖到任务调度区；导入结果会明确显示成功、跳过和未指派数量。
@@ -275,7 +288,7 @@ pnpm run dev
 
 开发启动器会优先使用 `5173`。端口被占用时会自动选择后续空闲端口，并让 Electron 加载正确地址。
 
-若使用 GitHub Release 安装包，直接安装并启动即可；安装包与源码运行使用各自的应用数据目录，切换版本前建议先在“更多”中创建完整备份。
+若使用 GitHub Release 安装包，直接安装并启动即可。源码版和安装版可能解析到同一个 Electron 用户数据目录：切换版本前先在“更多”中创建完整备份，并确保任何时刻只运行一个豆包工作室实例。
 
 ## 第一次使用：从登录到下载
 
@@ -365,36 +378,40 @@ CLI 只创建本地任务，不会自动提交到豆包；导入后的任务仍�
 ## 项目结构
 
 ```text
-main/                       Electron 主进程、IPC 与本地数据
-main/ipc/projects.ts         项目管理与默认项目迁移
-main/ipc/system.ts           日志、备份、完整性与更新检查
+main/core/                  TaskService、Repository 与任务事件流
+main/ipc/                   Electron IPC 薄适配和系统能力
+main/cli/                   只读查询与受控 CSV 导入 CLI
+main/mcp/                   MCP stdio 服务端和客户端
+main/utils/                 持久化、启动、额度和媒体辅助逻辑
+packages/contracts/         主进程与渲染进程共享的纯类型契约
+schemas/capability/v1/      对外任务、事件、产物与错误 Schema
 src/components/             账号、任务、浏览器、下载和设置界面
-src/automation/             执行协调器、任务锁客户端和页面适配规则
-src/store/                  Zustand 账号与任务调度状态
-src/types/                  任务、账号、产物和 Electron API 类型
+src/automation/             执行协调器、任务锁和页面适配规则
+src/store/                  Zustand 界面投影与调度状态
 src/utils/doubaoBridge.ts   豆包网页交互与产物提取适配层
-src/utils/taskRuntime.ts    自动化错误分类
-scripts/dev.mjs             动态端口开发启动器
+tests/unit/                 Core、IPC、调度和页面适配行为测试
+examples/                   CSV 模板和受限适配规则示例
+docs/                       架构设计、交接证据和 README 图文资产
 ```
 
 ## 参与开发
 
+完整流程见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)。最基本的要求是：
+
 1. Fork 本仓库并从 `main` 创建功能分支。
-2. 保持修改聚焦，避免提交账号数据、构建产物和生成视频。
-3. 提交前运行 `pnpm run ts-check` 和 `pnpm run build`。
-4. 对豆包页面适配的修改，请说明使用的页面模式、模型、比例和复现步骤。
+2. 保持修改聚焦，避免提交账号数据、构建产物、诊断包和生成视频。
+3. 提交前运行完整的 `pnpm run validate`。
+4. 对豆包页面适配的修改，请说明页面模式、模型、比例、复现步骤和是否执行真实平台写入。
 
 ## 路线图
 
-- Excel 批量任务导入与可视化字段映射
-- 项目包导入与跨设备同步
-- 将 Webview 执行生命周期进一步迁移到主进程服务
-- 图片生成到视频生成的自动素材传递
-- 敏感数据本地加密
-- 远程适配规则签名与自动更新
-- 安装包签名、差分更新与失败回滚
+- 继续将账号、调度和产物领域收敛到 Core。
+- 拆分页面适配巨型模块并冻结 ProviderAdapter 契约。
+- 为 CSV 增加可视化字段映射和导入前检查。
+- 在认证、单实例和审计模型明确后，再评估本地 API 与事件订阅。
+- 完成源码版本、人工验收、安装包和 GitHub Release 的独立收口。
 
-完整版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+完整阶段状态见 [ROADMAP.md](ROADMAP.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## License
 

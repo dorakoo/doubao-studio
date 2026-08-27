@@ -1,0 +1,29 @@
+name: 功能建议
+description: 提议一个聚焦、可验证的新能力或体验改进
+title: "[Feature] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决的问题
+      description: 描述当前工作流中的具体困难，不要只写功能名称。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+      description: 说明入口、使用步骤和期望结果。
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已尝试的替代方案
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: 平台与安全边界
+      options:
+        - label: 该建议不要求绕过平台会员、额度、风控、审核或权限限制。
+          required: true

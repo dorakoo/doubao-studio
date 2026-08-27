@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">豆包工作室 CSV 构建准则</title>
+  <desc id="desc">说明 CSV 文件的编码、必填表头、提示词引用、视频字段、素材路径、账号和依赖规则，以及导入前检查</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101017"/><stop offset="1" stop-color="#1b1728"/></linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000" flood-opacity=".35"/></filter>
+  </defs>
+  <rect width="1200" height="760" rx="28" fill="url(#bg)"/>
+  <circle cx="1080" cy="80" r="170" fill="#6c5ce7" opacity=".10"/>
+  <text x="54" y="62" fill="#a29bfe" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="15" font-weight="700" letter-spacing="2">CSV BUILD GUIDE</text>
+  <text x="54" y="104" fill="#f5f2ff" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="30" font-weight="700">一张表，完整表达一批可执行任务</text>
+  <text x="54" y="136" fill="#a7a1b8" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="16">先保证内容不丢失，再让账号、素材和依赖关系可验证。</text>
+
+  <g filter="url(#shadow)" font-family="Segoe UI, Microsoft YaHei, sans-serif">
+    <g transform="translate(54 174)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">1</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">文件与表头</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• 保存为 UTF-8 CSV，第一行必须是表头</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• 必填：prompt（或“提示词”）</text>
+      <text x="22" y="123" fill="#7ee2a8" font-size="13">• 推荐从 examples/tasks-template.csv 复制</text>
+    </g>
+    <g transform="translate(430 174)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">2</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">提示词必须保真</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• 含逗号、换行或英文引号时包在双引号中</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• 正文里的双引号写成两个双引号：""</text>
+      <text x="22" y="123" fill="#ffcf70" font-size="13">• 不把模型、时长或比例拼进提示词代替字段</text>
+    </g>
+    <g transform="translate(806 174)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">3</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">模式与视频参数</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• mode：chat / image / video / music</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• video 再填 model、duration、aspect_ratio</text>
+      <text x="22" y="123" fill="#ff8f9c" font-size="13">• 未知模型、时长或比例会跳过该行</text>
+    </g>
+    <g transform="translate(54 338)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">4</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">素材路径</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• attachments 填绝对路径，多图使用 | 分隔</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• audio 每行只填一个参考音频路径</text>
+      <text x="22" y="123" fill="#ffcf70" font-size="13">• 导入前确认文件仍存在且当前机器可读</text>
+    </g>
+    <g transform="translate(430 338)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">5</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">账号匹配</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• 可留空，导入后由调度器自动指派</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• 重名时用 doubao:名称、dola:名称或账号 ID</text>
+      <text x="22" y="123" fill="#ffcf70" font-size="13">• Dola 前缀仅做匹配，端到端可用性尚未验证</text>
+    </g>
+    <g transform="translate(806 338)">
+      <rect width="340" height="142" rx="15" fill="#211e31" stroke="#443d67"/>
+      <circle cx="34" cy="34" r="18" fill="#6c5ce7"/><text x="29" y="40" fill="#fff" font-size="16" font-weight="700">6</text>
+      <text x="64" y="39" fill="#f0edff" font-size="17" font-weight="700">依赖关系</text>
+      <text x="22" y="75" fill="#bbb5ca" font-size="13">• depends_on 填 CSV 数据行号，多个用 |</text>
+      <text x="22" y="99" fill="#bbb5ca" font-size="13">• all_done：前置都成功；all_finished：都终态</text>
+      <text x="22" y="123" fill="#ff8f9c" font-size="13">• 自依赖、无效行号和不存在行会被拒绝</text>
+    </g>
+  </g>
+
+  <rect x="54" y="520" width="1092" height="102" rx="15" fill="#181722" stroke="#353148"/>
+  <text x="76" y="550" fill="#a29bfe" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="14" font-weight="700">推荐表头</text>
+  <text x="76" y="579" fill="#e9e5f5" font-family="Consolas, Cascadia Mono, monospace" font-size="13">prompt,mode,model,duration,aspect_ratio,attachments,audio,account,depends_on,dependency_policy</text>
+  <text x="76" y="605" fill="#9f99b2" font-family="Consolas, Cascadia Mono, monospace" font-size="12">"清楚自然地说英文：""Need a better scratch spot?""",video,seedance-2.0-fast,5s,9:16,"D:\素材\人物.png",,,</text>
+
+  <rect x="54" y="646" width="1092" height="64" rx="14" fill="#2a2344" stroke="#6c5ce7"/>
+  <text x="76" y="675" fill="#f0edff" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="14" font-weight="700">导入前最后检查</text>
+  <text x="76" y="698" fill="#c9c3d8" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="13">提示词完整 ✓　素材存在 ✓　账号可用或留空 ✓　视频参数合法 ✓　依赖行号正确 ✓　桌面应用与写入型 CLI 不同时操作 tasks.json ✓</text>
+</svg>

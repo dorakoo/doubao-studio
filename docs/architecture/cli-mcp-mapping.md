@@ -54,7 +54,7 @@ doubao-studio capabilities show [--format json|table]
 ```json
 {
   "protocolVersion": "1.0.0",
-  "serviceVersion": "2.1.0",
+  "serviceVersion": "2.3.0",
   "supportedModes": ["chat", "image", "video", "music"],
   "models": [
     {

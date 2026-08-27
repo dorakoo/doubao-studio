@@ -1,0 +1,61 @@
+name: Bug 报告
+description: 报告桌面界面、任务调度、页面适配、CSV 或下载问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请勿粘贴 Cookie、Token、Session、私人素材、完整账号名或未脱敏诊断包。
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 填写 GitHub Release、package 版本或 commit SHA。
+      placeholder: v2.2.0 / source 2.3.0 / abc1234
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题领域
+      options:
+        - 启动或黑屏
+        - 账号登录与可用性
+        - 任务调度与状态
+        - 视频参数、上传或提交
+        - CSV 导入
+        - 产物解析与下载
+        - CLI / MCP
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 写明模式、模型、比例、时长和失败阶段；删除敏感信息。
+      placeholder: |
+        1. 添加一个 video 任务
+        2. 选择 9:16 / 5s
+        3. 启动后停在“配置参数”
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望结果
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际结果与脱敏日志
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已删除 Cookie、Token、Session、私人素材路径、账号名和媒体 URL。
+          required: true

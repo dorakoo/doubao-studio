@@ -32,6 +32,21 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 6. **默认本地安全**：外部接口默认仅监听 localhost，使用访问令牌、能力授权和审计日志。
 7. **可恢复和幂等**：每条写命令携带 `requestId`，重复请求不创建重复任务；进程重启后可恢复状态。
 
+## 截至 2026-08-27 的实施状态
+
+路线图描述目标架构，不代表所有条目已经交付。当前真实状态如下：
+
+| 里程碑 | 状态 | 已完成 | 尚未完成 |
+| --- | --- | --- | --- |
+| 2.0.x 稳定性基线 | 已完成 | IPC/生命周期、任务锁、恢复、统一验证和核心回归 | 继续以回归维护为主 |
+| 2.1 Core 分层 | 部分完成 | 共享 Contracts、TaskRepository、TaskEventStream、TaskService、任务 IPC 薄适配、CSV/运行时/恢复/查询/产物校验收敛 | Account/Scheduler/Artifact 等领域仍需逐包收敛；JSON 仍是主存储 |
+| 2.2 Automation SDK 与适配器 | 部分完成 | 页面自检、dry-run、规则包、上传/控件稳定门禁、结构化错误与真实页面能力回读 | `doubaoBridge.ts` 仍偏大；正式 ProviderAdapter 拆分和更多页面 Fixture 未完成 |
+| 2.3 Agent 接入层 | 只读边界已交付 | Capability Schema v1、只读 CLI、只读 MCP Server、MCP Client、受控 `import-csv` | 无本地 HTTP 守护进程；无写入型 MCP 生成工具；事件订阅和完整 Agent 生成闭环未开放 |
+| 2.4 工作流与融合 | 未开始 | CSV 依赖批次提供基础 DAG 语义 | 正式 Workflow Manifest、Webhook、连接器和插件权限模型 |
+| 3.0 平台化 | 未开始 | 无 | SQLite、Controller/Worker、团队权限与远程 API |
+
+> Dola 仅完成数据字段、Session/URL 边界和 CSV 账号消歧接线，真实登录、提交、生成、产物和下载端到端可用性尚未验证，不计入已交付 Provider。
+
 ## 版本路线
 
 ### 2.0.x 稳定性基线
@@ -149,13 +164,13 @@ Agent 接入前必须稳定以下对象，建议使用 TypeScript 定义并生�
 
 ## 当前优先队列
 
-1. 完成 2.0.x 稳定性基线和回归测试。
-2. 抽取共享类型与 Core Service，停止继续向组件和 IPC 堆业务逻辑。
-3. 建立任务事件总线和 Repository 边界。
-4. 拆分 `doubaoBridge.ts` 并定义 ProviderAdapter 契约。
-5. 交付 CLI 作为第一种外部调用方式，验证公共能力设计。
-6. 在 CLI 协议稳定后交付本地 API 与 MCP Server。
-7. 最后建设可视化 DAG、连接器和远程 Worker，避免过早分布式化。
+1. 继续按领域把账号、调度和产物业务从 React/IPC 收敛到 Core；一次只迁移一个明确边界。
+2. 拆分 `doubaoBridge.ts`，先冻结 ProviderAdapter 契约与页面 Fixture，再迁移真实 DOM 行为。
+3. 建立可查询的账号可用性与 `action_required` 公共投影，但保持平台写操作 fail-closed。
+4. 为 CSV 导入补可视化字段映射和导入前检查；当前按钮、拖放与受控 CLI 继续共用 `TaskService.importCsv()`。
+5. 评估本地 API/事件订阅的认证、单实例和审计模型；未通过安全评审前不开放写入型 MCP 或公网监听。
+6. 完成 2.3.0 源码线的安装包人工验收、版本同步和 Release 收口；发布必须单独授权。
+7. 2.4 工作流、连接器和远程 Worker 继续延期，避免在 Core/Adapter 未稳定前扩大分布式面。
 
 ## 暂缓事项
 

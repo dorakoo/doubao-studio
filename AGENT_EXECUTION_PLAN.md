@@ -4,9 +4,11 @@
 
 ## 当前基线
 
-- 当前版本：`2.1.0`
+- 当前源码版本：`2.3.0`；GitHub 安装包版本以 Latest Release 为准，两者不得混写。
 - 当前分支：`main`
-- 2.0.x 加固基线提交为 `e87ae0b`，Wave 1 从该提交分别执行并由 Codex 集成。
+- 2.0.x 至 G-401 的历史任务均已集成；新任务必须从最新 `origin/main` 建独立分支或 worktree，不得再使用 `e87ae0b` 等历史基线开工。
+
+> 本文的 Wave 0–3 表格保留为历史执行记录，不是当前待办清单。当前优先级以 `ROADMAP.md` 的“当前优先队列”和最新 handoff 为准。
 - 新任务应从最新基线提交创建独立分支或独立 worktree，禁止多个 Agent 共用一个脏工作区。
 
 ### 集成状态
@@ -78,9 +80,11 @@
 
 ### C-000 当前改动集成
 
-**所有者**：Codex  
-**状态**：待用户确认提交  
-**目标**：审计并提交当前 2.0.x 防御性加固，形成所有 Agent 共用的起点。
+**所有者**：Codex
+
+**状态**：已完成（历史任务）
+
+**目标**：审计并提交当时的 2.0.x 防御性加固，形成后续 Wave 的共同起点。
 
 验收：
 
@@ -217,7 +221,7 @@
 
 退出标准：
 
-- 当前工程应识别 49 个 invoke/handle channel 和 3 个 send/on channel。
+- 当前工程基线应识别 52 个 invoke/handle channel 和 3 个 send/on channel；新增或删除通道时必须同步更新工程检查与此处基线。
 - 五类错误 Fixture 均返回非零结果，正常 Fixture 返回零。
 - `pnpm.cmd run check:project` 与 `pnpm.cmd run validate` 通过。
 - 提交建议：`build(check): validate IPC contracts with TypeScript AST`

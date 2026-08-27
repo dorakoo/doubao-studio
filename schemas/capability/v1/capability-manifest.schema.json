@@ -17,7 +17,7 @@
   "examples": [
     {
       "protocolVersion": "1.0.0",
-      "serviceVersion": "2.1.0",
+      "serviceVersion": "2.3.0",
       "supportedModes": ["chat", "image", "video", "music"],
       "models": [
         {
@@ -53,7 +53,7 @@
       "type": "string",
       "description": "豆包工作室应用版本（语义化版本）。",
       "pattern": "^\\d+\\.\\d+\\.\\d+",
-      "examples": ["2.1.0"]
+      "examples": ["2.3.0"]
     },
     "supportedModes": {
       "type": "array",
