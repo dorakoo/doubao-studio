@@ -218,7 +218,7 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 | `dependency_policy` | `all_done` 或 `all_finished` | `all_done` |
 
 > [!CAUTION]
-> `import-csv` CLI 会写入任务数据。必须先退出豆包工作室，再显式提供真实 `tasks.json`；不要让桌面程序与 CLI 同时写同一数据文件，也不要猜测历史工作树中的数据路径。
+> `import-csv` CLI 会写入项目和任务数据。必须先退出豆包工作室，再显式提供真实 `tasks.json` 与同目录 `projects.json`；不要让桌面程序与 CLI 同时写同一数据文件，也不要猜测历史工作树中的数据路径。`--project-id` 必须是真实 ID；如需新项目，使用 `--project-name` 创建，不要把项目名称填入 `--project-id`。
 
 ### 页面适配系统
 
@@ -249,9 +249,10 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 
 ### CLI 与 MCP 边界（v2.3）
 
-- CLI 的 `list / task / outputs / diagnostics` 保持只读；`import-csv` 是唯一显式写入命令，并复用 `TaskService.importCsv()`。
-- Agent 使用写入命令时必须同时提供 `--csv` 和真实桌面数据目录中的 `--tasks-file`；可选 `--accounts-file`（默认与 tasks 文件同目录）和 `--project-id`。文件在导入期间发生漂移会 fail-closed，桌面程序运行时不要直接调用文件写入 CLI。
-- 示例：`pnpm run cli:import -- --csv "D:\\batch.csv" --tasks-file "C:\\...\\DoubaoStudioData\\tasks.json" --accounts-file "C:\\...\\DoubaoStudioData\\accounts.json"`。
+- CLI 的 `list / task / outputs / diagnostics` 保持只读；写入面仅有 `import-csv` 和冻结范围的一次性项目迁移。
+- `import-csv` 必须提供 `--csv`、真实 `--tasks-file` 与可推导/显式 `--projects-file`。使用 `--project-id <真实ID>` 导入现有项目，或使用互斥的 `--project-name <名称>` 创建新 UUID 后导入；同名项目不会自动合并。未知 ID 返回 `PROJECT_NOT_FOUND`，任务台账不变。
+- 示例：`pnpm run cli:import -- --csv "D:\\batch.csv" --tasks-file "C:\\...\\DoubaoStudioData\\tasks.json" --projects-file "C:\\...\\DoubaoStudioData\\projects.json" --project-id "<项目ID>"`。
+- CLI 只输出导入数、跳过数、项目 ID、批次 ID 和错误摘要，不回显提示词或素材绝对路径。项目和任务文件在读取后漂移均 fail-closed，桌面程序运行时禁止调用写入 CLI。
 - MCP 服务端（`pnpm run mcp:server`）：JSON-RPC 2.0 over stdio，暴露 `doubao.list_tasks` / `doubao.get_task` 两个只读工具；由外部 MCP 客户端（如 Claude Desktop、Alice-agent 生态）接入。
 - MCP 客户端（`pnpm run mcp:client`）：stdio 客户端核心（initialize / tools/list / tools/call / ping），支持 `tools / call / audit` 三个只读命令：
   - 连接配置来自用户显式提供的 JSON 文件（`--connections-file`），**无内置连接、不自动连接任何服务**。
@@ -314,7 +315,7 @@ pnpm run dev
 
 ```powershell
 pnpm run build:main
-pnpm run cli:import -- --csv "D:\batch.csv" --tasks-file "C:\Users\<你>\AppData\Roaming\<应用数据目录>\DoubaoStudioData\tasks.json" --accounts-file "C:\Users\<你>\AppData\Roaming\<应用数据目录>\DoubaoStudioData\accounts.json"
+pnpm run cli:import -- --csv "D:\batch.csv" --tasks-file "C:\Users\<你>\AppData\Roaming\<应用数据目录>\DoubaoStudioData\tasks.json" --projects-file "C:\Users\<你>\AppData\Roaming\<应用数据目录>\DoubaoStudioData\projects.json" --project-id "<项目ID>" --accounts-file "C:\Users\<你>\AppData\Roaming\<应用数据目录>\DoubaoStudioData\accounts.json"
 ```
 
 CLI 只创建本地任务，不会自动提交到豆包；导入后的任务仍需经过账号健康、额度、依赖和提交门禁。
@@ -333,7 +334,8 @@ CLI 只创建本地任务，不会自动提交到豆包；导入后的任务仍�
 | `pnpm run dist:win` | 生成 Windows 安装包 |
 | `pnpm run pack` | 生成未安装的打包目录 |
 | `pnpm run cli:list` | 只读 CLI：列出任务 |
-| `pnpm run cli:import -- --csv <csv> --tasks-file <tasks.json>` | 显式写入 CLI：通过 TaskService 导入 CSV；桌面程序运行时禁用 |
+| `pnpm run cli:import -- --csv <csv> --tasks-file <tasks.json> --project-id <id>` | 显式写入 CLI：校验项目后通过 TaskService 导入 CSV；桌面程序运行时禁用 |
+| `pnpm run cli:migrate-project -- ...` | 冻结范围项目迁移；默认 dry-run，只有显式确认与全部不变量通过才写入 |
 | `pnpm run mcp:server` | 启动 MCP stdio 服务端（只读工具） |
 | `pnpm run mcp:client` | 启动 MCP 客户端 CLI（`tools` / `call` / `audit`） |
 

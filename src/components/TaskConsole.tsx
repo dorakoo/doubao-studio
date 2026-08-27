@@ -136,6 +136,7 @@ const TaskConsole: React.FC = () => {
     processQueue,
   } = useTaskStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
+  const activeProject = useProjectStore((state) => state.projects.find((project) => project.id === state.activeProjectId));
   const tasks = allTasks.filter((task) => (task.projectId || 'default-project') === activeProjectId);
 
   const accounts = useAccountStore((s) => s.accounts);
@@ -662,23 +663,13 @@ const TaskConsole: React.FC = () => {
       )}
       {/* 顶部操作栏 */}
       <div className="task-console-header">
-        <span className="task-console-title">任务调度</span>
+        <Tooltip title={`项目 ID：${activeProjectId}`}>
+          <span className="task-console-title">任务调度 · {activeProject?.name || activeProjectId}</span>
+        </Tooltip>
         <div className="task-console-stats">
-          {runningCount > 0 && (
-            <span className="stat-badge running">
-              <LoadingOutlined spin /> {runningCount}
-            </span>
-          )}
-          {queuedCount > 0 && (
-            <span className="stat-badge queued">
-              <ClockCircleOutlined /> {queuedCount}
-            </span>
-          )}
-          {doneCount > 0 && (
-            <span className="stat-badge done">
-              <CheckCircleOutlined /> {doneCount}
-            </span>
-          )}
+          <span className="stat-badge running"><LoadingOutlined spin={runningCount > 0} /> 运行 {runningCount}</span>
+          <span className="stat-badge queued"><ClockCircleOutlined /> 排队 {queuedCount}</span>
+          <span className="stat-badge done"><CheckCircleOutlined /> 完成 {doneCount}</span>
           {failCount > 0 && (
             <span className="stat-badge fail">
               <CloseCircleOutlined /> {failCount}
