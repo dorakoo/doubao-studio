@@ -17,6 +17,7 @@ import { registerProjectIPC } from './ipc/projects';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
 import { replaceIpcHandlers } from './ipc/lifecycle';
+import { buildDevelopmentLaunchHelpUrl, resolveRendererStartupTarget } from './utils/rendererStartup';
 
 // ==================== 常量 ====================
 
@@ -65,14 +66,15 @@ function createMainWindow(): BrowserWindow {
     }
   });
 
-  // 加载前端页面
-  if (isDev) {
-    // 开发模式：加载 Vite 开发服务器
-    win.loadURL(process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173');
-  } else {
-    // 生产模式：加载打包后的文件
-    win.loadFile(path.join(__dirname, '../renderer/index.html'));
-  }
+  // 加载前端页面。源码开发版缺少 dev server 注入时显示诊断页，禁止静默黑屏。
+  const rendererTarget = resolveRendererStartupTarget(app.isPackaged, process.env.VITE_DEV_SERVER_URL, __dirname);
+  const rendererLoad = rendererTarget.kind === 'file'
+    ? win.loadFile(rendererTarget.value)
+    : win.loadURL(rendererTarget.value);
+  void rendererLoad.catch((error: Error) => {
+    writeCrashLog('rendererLoadFailure', error.message, error.stack);
+    if (!win.isDestroyed()) void win.loadURL(buildDevelopmentLaunchHelpUrl());
+  });
 
   // 在默认浏览器中打开外部链接
   win.webContents.setWindowOpenHandler(({ url }) => {

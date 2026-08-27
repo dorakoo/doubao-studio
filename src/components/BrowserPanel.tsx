@@ -22,7 +22,7 @@ import {
   injectPrompt,
   verifyPromptReadyForSubmission,
   submitPromptWithNativeClick,
-  confirmMaterialAuthorizationIfPresent,
+  inspectMaterialAuthorization,
   checkGeneratingDetailed,
   getResultUrl,
   switchMode,
@@ -43,6 +43,8 @@ import {
   detectRobotVerification,
   resolveVideoArtifact,
   manualResolveVideoArtifact,
+  waitForSubmissionControlsStable,
+  dismissKnownDesktopDownloadPromotion,
 } from '../utils/doubaoBridge';
 import type { VideoArtifactResolution } from '../utils/videoArtifactResolver';
 import {
@@ -58,6 +60,8 @@ import type { WebviewResourceScope } from '../utils/webviewLifecycle';
 import { getVideoQuotaUsageUnits } from '../utils/videoQuota';
 import { availabilityBlocksAutomation, probeAccountAvailability } from '../utils/accountAvailability';
 import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } from '../utils/experimentalNoWatermark';
+import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
+import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -492,26 +496,34 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     let availabilitySettleTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilityFinalTimer: ReturnType<typeof setTimeout> | undefined;
 
+    const runAvailabilityCheck = async (source: AccountAvailabilitySource): Promise<void> => {
+      const dismissed = await dismissKnownDesktopDownloadPromotion(webview);
+      if (dismissed === 'failed') {
+        console.warn(`[BrowserPanel] ${accId} 下载电脑版推广弹窗未能安全关闭`);
+      }
+      await performAvailabilityCheck(accId, webview, source);
+    };
+
     const scheduleAvailabilityCheck = (source: AccountAvailabilitySource, delayMs: number = 600): void => {
       scope.clearTimer(availabilityTimer);
       scope.clearTimer(availabilitySettleTimer);
       scope.clearTimer(availabilityFinalTimer);
       availabilityTimer = setTimeout(() => {
         if (!scope.active || registryRef.current.get(accId) !== webview) return;
-        void performAvailabilityCheck(accId, webview, source);
+        void runAvailabilityCheck(source);
       }, delayMs);
       scope.trackTimer(availabilityTimer);
       // 豆包 SPA 常在 dom-ready 后数秒才渲染“登录”/验证层。第二次稳定化检测
       // 防止把匿名页先出现的输入框误判为已登录。
       availabilitySettleTimer = setTimeout(() => {
         if (!scope.active || registryRef.current.get(accId) !== webview) return;
-        void performAvailabilityCheck(accId, webview, source);
+        void runAvailabilityCheck(source);
       }, Math.max(3500, delayMs + 3000));
       scope.trackTimer(availabilitySettleTimer);
       // 多账号同时打开时，隐藏 webview 的账号壳可能需要更长时间才稳定。
       availabilityFinalTimer = setTimeout(() => {
         if (!scope.active || registryRef.current.get(accId) !== webview) return;
-        void performAvailabilityCheck(accId, webview, source);
+        void runAvailabilityCheck(source);
       }, Math.max(15_000, delayMs + 12_000));
       scope.trackTimer(availabilityFinalTimer);
     };
@@ -823,7 +835,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     attachments?: string[],
     audioAttachment?: string
   ) => {
-    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask } =
+    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, retryTask, assignTask } =
       useTaskStore.getState();
     const expectedRunId = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.runId;
     let controller: AbortController;
@@ -837,10 +849,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
     abortControllersRef.current.set(taskId, controller);
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
+    const clearKnownPromotion = async (): Promise<void> => {
+      const result = await dismissKnownDesktopDownloadPromotion(webview);
+      if (result === 'failed') {
+        throw new Error('下载电脑版推广弹窗未能安全关闭，已在提交前停止');
+      }
+      if (result === 'dismissed') await pause(350);
+    };
+    const materialAuthorizationNotificationKey = `material-authorization-${taskId}`;
     try {
       console.log(`[Automation:${accountId}] 开始`);
 
       setAccountAutomationState(accountId, 'injecting', '正在检测账号可用性...', 'preparing_account');
+      await clearKnownPromotion();
       const preTaskAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
       if (availabilityBlocksAutomation(preTaskAvailability)) {
         useAccountStore.getState().selectAccount(accountId);
@@ -887,6 +908,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new Error(`创建新对话失败（${newConversationResult.reason || 'PAGE_UNKNOWN'}）`);
       }
       await waitForWebviewReady(webview, 15000);
+      await clearKnownPromotion();
       taskConversationUrl = webview.getURL();
       await updateTaskRuntime(taskId, { runtime: { conversationUrl: taskConversationUrl } });
       // 根据任务模式切换到对应页面
@@ -895,6 +917,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         setAccountAutomationState(accountId, 'injecting', '切换到' + modeLabel + '模式...', 'switching_mode');
         switchMode(webview, mode);
         await waitForWebviewReady(webview, 20000);
+        await clearKnownPromotion();
 
         // image/video 模式：在 AI 创作页面点击 Tab 切换
         if (mode === 'image' || mode === 'video') {
@@ -934,10 +957,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               console.warn(`[BrowserPanel] 读取文件失败 ${filePath}:`, e.message);
             }
           }
-          if (fileDataList.length > 0) {
-            await uploadReferenceImages(webview, fileDataList);
+          if (fileDataList.length !== attachments.length) {
+            throw new Error('参考图片读取不完整，已在提交前停止');
           }
-          await pause(1000);
+          const uploaded = await uploadReferenceImages(webview, fileDataList);
+          if (!uploaded) throw new Error('参考图片未全部上传稳定，已在提交前停止');
         }
 
         // 有参考音频时上传（仅视频模式）
@@ -950,17 +974,21 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               const mimeMatch = result.data.match(/^data:(audio\/[\w.+-]+);base64,/);
               const mime = mimeMatch ? mimeMatch[1] : 'audio/mpeg';
               const base64 = result.data.replace(/^data:audio\/[\w.+-]+;base64,/, '');
-              await uploadReferenceAudio(webview, { name: fileName, base64, mime });
-              await pause(800);
+              const uploaded = await uploadReferenceAudio(webview, { name: fileName, base64, mime });
+              if (!uploaded) throw new Error('参考音频未上传完成，已在提交前停止');
+            } else {
+              throw new Error('参考音频读取失败，已在提交前停止');
             }
-          } catch (e: any) {
-            console.warn(`[BrowserPanel] 上传音频失败:`, e.message);
+          } catch (error: unknown) {
+            const reason = error instanceof Error ? error.message : '参考音频处理失败';
+            throw new Error(reason.includes('已在提交前停止') ? reason : '参考音频处理失败，已在提交前停止');
           }
         }
       } else {
         await waitForWebviewReady(webview, 15000);
       }
 
+      await clearKnownPromotion();
       const preSubmitAvailability = await performAvailabilityCheck(accountId, webview, 'pre_submit');
       if (preSubmitAvailability.state !== 'ready') {
         useAccountStore.getState().selectAccount(accountId);
@@ -984,52 +1012,115 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new Error('提示词全文回读不一致，可能存在截断或台词缺失；已在提交前停止');
       }
 
-      // 某些账号的素材确认会自动继续此前被拦截的发送。确认前先取只读基线，
-      // 确认后若用户消息已进入会话，则后续绝不能再点一次发送。
+      // 素材确认可能在用户点击后直接继续发送。先取只读基线，确认后只回读，
+      // 绝不能再点一次发送。
       const generationStartTimeBeforeSubmit = await getGenerationStartTime(webview);
       initialMsgCount = await getSubmissionMessageCount(webview);
       let authorizationTriggeredSubmission = false;
+      let submissionMarkedAt: string | undefined;
+
+      const markSubmissionIntent = async (stage: 'submitting' | 'waiting_verification', messageText: string): Promise<string> => {
+        const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
+        if (!canAttemptSubmission(expectedRunId, currentRuntime?.runId, currentRuntime?.submittedAt)) {
+          throw new SubmissionSafetyPauseError('本次运行已存在发送记录或运行身份已变化；系统已停止，未再次发送');
+        }
+        const markedAt = new Date().toISOString();
+        await updateTaskRuntime(taskId, {
+          status: stage === 'waiting_verification' ? 'waiting_verification' : 'executing',
+          runtime: {
+            stage,
+            message: messageText,
+            stageStartedAt: markedAt,
+            lastHeartbeatAt: markedAt,
+            submittedAt: markedAt,
+          },
+        });
+        const persistedRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
+        if (persistedRuntime?.runId !== expectedRunId || persistedRuntime?.submittedAt !== markedAt) {
+          throw new Error('提交意图持久化失败；为避免重复发送，本次未执行页面提交');
+        }
+        return markedAt;
+      };
 
       // 参考素材首次用于某个账号时，新版页面会用“安全确认”遮挡发送按钮。
-      // 必须在写入 submittedAt 之前精确处理并回读；结构异常时提交前停止。
+      // 自动化只识别、不代点。由于人工“确认”可能直接提交，必须先持久化提交意图，
+      // 再等待用户操作并回读同一 run，避免任务失联或二次发送。
       if (mode === 'video' && attachments && attachments.length > 0) {
-        const authorization = await confirmMaterialAuthorizationIfPresent(webview);
+        const authorization = await inspectMaterialAuthorization(webview);
         if (authorization === 'blocked') {
           throw new AccountAvailabilityPauseError('素材安全确认未完成，请检查右侧页面；本次尚未提交', 'material_authorization_required');
         }
-        if (authorization === 'confirmed') {
-          for (let attempt = 0; attempt < 4; attempt += 1) {
-            await pause(500);
+        if (authorization === 'present') {
+          const waitingMessage = '等待你在右侧页面确认素材授权；确认后将自动继续跟踪，系统不会代点或重复发送';
+          submissionMarkedAt = await markSubmissionIntent('waiting_verification', waitingMessage);
+          setAccountAutomationState(accountId, 'injecting', waitingMessage, 'waiting_verification');
+          useAccountStore.getState().selectAccount(accountId);
+          notification.warning({
+            key: materialAuthorizationNotificationKey,
+            message: '需要人工确认素材授权',
+            description: '请核对素材权利后在豆包页面手动选择“确认”或“拒绝”。确认后任务会继续跟踪本次生成。',
+            duration: 0,
+          });
+
+          const authorizationWaitStartedAt = Date.now();
+          const authorizationTimeoutMs = 30 * 60 * 1000;
+          while (true) {
+            await pause(600);
             const evidence = await getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
-            if (classifySubmissionReadback(evidence) === 'confirmed') {
+            const dialogState = await inspectMaterialAuthorization(webview);
+            const progress = decideMaterialAuthorizationProgress({
+              dialogState,
+              submissionConfirmed: classifySubmissionReadback(evidence) === 'confirmed',
+              elapsedMs: Date.now() - authorizationWaitStartedAt,
+              timeoutMs: authorizationTimeoutMs,
+            });
+            if (progress === 'confirmed') {
               authorizationTriggeredSubmission = true;
               break;
             }
+            if (progress === 'timeout') {
+              throw new SubmissionSafetyPauseError('等待素材授权确认超时；提交意图已保留，系统不会自动重发');
+            }
+            if (progress === 'uncertain') {
+              // 弹窗消失后给页面最多 6 秒产生权威提交回执；拒绝或异常关闭均不得补点发送。
+              for (let attempt = 0; attempt < 12; attempt += 1) {
+                await pause(500);
+                const followup = await getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
+                if (classifySubmissionReadback(followup) === 'confirmed') {
+                  authorizationTriggeredSubmission = true;
+                  break;
+                }
+              }
+              if (!authorizationTriggeredSubmission) {
+                throw new SubmissionSafetyPauseError('素材授权弹窗已关闭，但未取得提交回执；请人工核对平台，系统不会自动重发');
+              }
+              break;
+            }
           }
+          notification.destroy(materialAuthorizationNotificationKey);
         }
+      }
+
+      if (!authorizationTriggeredSubmission && !await waitForSubmissionControlsStable(webview)) {
+        throw new Error('发送控件或素材上传状态未连续稳定，已在提交前停止');
       }
 
       // P0：真实发送是不可重复副作用。先从当前任务快照核对 runId/submittedAt，
       // 再把本次提交意图持久化；写入失败或运行已变化时绝不点击页面。
-      const currentRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
-      if (!canAttemptSubmission(expectedRunId, currentRuntime?.runId, currentRuntime?.submittedAt)) {
-        throw new SubmissionSafetyPauseError('本次运行已存在发送记录或运行身份已变化；系统已停止，未再次发送');
+      if (!submissionMarkedAt) {
+        submissionMarkedAt = await markSubmissionIntent('submitting', '正在发送...');
+      } else {
+        await updateTaskRuntime(taskId, {
+          status: 'executing',
+          runtime: { stage: 'submitting', message: '素材授权已确认，正在回读本次提交...', lastHeartbeatAt: new Date().toISOString() },
+        });
       }
-      const submissionMarkedAt = new Date().toISOString();
-      await updateTaskRuntime(taskId, {
-        runtime: {
-          stage: 'submitting',
-          message: '正在发送...',
-          stageStartedAt: submissionMarkedAt,
-          lastHeartbeatAt: submissionMarkedAt,
-          submittedAt: submissionMarkedAt,
-        },
-      });
-      const persistedRuntime = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime;
-      if (persistedRuntime?.runId !== expectedRunId || persistedRuntime?.submittedAt !== submissionMarkedAt) {
-        throw new Error('提交意图持久化失败；为避免重复发送，本次未执行页面提交');
-      }
-      setAccountAutomationState(accountId, 'submitting', '正在发送...', 'submitting');
+      setAccountAutomationState(
+        accountId,
+        'submitting',
+        authorizationTriggeredSubmission ? '素材授权已确认，正在回读本次提交...' : '正在发送...',
+        'submitting',
+      );
       // 必须和提交回读使用同一个 DOM 选择器；综合生成检测可能因为网络状态
       // 提前返回而没有消息计数，不能把旧会话消息误当成本次发送回执。
       let submitted = authorizationTriggeredSubmission;
@@ -1264,9 +1355,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (mode === 'video' && isRestrictionFailure(errorInfo.code)) {
         console.warn(`[Automation:${accountId}] 检测到限制类失败(${errorInfo.code})，不扣减额度`);
       }
-      if (mode === 'video' && errorInfo.code === 'quota_exhausted') {
-        await useAccountStore.getState().markSeedanceExhausted(accountId);
-      }
+      const quotaExhausted = mode === 'video' && errorInfo.code === 'quota_exhausted';
+      if (quotaExhausted) await useAccountStore.getState().markSeedanceExhausted(accountId);
       if (!cancelled && !safetyPaused && !availabilityPaused) {
         await useAccountStore.getState().recordAccountOutcome(accountId, 'failure', errorInfo.code);
       }
@@ -1285,6 +1375,22 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       } else {
         setAccountAutomationState(accountId, 'failed', errorMessage, 'failed');
         await failAutomation(taskId, accountId, errorMessage, errorInfo);
+        if (quotaExhausted && await retryTask(taskId)) {
+          const state = useTaskStore.getState();
+          const queuedTask = state.tasks.find((item) => item.id === taskId);
+          const fallbackAccountId = queuedTask ? selectQuotaFallbackAccount(
+            queuedTask,
+            state.tasks,
+            useAccountStore.getState().accounts,
+            accountId,
+          ) : null;
+          if (fallbackAccountId) {
+            await assignTask(taskId, fallbackAccountId);
+            message.warning('原账号视频额度已清零，任务已安全改派到其他可用账号');
+          } else {
+            message.warning('原账号视频额度已清零；暂无替代账号，任务保留排队等待次日 00:00 刷新');
+          }
+        }
       }
 
       const restartTask = pendingRestartTasksRef.current.get(taskId);
@@ -1294,6 +1400,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (updated) message.success('提示词已更新，任务已重新加入队列');
       }
     } finally {
+      notification.destroy(materialAuthorizationNotificationKey);
       abortControllersRef.current.delete(taskId);
       pendingRestartTasksRef.current.delete(taskId);
       runningRef.current.delete(accountId);

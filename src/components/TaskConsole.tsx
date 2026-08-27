@@ -8,7 +8,7 @@
  * - 任务列表中显示模式标签
  */
 
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message, Switch } from 'antd';
 import type { MenuProps, SegmentedProps } from 'antd';
 import {
@@ -52,6 +52,8 @@ import { evaluateVideoCapability } from '../utils/videoCapability';
 import { buildManualAssignmentOptions } from '../utils/accountAssignment';
 import { buildAutoAssignmentPlan } from '../utils/autoAssignment';
 import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
+import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
+import { decideCsvDrop } from '../utils/csvDrop';
 
 const { TextArea } = Input;
 
@@ -138,6 +140,7 @@ const TaskConsole: React.FC = () => {
 
   const accounts = useAccountStore((s) => s.accounts);
   const selectAccount = useAccountStore((s) => s.selectAccount);
+  const accountAutomationState = useTaskStore((s) => s.accountAutomationState);
 
   const [inputText, setInputText] = useState('');
   const [addModalOpen, setAddModalOpen] = useState(false);
@@ -159,6 +162,9 @@ const TaskConsole: React.FC = () => {
   const [templates, setTemplates] = useState<TaskTemplate[]>([]);
   const [templateName, setTemplateName] = useState('');
   const [templateModalOpen, setTemplateModalOpen] = useState(false);
+  const [isCsvDragging, setIsCsvDragging] = useState(false);
+  const [isCsvImporting, setIsCsvImporting] = useState(false);
+  const csvDragDepth = useRef(0);
 
   useEffect(() => {
     void window.electronAPI.settings.get().then((settings) => {
@@ -246,23 +252,59 @@ const TaskConsole: React.FC = () => {
     }
   }, [inputText, variableRows, selectedMode, videoConfig, attachments, audioAttachment, addTasks, autoAssign, autoAssignTasks]);
 
-  const handleImportCsv = useCallback(async () => {
-    const result = await importCsv();
-    if (!result) {
-      if (useTaskStore.getState().error) message.error(useTaskStore.getState().error);
+  const handleImportCsv = useCallback(async (filePath?: string) => {
+    if (isCsvImporting) return;
+    setIsCsvImporting(true);
+    try {
+      const result = await importCsv(filePath);
+      if (!result) {
+        if (useTaskStore.getState().error) message.error(useTaskStore.getState().error);
+        return;
+      }
+      const assignment = autoAssign && result.tasks.length > 0
+        ? await autoAssignTasks(result.tasks)
+        : { assigned: 0, unassigned: 0 };
+      if (result.errors.length > 0) {
+        message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
+      } else if (assignment.unassigned > 0) {
+        message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派`);
+      } else {
+        message.success(`已导入 ${result.imported} 条任务`);
+      }
+    } finally {
+      setIsCsvImporting(false);
+    }
+  }, [autoAssign, autoAssignTasks, importCsv, isCsvImporting]);
+
+  const handleCsvDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    csvDragDepth.current += 1;
+    if (Array.from(event.dataTransfer.items).some((item) => item.kind === 'file')) setIsCsvDragging(true);
+  }, []);
+
+  const handleCsvDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    csvDragDepth.current = Math.max(0, csvDragDepth.current - 1);
+    if (csvDragDepth.current === 0) setIsCsvDragging(false);
+  }, []);
+
+  const handleCsvDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    csvDragDepth.current = 0;
+    setIsCsvDragging(false);
+    const decision = decideCsvDrop(event.dataTransfer.files);
+    if (!decision.ok) {
+      message.error(decision.message);
       return;
     }
-    const assignment = autoAssign && result.tasks.length > 0
-      ? await autoAssignTasks(result.tasks)
-      : { assigned: 0, unassigned: 0 };
-    if (result.errors.length > 0) {
-      message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
-    } else if (assignment.unassigned > 0) {
-      message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派`);
-    } else {
-      message.success(`已导入 ${result.imported} 条任务`);
+    try {
+      const filePath = window.electronAPI.tasks.getPathForDroppedFile(decision.file);
+      if (!filePath) throw new Error('无法读取拖入文件的本地路径');
+      void handleImportCsv(filePath);
+    } catch (error: unknown) {
+      message.error(error instanceof Error ? error.message : '无法导入拖入的 CSV 文件');
     }
-  }, [autoAssign, autoAssignTasks, importCsv]);
+  }, [handleImportCsv]);
 
   const handleAutoAssignChange = useCallback(async (enabled: boolean) => {
     setAutoAssign(enabled);
@@ -484,6 +526,12 @@ const TaskConsole: React.FC = () => {
 
   const handleTaskClick = (task: Task) => {
     if (task.assignedAccountId) {
+      const interactiveAccountId = findInteractiveAccountId(accountAutomationState);
+      if (!canSelectAccount(task.assignedAccountId, interactiveAccountId)) {
+        const interactiveAccount = accounts.find((account) => account.id === interactiveAccountId);
+        message.warning(`任务正在 ${interactiveAccount?.name || '当前账号'} 配置或提交，进入生成阶段后即可切换`);
+        return;
+      }
       selectAccount(task.assignedAccountId);
     }
   };
@@ -598,7 +646,20 @@ const TaskConsole: React.FC = () => {
   const failCount = tasks.filter((t) => t.status === 'fail').length;
 
   return (
-    <div className="task-console">
+    <div
+      className={`task-console${isCsvDragging ? ' csv-dragging' : ''}`}
+      onDragEnter={handleCsvDragEnter}
+      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; }}
+      onDragLeave={handleCsvDragLeave}
+      onDrop={handleCsvDrop}
+    >
+      {isCsvDragging && (
+        <div className="csv-drop-overlay" role="status" aria-live="polite">
+          <FileExcelOutlined />
+          <strong>松开导入 CSV</strong>
+          <span>导入当前项目；未指派任务不会自动开始</span>
+        </div>
+      )}
       {/* 顶部操作栏 */}
       <div className="task-console-header">
         <span className="task-console-title">任务调度</span>
@@ -644,7 +705,13 @@ const TaskConsole: React.FC = () => {
             添加任务
           </Button>
           <Tooltip title="从 CSV 导入任务批次">
-            <Button size="small" icon={<FileExcelOutlined />} onClick={() => void handleImportCsv()} />
+            <Button
+              size="small"
+              icon={<FileExcelOutlined />}
+              loading={isCsvImporting}
+              disabled={isCsvImporting}
+              onClick={() => void handleImportCsv()}
+            />
           </Tooltip>
           {(runningCount > 0 || queuedCount > 0) && (
             <Button

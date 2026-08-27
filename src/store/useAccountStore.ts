@@ -8,6 +8,7 @@
 import { create } from 'zustand';
 import type { Account, AccountAvailability, AccountPlatform, AccountStatus } from '../types';
 import { requireStartupAvailabilityRecheck } from '../utils/accountAvailability';
+import { resolveStartupAccountId } from '../utils/accountStartupSelection';
 
 function prepareAccountForRuntime(account: Account, checkedAt: string): Account {
   return {
@@ -40,6 +41,7 @@ interface AccountState {
   // Actions
   /** 从主进程加载账号列表 */
   loadAccounts: () => Promise<void>;
+  refreshDailyQuota: () => Promise<void>;
   /** 添加新账号 */
   addAccount: (name: string, platform?: AccountPlatform) => Promise<boolean>;
   /** 编辑账号名称 */
@@ -83,9 +85,29 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       // 打开软件后不信任上次运行的 ready；必须等当前隔离页面完成探测。
       const checkedAt = new Date().toISOString();
       const normalized = accounts.map((account) => prepareAccountForRuntime(account, checkedAt));
-      set({ accounts: normalized, loading: false });
+      set({
+        accounts: normalized,
+        selectedAccountId: resolveStartupAccountId(normalized, get().selectedAccountId),
+        loading: false,
+      });
     } catch (err: any) {
       set({ error: err.message, loading: false });
+    }
+  },
+
+  // 跨过本机 00:00 时只刷新额度字段，保留当前页面探测与人工验证状态。
+  refreshDailyQuota: async () => {
+    try {
+      const persisted = await window.electronAPI.accounts.list();
+      const quotaById = new Map(persisted.map((account) => [account.id, account.seedanceQuota]));
+      set({
+        accounts: get().accounts.map((account) => ({
+          ...account,
+          seedanceQuota: quotaById.get(account.id) || account.seedanceQuota,
+        })),
+      });
+    } catch (error: unknown) {
+      set({ error: error instanceof Error ? error.message : '每日额度刷新失败' });
     }
   },
 

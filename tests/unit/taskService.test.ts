@@ -927,7 +927,8 @@ describe('IPC 接线源码契约检查', () => {
     expect(handlerBody).not.toMatch(/\bpromptIndex\b/);
     expect(handlerBody).not.toMatch(/\bloadTasks\b/);
     expect(handlerBody).not.toMatch(/\bsaveTasks\b/);
-    expect(handlerBody).toMatch(/taskService\.importCsv\(/);
+    expect(handlerBody).toMatch(/importCsvFile\(/);
+    expect(source).toMatch(/export function importCsvFile[\s\S]*?taskService\.importCsv\(/);
   });
 
   it('tasks:importCsv 文件读取异常使用固定脱敏错误', () => {

@@ -25,6 +25,7 @@
     "test:coverage": "vitest run --coverage",
     "validate": "pnpm run ts-check && pnpm run lint && pnpm run check:project && pnpm run test && pnpm run build",
     "cli:list": "node dist/main/cli/doubaoCliEntry.js list",
+    "cli:import": "node dist/main/cli/doubaoCliEntry.js import-csv",
     "mcp:server": "node dist/main/mcp/doubaoMcpServer.js",
     "mcp:client": "node dist/main/mcp/mcpClientCli.js"
   },
