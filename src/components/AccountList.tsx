@@ -28,6 +28,7 @@ import { useTaskStore } from '../store/useTaskStore';
 import { AUTO_STATE_DISPLAY } from '../types';
 import type { Account, AccountPlatform } from '../types';
 import type { AutomationState } from '../store/useTaskStore';
+import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
 
 export const AccountList: React.FC = () => {
   const {
@@ -51,6 +52,20 @@ export const AccountList: React.FC = () => {
   const accountBusy = useTaskStore(s => s.accountBusy);
   const accountAutomationState = useTaskStore(s => s.accountAutomationState);
   const accountAutoMessage = useTaskStore(s => s.accountAutoMessage);
+  const interactiveAccountId = useMemo(
+    () => findInteractiveAccountId(accountAutomationState),
+    [accountAutomationState],
+  );
+
+  const handleSelectAccount = useCallback((accountId: string): boolean => {
+    if (!canSelectAccount(accountId, interactiveAccountId)) {
+      const interactiveAccount = accounts.find((account) => account.id === interactiveAccountId);
+      message.warning(`任务正在 ${interactiveAccount?.name || '当前账号'} 配置或提交，进入生成阶段后即可切换`);
+      return false;
+    }
+    selectAccount(accountId);
+    return true;
+  }, [accounts, interactiveAccountId, selectAccount]);
 
   // 搜索
   const [searchText, setSearchText] = useState('');
@@ -273,8 +288,7 @@ export const AccountList: React.FC = () => {
         icon: <SafetyCertificateOutlined />,
         disabled: !!availabilityChecking[account.id],
         onClick: () => {
-          selectAccount(account.id);
-          requestAvailabilityCheck(account.id);
+          if (handleSelectAccount(account.id)) requestAvailabilityCheck(account.id);
         },
       },
       {
@@ -292,7 +306,7 @@ export const AccountList: React.FC = () => {
         onClick: () => handleDeleteAccount(account),
       },
     ],
-    [availabilityChecking, handleDeleteAccount, handleRefreshAccount, handleTogglePinned, requestAvailabilityCheck, selectAccount, updateScheduling]
+    [availabilityChecking, handleDeleteAccount, handleRefreshAccount, handleSelectAccount, handleTogglePinned, requestAvailabilityCheck, updateScheduling]
   );
 
   return (
@@ -361,7 +375,7 @@ export const AccountList: React.FC = () => {
                       ? 'bg-db-accent/15 border-db-accent/40 shadow-sm'
                       : 'bg-db-surface hover:bg-db-surface-hover border-transparent'
                   }`}
-                  onClick={() => selectAccount(account.id)}
+                  onClick={() => handleSelectAccount(account.id)}
                 >
                   {/* 头像 */}
                   <div

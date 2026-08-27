@@ -77,6 +77,44 @@ const taskService = new TaskService({
   basename: (value) => require('path').basename(value),
 });
 
+type CsvImportResponse = {
+  success: boolean;
+  tasks?: Task[];
+  batchId?: string;
+  imported?: number;
+  skipped?: number;
+  errors?: string[];
+  error?: string;
+};
+
+/** 文件入口共用同一 Core 导入边界；路径、大小和扩展名全部 fail-closed。 */
+export function importCsvFile(filePath: string, projectId?: string): CsvImportResponse {
+  try {
+    const fs = require('fs') as typeof import('fs');
+    const path = require('path') as typeof import('path');
+    const resolved = path.resolve(filePath);
+    if (path.extname(resolved).toLowerCase() !== '.csv') return { success: false, error: '仅支持 CSV 文件' };
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 10 * 1024 * 1024) {
+      return { success: false, error: 'CSV 文件为空或超过 10MB 上限' };
+    }
+    const raw = fs.readFileSync(resolved, 'utf-8');
+    const accounts = readJSON<Array<{ id: string; name: string; platform?: 'doubao' | 'dola' }>>('accounts.json', []);
+    const result = taskService.importCsv({ text: raw, accounts, projectId });
+    if (!result.success) return result;
+    return {
+      success: true,
+      tasks: result.data.tasks,
+      batchId: result.data.batchId,
+      imported: result.data.imported,
+      skipped: result.data.skipped,
+      errors: result.data.errors,
+    };
+  } catch {
+    return { success: false, error: 'CSV 导入失败，请检查文件格式和数据目录状态' };
+  }
+}
+
 /** 产物网络探针：Electron session/partition 探测由 IPC 边界提供，Core 只消费结果 */
 function createArtifactProbe(): (artifact: TaskArtifact, assignedAccountId: string | null) => Promise<ArtifactProbeResult> {
   return async (artifact, assignedAccountId) => {
@@ -333,29 +371,19 @@ export function registerTaskIPC(): () => void {
 
   ipcMain.handle(
     'tasks:importCsv',
-    async (_event, params?: TaskImportCsvParams): Promise<{ success: boolean; tasks?: Task[]; batchId?: string; imported?: number; skipped?: number; errors?: string[]; error?: string }> => {
+    async (_event, params?: TaskImportCsvParams): Promise<CsvImportResponse> => {
       try {
-        const selected = await dialog.showOpenDialog({
-          title: '导入 CSV 任务',
-          properties: ['openFile'],
-          filters: [{ name: 'CSV', extensions: ['csv'] }],
-        });
-        if (selected.canceled || !selected.filePaths[0]) return { success: false };
-        const fs = require('fs');
-        const raw = fs.readFileSync(selected.filePaths[0], 'utf-8');
-        const accounts = readJSON<Array<{ id: string; name: string; platform?: 'doubao' | 'dola' }>>('accounts.json', []);
-        const result = taskService.importCsv({ text: raw, accounts, projectId: params?.projectId });
-        if (result.success) {
-          return {
-            success: true,
-            tasks: result.data.tasks,
-            batchId: result.data.batchId,
-            imported: result.data.imported,
-            skipped: result.data.skipped,
-            errors: result.data.errors,
-          };
+        let filePath = typeof params?.filePath === 'string' ? params.filePath : '';
+        if (!filePath) {
+          const selected = await dialog.showOpenDialog({
+            title: '导入 CSV 任务',
+            properties: ['openFile'],
+            filters: [{ name: 'CSV', extensions: ['csv'] }],
+          });
+          if (selected.canceled || !selected.filePaths[0]) return { success: false };
+          filePath = selected.filePaths[0];
         }
-        return { success: false, error: result.error };
+        return importCsvFile(filePath, params?.projectId);
       } catch {
         return { success: false, error: 'CSV 导入失败，请检查文件格式和数据目录状态' };
       }

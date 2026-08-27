@@ -4,7 +4,7 @@
  * 通过 contextBridge 安全地暴露 IPC 通信接口给渲染进程
  */
 
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, GenerationMode } from '@doubao-studio/contracts';
 
 // ==================== 暴露 API ====================
@@ -69,7 +69,9 @@ const electronAPI = {
       ipcRenderer.invoke('tasks:renewLock', { taskId, ownerId }),
     releaseLock: (taskId: string, ownerId: string): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:releaseLock', { taskId, ownerId }),
-    importCsv: (projectId?: string): Promise<any> => ipcRenderer.invoke('tasks:importCsv', { projectId }),
+    importCsv: (projectId?: string, filePath?: string): Promise<any> =>
+      ipcRenderer.invoke('tasks:importCsv', { projectId, filePath }),
+    getPathForDroppedFile: (file: unknown): string => webUtils.getPathForFile(file as File),
     update: (taskId: string, updates: {
       prompt: string;
       videoConfig?: any;

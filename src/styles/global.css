@@ -84,6 +84,8 @@ body {
   cursor: col-resize;
   flex-shrink: 0;
   position: relative;
+  z-index: 20;
+  will-change: transform;
 }
 
 .app-resizer:hover {
@@ -99,6 +101,24 @@ body {
   height: 40px;
   background: #38385a;
   border-radius: 2px;
+}
+
+/* Electron webview 的 guest surface 会吞掉进入网页后的 mouseup。
+   仅在拖拽期间用透明顶层接住完整指针序列。 */
+.resize-capture-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  background: transparent;
+  user-select: none;
+}
+
+.resize-capture-overlay-col {
+  cursor: col-resize;
+}
+
+.resize-capture-overlay-row {
+  cursor: row-resize;
 }
 
 .app-browser {
@@ -548,6 +568,43 @@ body {
   height: 100%;
   overflow: hidden;
   background: #1a1a24;
+  position: relative;
+}
+
+.task-console.csv-dragging {
+  outline: 1px solid #6c5ce7;
+  outline-offset: -1px;
+}
+
+.csv-drop-overlay {
+  position: absolute;
+  inset: 8px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: #e8e8f0;
+  background: rgba(30, 30, 46, 0.96);
+  border: 1px solid #6c5ce7;
+  border-radius: 8px;
+  pointer-events: none;
+  transition: opacity 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.csv-drop-overlay .anticon {
+  color: #a29bfe;
+  font-size: 22px;
+}
+
+.csv-drop-overlay span {
+  color: #b8b8d0;
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .csv-drop-overlay { transition: none; }
 }
 
 .task-console-header {
@@ -565,6 +622,9 @@ body {
   font-weight: 600;
   color: #e8e8f0;
   flex-shrink: 0;
+  position: relative;
+  z-index: 20;
+  will-change: transform;
 }
 
 .task-console-stats {

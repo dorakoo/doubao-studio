@@ -24,6 +24,7 @@ import { evaluateDependencies } from '../utils/dependencyEval';
 import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
+import { findInteractiveAccountId } from '../utils/interactiveAccount';
 
 // ==================== 类型 ====================
 
@@ -54,7 +55,7 @@ interface TaskState {
   // ---- Actions ----
   loadTasks: (recoverInterrupted?: boolean) => Promise<void>;
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
-  importCsv: () => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
+  importCsv: (filePath?: string) => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
@@ -228,8 +229,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     set({ tasks });
   },
 
-  importCsv: async () => {
-    const result = await window.electronAPI.tasks.importCsv(useProjectStore.getState().activeProjectId);
+  importCsv: async (filePath?: string) => {
+    const result = await window.electronAPI.tasks.importCsv(useProjectStore.getState().activeProjectId, filePath);
     if (!result.success || !result.tasks) {
       if (result.error) set({ error: result.error });
       return null;
@@ -369,6 +370,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: '任务调度已暂停' });
       return false;
     }
+    const interactiveAccountId = findInteractiveAccountId(get().accountAutomationState);
+    if (interactiveAccountId) {
+      set({ error: '另一账号正在配置或提交，请等待其进入生成阶段' });
+      return false;
+    }
     const task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
@@ -465,6 +471,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => {
+    const previousState = get().accountAutomationState[accountId];
     const taskId = get().executingTasks[accountId];
     const now = new Date().toISOString();
     const status: TaskStatus | undefined = stage === 'waiting_verification'
@@ -485,7 +492,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               message: message ?? task.runtime.message,
               stageStartedAt: stage && stage !== task.runtime.stage ? now : task.runtime.stageStartedAt,
               lastHeartbeatAt: now,
-              submittedAt: stage === 'submitting' ? now : task.runtime.submittedAt,
+              submittedAt: stage === 'submitting' ? (task.runtime.submittedAt || now) : task.runtime.submittedAt,
             } : task.runtime,
             updatedAt: now,
           }
@@ -514,6 +521,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
           runtime: task.runtime,
         });
       }
+    }
+    if (state === 'generating' && previousState !== 'generating') {
+      setTimeout(() => get().processQueue(), 0);
     }
   },
 
@@ -717,6 +727,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     try {
       const state = get();
       if (state.schedulerPaused) return;
+      if (findInteractiveAccountId(state.accountAutomationState)) return;
     // 找出所有已指派但还在 queued 状态的任务
       const queuedTasks = state.tasks.filter(
         (t) => t.status === 'queued' && t.assignedAccountId

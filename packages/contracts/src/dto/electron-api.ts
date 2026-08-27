@@ -127,7 +127,8 @@ export interface ElectronAPI {
     acquireLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     renewLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     releaseLock: (taskId: string, ownerId: string) => Promise<TaskOperationResult>;
-    importCsv: (projectId?: string) => Promise<CsvImportResult>;
+    importCsv: (projectId?: string, filePath?: string) => Promise<CsvImportResult>;
+    getPathForDroppedFile: (file: unknown) => string;
     update: (taskId: string, updates: TaskUpdateInput) => Promise<TaskResult>;
     delete: (taskId: string) => Promise<TaskOperationResult>;
     retry: (taskId: string) => Promise<TaskResult>;

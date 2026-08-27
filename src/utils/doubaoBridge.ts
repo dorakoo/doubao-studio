@@ -15,6 +15,11 @@
  * 3. 每个 executeJavaScript 调用都有 10s 超时保护
  */
 
+import { classifyMaterialAuthorizationSnapshot } from './materialAuthorization';
+import type { MaterialAuthorizationState } from './materialAuthorization';
+import { nextStableUploadCount } from './uploadReadiness';
+import type { UploadReadinessSnapshot } from './uploadReadiness';
+
 // ==================== 类型 ====================
 
 /** webview 最小接口（Electron 渲染进程 webview 元素） */
@@ -996,6 +1001,37 @@ export async function findSendButtonTarget(webview: WebviewHandle): Promise<Send
   } catch {
     return { ok: false };
   }
+}
+
+/** 提交前要求发送控件可用且页面上传状态连续三次稳定，禁止固定 sleep 猜测。 */
+export async function waitForSubmissionControlsStable(
+  webview: WebviewHandle,
+  timeoutMs: number = 20000,
+): Promise<boolean> {
+  const startedAt = Date.now();
+  let stable = 0;
+  while (Date.now() - startedAt < timeoutMs) {
+    const target = await findSendButtonTarget(webview);
+    let uploadPending = true;
+    try {
+      uploadPending = await safeExecuteJS<boolean>(webview, `
+        (function() {
+          var visible = function(el) {
+            if (!el || el.offsetParent === null) return false;
+            var style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          return Array.from(document.querySelectorAll('[aria-busy="true"],[class*="uploading"],[class*="progress"],[data-status="uploading"]')).some(visible);
+        })()
+      `, 5000, 'submissionUploadPending');
+    } catch {
+      uploadPending = true;
+    }
+    stable = target.ok && !uploadPending ? stable + 1 : 0;
+    if (stable >= 3) return true;
+    await sleep(400);
+  }
+  return false;
 }
 
 async function checkSendButtonReady(webview: WebviewHandle): Promise<boolean> {
@@ -3625,61 +3661,142 @@ export function getVideoCompositeLabel(aspectRatio: string, duration: string): s
   return `${aspectRatio} · ${duration}`;
 }
 
-export type MaterialAuthorizationResult = 'absent' | 'confirmed' | 'blocked';
+export type KnownPopupDismissResult = 'none' | 'dismissed' | 'failed';
 
 /**
- * 豆包上传参考素材后可能在 composer 内弹出一次“安全确认”。该确认只解除
- * 发送控件遮挡，不会提交生成。仅当面板同时包含完整素材授权语义、拒绝和确认
- * 两个动作时，才点击精确的“确认”；结构不完整时 fail-closed。
+ * 白名单清理豆包“下载电脑版”推广弹窗。
+ * 只有同一容器同时包含固定标题和副标题时才允许点击，绝不关闭素材授权、验证或额度弹窗。
  */
-export async function confirmMaterialAuthorizationIfPresent(
+export async function dismissKnownDesktopDownloadPromotion(
   webview: WebviewHandle,
-): Promise<MaterialAuthorizationResult> {
-  try {
-    const result = await safeExecuteJS<{ present: boolean; confirmed: boolean }>(webview, `
-      (function () {
-        var buttons = Array.from(document.querySelectorAll('button,[role="button"]')).filter(function (el) {
-          var r = el.getBoundingClientRect();
-          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
-          return r.width > 20 && r.height > 20 && el.offsetParent !== null && (text === '确认' || text === '拒绝');
+): Promise<KnownPopupDismissResult> {
+  const inspect = async (): Promise<{ present: boolean; position?: string; method?: string }> => safeExecuteJS(
+    webview,
+    `
+      (function() {
+        var normalize = function(value) { return String(value || '').replace(/\\s+/g, ' ').trim(); };
+        var visible = function(el) {
+          if (!el || el.offsetParent === null) return false;
+          var style = window.getComputedStyle(el);
+          var rect = el.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        var title = Array.from(document.querySelectorAll('h1,h2,h3,div,span')).find(function(el) {
+          return visible(el) && normalize(el.innerText || el.textContent) === '下载电脑版';
         });
-        var confirm = buttons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '确认'; });
-        var reject = buttons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '拒绝'; });
-        if (!confirm && !reject) return { present: false, confirmed: false };
-        if (!confirm || !reject) return { present: true, confirmed: false };
-        var root = confirm.parentElement;
+        if (!title) return { present: false };
+        var root = title;
+        for (var depth = 0; depth < 10 && root; depth += 1) {
+          var text = normalize(root.innerText || root.textContent);
+          if (text.indexOf('下载电脑版') >= 0 && text.indexOf('使用完整功能') >= 0) break;
+          root = root.parentElement;
+        }
+        if (!root) return { present: false };
+        var rootText = normalize(root.innerText || root.textContent);
+        if (rootText.indexOf('下载电脑版') < 0 || rootText.indexOf('使用完整功能') < 0) return { present: false };
+        var controls = Array.from(root.querySelectorAll('button,[role="button"],a,[aria-label],[title],div,span')).filter(visible);
+        var target = controls.find(function(el) { return normalize(el.innerText || el.textContent) === '下次提醒我'; });
+        var method = 'snooze';
+        if (!target) {
+          target = controls.find(function(el) {
+            var label = normalize([el.getAttribute('aria-label'), el.getAttribute('title')].filter(Boolean).join(' '));
+            return label === '关闭' || label === '关闭弹窗';
+          });
+          method = 'close';
+        }
+        if (!target) {
+          var rootRect = root.getBoundingClientRect();
+          target = controls.find(function(el) {
+            var rect = el.getBoundingClientRect();
+            var square = rect.width >= 24 && rect.width <= 56 && rect.height >= 24 && rect.height <= 56;
+            return square && rect.right >= rootRect.right - 70 && rect.top <= rootRect.top + 70;
+          });
+          method = 'close-corner';
+        }
+        if (!target) return { present: true };
+        var rect = target.getBoundingClientRect();
+        return { present: true, method: method,
+          position: Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2) };
+      })()
+    `,
+    5000,
+    'inspectDesktopDownloadPromotion',
+  );
+
+  let target: { present: boolean; position?: string; method?: string };
+  try {
+    target = await inspect();
+  } catch {
+    return 'failed';
+  }
+  if (!target.present) return 'none';
+  if (!target.position || typeof webview.sendInputEvent !== 'function') return 'failed';
+  const [x, y] = target.position.split(',').map(Number);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return 'failed';
+  try {
+    webview.sendInputEvent({ type: 'mouseMove', x, y });
+    webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+    await sleep(35);
+    webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await sleep(250);
+      if (!(await inspect()).present) {
+        console.log(`[doubaoBridge] 已关闭下载电脑版推广弹窗: ${target.method}`);
+        return 'dismissed';
+      }
+    }
+    return 'failed';
+  } catch (error: unknown) {
+    console.warn('[doubaoBridge] 推广弹窗关闭失败:', getErrorMessage(error));
+    return 'failed';
+  }
+}
+
+/**
+ * 只读检查素材授权弹窗。平台当前在用户确认后可能直接提交生成，因此这里永久
+ * 禁止代点“确认”；调用方必须等待用户操作并继续回读同一个 run。
+ */
+export async function inspectMaterialAuthorization(
+  webview: WebviewHandle,
+): Promise<MaterialAuthorizationState> {
+  try {
+    const snapshot = await safeExecuteJS<{ title: string; body: string; actions: string[] }>(webview, `
+      (function () {
+        var visible = function (el) {
+          var r = el.getBoundingClientRect();
+          return r.width > 20 && r.height > 20 && el.offsetParent !== null;
+        };
+        var buttons = Array.from(document.querySelectorAll('button,[role="button"]')).filter(visible);
+        var actionButtons = buttons.filter(function (el) {
+          var text = (el.innerText || '').replace(/\\s+/g, ' ').trim();
+          return text === '确认' || text === '拒绝';
+        });
+        var root = actionButtons[0] || null;
         var matched = null;
         for (var depth = 0; root && depth < 10; depth++, root = root.parentElement) {
           var text = (root.innerText || '').replace(/\\s+/g, ' ').trim();
-          if (text.indexOf('安全确认') !== -1 && text.indexOf('上传、使用的素材') !== -1 &&
-              text.indexOf('充分授权') !== -1 && text.indexOf('拒绝') !== -1 && text.indexOf('确认') !== -1) {
+          if (text.indexOf('安全确认') !== -1 && text.length < 1200) {
             matched = root;
             break;
           }
         }
-        if (!matched || !matched.contains(reject)) return { present: true, confirmed: false };
-        var r = confirm.getBoundingClientRect();
-        var x = r.left + r.width / 2; var y = r.top + r.height / 2;
-        var opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
-        try { confirm.dispatchEvent(new PointerEvent('pointerdown', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-        confirm.dispatchEvent(new MouseEvent('mousedown', opts));
-        try { confirm.dispatchEvent(new PointerEvent('pointerup', Object.assign({ pointerId: 1, pointerType: 'mouse', isPrimary: true }, opts))); } catch (_) {}
-        confirm.dispatchEvent(new MouseEvent('mouseup', opts));
-        confirm.dispatchEvent(new MouseEvent('click', opts));
-        return { present: true, confirmed: true };
+        var pageText = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+        if (!matched && pageText.indexOf('安全确认') === -1 &&
+            pageText.indexOf('上传、使用的素材') === -1) {
+          return { title: '', body: '', actions: [] };
+        }
+        var body = matched ? (matched.innerText || '') : pageText;
+        var actions = actionButtons
+          .filter(function (el) { return !matched || matched.contains(el); })
+          .map(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim(); });
+        return {
+          title: body.indexOf('安全确认') !== -1 ? '安全确认' : '',
+          body: body,
+          actions: actions,
+        };
       })()
-    `, 5000, 'confirm_material_authorization');
-    if (!result.present) return 'absent';
-    if (!result.confirmed) return 'blocked';
-    await sleep(350);
-    const stillVisible = await safeExecuteJS<boolean>(webview, `
-      (function () {
-        return Array.from(document.querySelectorAll('button,[role="button"]')).some(function (el) {
-          return el.offsetParent !== null && (el.innerText || '').replace(/\\s+/g, ' ').trim() === '拒绝';
-        }) && (document.body.innerText || '').indexOf('安全确认') !== -1;
-      })()
-    `, 5000, 'verify_material_authorization');
-    return stillVisible ? 'blocked' : 'confirmed';
+    `, 5000, 'inspect_material_authorization');
+    return classifyMaterialAuthorizationSnapshot(snapshot);
   } catch {
     return 'blocked';
   }
@@ -4052,6 +4169,43 @@ export async function uploadReferenceImages(
 
   console.log(`[doubaoBridge] 上传参考图片: ${fileDataList.length} 张`);
 
+  const fileNames = fileDataList.map((file) => file.name);
+  const snapshotCode = (names: string): string => `
+    (function() {
+      var visible = function(el) {
+        if (!el || el.offsetParent === null) return false;
+        var rect = el.getBoundingClientRect();
+        var style = window.getComputedStyle(el);
+        return rect.width > 12 && rect.height > 12 && style.display !== 'none' && style.visibility !== 'hidden';
+      };
+      var composer = Array.from(document.querySelectorAll('textarea,[contenteditable="true"]')).find(visible);
+      var root = composer;
+      for (var depth = 0; depth < 8 && root && root.parentElement; depth++) root = root.parentElement;
+      root = root || document.body;
+      var inputs = Array.from(root.querySelectorAll('input[type="file"]'));
+      var inputFileCount = inputs.reduce(function(max, input) { return Math.max(max, input.files ? input.files.length : 0); }, 0);
+      var attachments = Array.from(root.querySelectorAll('img,[class*="thumb"],[class*="preview"],[class*="attachment"],[class*="upload-item"]')).filter(visible);
+      var text = (root.innerText || '') + ' ' + attachments.map(function(node) {
+        return [node.getAttribute && node.getAttribute('alt'), node.getAttribute && node.getAttribute('title')].filter(Boolean).join(' ');
+      }).join(' ');
+      var fileNames = ${names};
+      var matchingFileNameCount = fileNames.filter(function(name) { return text.indexOf(name) >= 0; }).length;
+      var pending = Array.from(root.querySelectorAll('[aria-busy="true"],[class*="uploading"],[class*="progress"],[class*="loading"],[data-status="uploading"]')).some(visible);
+      return { inputFileCount: inputFileCount, visibleAttachmentCount: attachments.length,
+        matchingFileNameCount: matchingFileNameCount, pending: pending };
+    })()
+  `;
+
+  let baselineAttachmentCount = 0;
+  try {
+    const baseline = await safeExecuteJS<UploadReadinessSnapshot>(
+      webview, snapshotCode(JSON.stringify(fileNames)), 5000, 'imageUploadBaseline',
+    );
+    baselineAttachmentCount = baseline.visibleAttachmentCount;
+  } catch {
+    return false;
+  }
+
   // 构造 JS 代码，通过 DataTransfer 注入文件
   const filesJson = JSON.stringify(fileDataList);
   const injectCode = `
@@ -4102,67 +4256,24 @@ export async function uploadReferenceImages(
     return false;
   }
 
-  // 动态等待上传完成：轮询已显示的图片缩略图数量
-  const expectedCount = fileDataList.length;
-  const waitCode = `
-    (function() {
-      return new Promise(function(resolve) {
-        var checked = 0;
-        var maxCheck = 60; // 最多等30秒
-        function check() {
-          checked++;
-          // 统计输入区域内已显示的图片缩略图（已上传完成的）
-          var imgs = document.querySelectorAll('img');
-          var uploadedCount = 0;
-          for (var i = 0; i < imgs.length; i++) {
-            var img = imgs[i];
-            var rect = img.getBoundingClientRect();
-            // 只统计输入框附近的缩略图（排除页面其他图片）
-            if (rect.top > window.innerHeight * 0.4 && rect.top < window.innerHeight * 0.95 && rect.width > 30 && rect.height > 30) {
-              var src = img.src || '';
-              // 已上传的图片通常是 blob: 或 data: 或服务器URL，而非loading占位
-              if (src.indexOf('blob:') === 0 || src.indexOf('data:image') === 0 || (src.indexOf('http') === 0 && src.indexOf('loading') < 0)) {
-                uploadedCount++;
-              }
-            }
-          }
-          // 另一种方式：找上传后的图片容器/缩略图
-          var containers = document.querySelectorAll('[class*="image-item"], [class*="img-item"], [class*="thumb"], [class*="preview"], [class*="upload"] img');
-          var containerCount = 0;
-          for (var j = 0; j < containers.length; j++) {
-            var c = containers[j];
-            if (c.tagName === 'IMG') {
-              var cr = c.getBoundingClientRect();
-              if (cr.top > window.innerHeight * 0.4 && cr.width > 20 && cr.height > 20) containerCount++;
-            } else {
-              var ci = c.querySelector ? c.querySelector('img') : null;
-              if (ci) {
-                var cr2 = ci.getBoundingClientRect();
-                if (cr2.top > window.innerHeight * 0.4 && cr2.width > 20 && cr2.height > 20) containerCount++;
-              }
-            }
-          }
-          var finalCount = Math.max(uploadedCount, containerCount);
-          if (finalCount >= ${expectedCount} || checked >= maxCheck) {
-            resolve({ uploaded: finalCount, expected: ${expectedCount}, checked: checked });
-          } else {
-            setTimeout(check, 500);
-          }
-        }
-        setTimeout(check, 500);
-      });
-    })()
-  `;
-
-  try {
-    const waitResult = await webview.executeJavaScript(waitCode) as { uploaded: number; expected: number; checked: number };
-    console.log(`[doubaoBridge] 图片上传完成检测: 已上传=${waitResult.uploaded}/${waitResult.expected}, 检测次数=${waitResult.checked}`);
-    return true;
-  } catch (e) {
-    console.warn('[doubaoBridge] 等待图片上传超时或失败:', e);
-    // 超时也返回true，不阻塞主流程
-    return true;
+  let stableCount = 0;
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    await sleep(500);
+    try {
+      const snapshot = await safeExecuteJS<UploadReadinessSnapshot>(
+        webview, snapshotCode(JSON.stringify(fileNames)), 5000, 'imageUploadReadiness',
+      );
+      stableCount = nextStableUploadCount(stableCount, snapshot, fileDataList.length, baselineAttachmentCount);
+      if (stableCount >= 3) {
+        console.log(`[doubaoBridge] 图片上传已连续稳定: ${fileDataList.length} 张`);
+        return true;
+      }
+    } catch {
+      stableCount = 0;
+    }
   }
+  console.warn('[doubaoBridge] 图片未在 30 秒内达到数量完整且稳定状态');
+  return false;
 }
 
 /**

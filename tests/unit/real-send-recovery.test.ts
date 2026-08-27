@@ -315,15 +315,24 @@ describe('P0-2/P0-3 发送与完成纪律（源码断言）', () => {
     expect(panelSource).toContain('发送动作结果不确定，请人工核对豆包会话；系统未自动重发');
   });
 
-  it('素材安全确认必须在 submittedAt 之前完成，避免遮挡发送按钮后产生假提交记录', () => {
+  it('素材安全确认只读识别；人工确认前持久化 submittedAt，确认后禁止二次提交', () => {
     const panelSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'components', 'BrowserPanel.tsx'), 'utf8');
-    expect(panelSource).toContain('confirmMaterialAuthorizationIfPresent(webview)');
-    expect(panelSource.indexOf('confirmMaterialAuthorizationIfPresent(webview)')).toBeLessThan(
-      panelSource.indexOf('submittedAt: submissionMarkedAt'),
+    const bridgeSource = readFileSync(resolve(__dirname, '..', '..', 'src', 'utils', 'doubaoBridge.ts'), 'utf8');
+    const inspectorBody = bridgeSource.slice(
+      bridgeSource.indexOf('export async function inspectMaterialAuthorization'),
+      bridgeSource.indexOf('\nexport async function', bridgeSource.indexOf('export async function inspectMaterialAuthorization') + 1),
     );
+    expect(panelSource).toContain('inspectMaterialAuthorization(webview)');
+    expect(panelSource).not.toContain('confirmMaterialAuthorizationIfPresent');
+    expect(inspectorBody).not.toContain('.click()');
+    expect(inspectorBody).not.toContain('dispatchEvent');
     expect(panelSource).toContain("'material_authorization_required'");
+    expect(panelSource.indexOf("markSubmissionIntent('waiting_verification'")).toBeLessThan(
+      panelSource.indexOf('while (true)'),
+    );
     expect(panelSource).toContain('authorizationTriggeredSubmission');
     expect(panelSource).toContain('if (!authorizationTriggeredSubmission)');
+    expect((panelSource.match(/submitPromptWithNativeClick\(webview\)/g) || []).length).toBe(1);
   });
 
   it('原生点击失败不得回退到兼容提交', () => {

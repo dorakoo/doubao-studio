@@ -2,6 +2,12 @@ import type { SeedanceQuota } from '@doubao-studio/contracts';
 
 export const VIDEO_DAILY_UNITS = 6;
 
+/** 本机时区自然日键；跨过本地 00:00 即进入新一日。 */
+export function localDateKey(now: Date = new Date()): string {
+  const offset = now.getTimezoneOffset() * 60000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
 export function applyVideoQuotaAction(
   quota: SeedanceQuota,
   action: 'consume' | 'exhausted',

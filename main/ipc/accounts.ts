@@ -9,7 +9,7 @@ import { readJSON, writeJSON } from '../utils/store';
 import { normalizeAccounts } from '../utils/persistenceNormalization';
 import { v4 as uuidv4 } from 'uuid';
 import { replaceIpcHandlers } from './lifecycle';
-import { applyVideoQuotaAction, VIDEO_DAILY_UNITS } from '../utils/videoQuota';
+import { applyVideoQuotaAction, localDateKey, VIDEO_DAILY_UNITS } from '../utils/videoQuota';
 import type {
   Account,
   AccountAddParams,
@@ -42,12 +42,6 @@ function accountPlatform(account: Pick<Account, 'platform'>): AccountPlatform {
 
 function sessionPartition(platform: AccountPlatform, partition: string): string {
   return `persist:${platform}_${partition}`;
-}
-
-function localDateKey(): string {
-  const now = new Date();
-  const offset = now.getTimezoneOffset() * 60000;
-  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
 }
 
 // GenerationMode 已迁移至 @doubao-studio/contracts

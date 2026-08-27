@@ -86,6 +86,8 @@ export interface TaskReleaseLockParams {
 
 export interface TaskImportCsvParams {
   projectId?: string;
+  /** 拖放导入时由 preload 安全解析出的本地 CSV 路径；省略时打开文件选择器。 */
+  filePath?: string;
 }
 
 /** 编辑并重新运行任务时可更新的完整输入 */
