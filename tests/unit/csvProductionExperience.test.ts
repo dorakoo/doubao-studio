@@ -28,8 +28,10 @@ describe('CSV 拖放与显式 CLI 导入', () => {
 
   it('import-csv 复用 TaskService 写入任务，并保持完整提示词', () => {
     const tasksFile = join(dir, 'tasks.json');
+    const projectsFile = join(dir, 'projects.json');
     const csvFile = join(dir, 'batch.csv');
     writeFileSync(tasksFile, '[]', 'utf8');
+    writeFileSync(projectsFile, JSON.stringify([{ id: 'default-project', name: '默认项目', description: '', color: '#fff', archived: false, createdAt: '', updatedAt: '' }]), 'utf8');
     writeFileSync(csvFile, 'prompt,mode\n"Line 1, spoken: ""Hello""",video', 'utf8');
     const output: string[] = [];
     const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile], (line) => output.push(line));

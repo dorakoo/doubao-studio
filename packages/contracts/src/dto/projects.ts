@@ -13,6 +13,7 @@ import type { Project } from '../domain';
 export interface ProjectOperationResult {
   success: boolean;
   error?: string;
+  taskCount?: number;
 }
 
 /** 项目操作结果（包含项目数据） */

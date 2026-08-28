@@ -308,10 +308,10 @@
 
 ### Agent 使用 CSV 导入的当前权威规则
 
-- 查询 CLI 与 MCP 仍为只读；`import-csv` 是唯一允许的 CLI 写入命令。
+- 查询 CLI 与 MCP 仍为只读；CLI 写入面仅允许 `import-csv` 和冻结范围、默认 dry-run 的受控项目迁移。
 - Agent 不得自动点击桌面文件选择器，也不得直接编辑 `tasks.json`。有桌面人工操作能力时，可使用 CSV 按钮或把单个 CSV 拖到任务调度区。
-- 无桌面操作时，先确认豆包工作室已退出，再执行：`pnpm run cli:import -- --csv <绝对路径.csv> --tasks-file <DoubaoStudioData\\tasks.json> [--accounts-file <DoubaoStudioData\\accounts.json>] [--project-id <id>]`。
-- `--tasks-file` 必须显式给出，禁止猜测旧工作树、仓库 `data/` 或历史版本的数据路径；账号文件默认取任务文件同目录。
+- 无桌面操作时，先确认豆包工作室已退出，再执行：`pnpm run cli:import -- --csv <绝对路径.csv> --tasks-file <DoubaoStudioData\\tasks.json> --projects-file <DoubaoStudioData\\projects.json> (--project-id <真实ID> | --project-name <新名称>) [--accounts-file <DoubaoStudioData\\accounts.json>]`。
+- `--tasks-file` 必须显式给出，禁止猜测旧工作树、仓库 `data/` 或历史版本的数据路径；账号与项目文件默认取任务文件同目录。项目名称不能充当项目 ID，同名创建必须产生不同 UUID。
 - 解析、账号匹配、依赖映射和写入必须经过 `TaskService.importCsv()`；任务文件在读取后发生变化时必须拒绝覆盖。
 - CSV 导入只创建任务，不代表已提交平台；实际执行仍经过账号可用性、额度、前台交互租约和不可重复提交门禁。
 - 免费视频额度按运行机器本地时区每日 00:00 重置预测值；平台明确返回耗尽时当日剩余立即归零并安全重排，提交状态不确定时禁止自动重发。
