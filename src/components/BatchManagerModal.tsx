@@ -37,7 +37,7 @@ export const BatchManagerModal: React.FC<BatchManagerModalProps> = ({ open, onCl
       key: batchId, batchId, tasks: batchTasks, total: batchTasks.length,
       done: batchTasks.filter((task) => task.status === 'done').length,
       failed: batchTasks.filter((task) => task.status === 'fail').length,
-      running: batchTasks.filter((task) => ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status)).length,
+      running: batchTasks.filter((task) => ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)).length,
       queued: batchTasks.filter((task) => task.status === 'queued').length,
     })).sort((a, b) => b.batchId.localeCompare(a.batchId));
   }, [activeProjectId, tasks]);

@@ -410,10 +410,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     // 检查账号是否忙碌
     const reservedTask = get().tasks.find((item) =>
       item.id !== taskId && item.assignedAccountId === accountId &&
-      ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation'].includes(item.status),
+      ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(item.status),
     );
     if (reservedTask) {
-      set({ error: '该账号仍绑定等待生成确认的原会话；请先在原任务中完成只读回读或人工取消' });
+      set({ error: '该账号仍绑定生成确认或人工提交观察会话；请先完成只读回读或人工取消' });
       return false;
     }
     if (get().accountBusy[accountId]) {

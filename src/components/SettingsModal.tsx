@@ -3,7 +3,7 @@
  * 设置 Modal：下载目录配置等
  */
 import React, { useEffect, useState } from 'react';
-import { Modal, Input, Button, message } from 'antd';
+import { Modal, Input, Button, InputNumber, Switch, message } from 'antd';
 import { FolderOpenOutlined } from '@ant-design/icons';
 
 interface SettingsModalProps {
@@ -13,6 +13,8 @@ interface SettingsModalProps {
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) => {
   const [downloadDir, setDownloadDir] = useState('');
+  const [autoConfirmMaterialAuthorization, setAutoConfirmMaterialAuthorization] = useState(false);
+  const [initializationConcurrency, setInitializationConcurrency] = useState(1);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -25,6 +27,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     try {
       const settings = await window.electronAPI.settings.get();
       setDownloadDir(settings.downloadDir || '');
+      setAutoConfirmMaterialAuthorization(settings.autoConfirmMaterialAuthorization === true);
+      setInitializationConcurrency(Math.max(1, Math.min(3, Number(settings.initializationConcurrency) || 1)));
     } catch (e: any) {
       console.warn('[SettingsModal] 加载设置失败:', e.message);
     }
@@ -41,7 +45,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
     setLoading(true);
     try {
       const currentSettings = await window.electronAPI.settings.get();
-      const result = await window.electronAPI.settings.save({ ...currentSettings, downloadDir });
+      const result = await window.electronAPI.settings.save({
+        ...currentSettings,
+        downloadDir,
+        autoConfirmMaterialAuthorization,
+        initializationConcurrency,
+      });
       if (result.success) {
         message.success('设置已保存');
         onClose();
@@ -88,6 +97,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose }) =
             默认：~/Downloads/豆包工作室产物
           </div>
         )}
+      </div>
+      <div style={{ marginBottom: 16, padding: 12, border: '1px solid #34344a', borderRadius: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+          <div>
+            <div style={{ fontWeight: 500 }}>已授权素材自动确认</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>
+              仅精确匹配“安全确认 + 素材充分授权 + 拒绝/确认”的白名单弹窗；视频生成确认、登录、验证码、支付和未知弹窗永不点击。
+            </div>
+          </div>
+          <Switch checked={autoConfirmMaterialAuthorization} onChange={setAutoConfirmMaterialAuthorization} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16 }}>
+        <div>
+          <div style={{ fontWeight: 500 }}>初始化并发数</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>只限制建会话、配置和上传；进入生成后立即释放。</div>
+        </div>
+        <InputNumber min={1} max={3} value={initializationConcurrency} onChange={(value) => setInitializationConcurrency(value || 1)} />
       </div>
     </Modal>
   );

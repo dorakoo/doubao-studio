@@ -23,6 +23,7 @@ import {
   verifyPromptReadyForSubmission,
   submitPromptWithNativeClick,
   inspectMaterialAuthorization,
+  confirmMaterialAuthorizationIfAllowed,
   inspectGenerationConfirmation,
   checkGeneratingDetailed,
   getResultUrl,
@@ -65,6 +66,8 @@ import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorizat
 import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
 import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
 import { VideoControlReadinessError } from '../utils/videoControlReadiness';
+import { initializationGate } from '../utils/initializationGate';
+import type { InitializationLease } from '../utils/initializationGate';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -332,6 +335,67 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
   // 已可能提交的任务只能沿原会话只读核对产物，绝不重新注入或点击发送。
   useEffect(() => {
+    const handleManualSubmission = async (event: Event): Promise<void> => {
+      const detail = (event as CustomEvent<{ taskId: string; conversationUrl?: string; useCurrentPage?: boolean }>).detail;
+      const task = useTaskStore.getState().tasks.find((item) => item.id === detail?.taskId);
+      if (!task || task.status === 'done' || !task.assignedAccountId) {
+        message.error('任务不存在、已完成或尚未绑定账号，不能进入人工提交观察');
+        return;
+      }
+      const currentWebview = registryRef.current.get(task.assignedAccountId);
+      const suppliedUrl = detail.conversationUrl?.trim();
+      const userConfirmedCurrentUrl = detail.useCurrentPage ? currentWebview?.getURL() : undefined;
+      const conversationUrl = suppliedUrl || userConfirmedCurrentUrl || task.runtime?.conversationUrl;
+      if (!conversationUrl || !/^https:\/\/www\.doubao\.com\/chat\/[^/?#]+(?:[?#].*)?$/i.test(conversationUrl)) {
+        message.error('缺少可验证的豆包具体会话 URL；任务保持原状态，未猜测当前页面');
+        return;
+      }
+      const account = useAccountStore.getState().accounts.find((item) => item.id === task.assignedAccountId);
+      if (!account || (account.platform || 'doubao') !== 'doubao') {
+        message.error('当前只支持已验证的豆包会话；Dola 尚未完成真实验收');
+        return;
+      }
+      const now = new Date();
+      const startedAt = now.toISOString();
+      const expiresAt = new Date(now.getTime() + 15 * 60_000).toISOString();
+      const manualRunId = `manual-${task.id}-${now.getTime()}`;
+      const observationMessage = '用户声明已手动提交；正在只读观察原会话，系统不会注入、发送或新建对话';
+      await useTaskStore.getState().updateTaskRuntime(task.id, {
+        status: 'manual_submission_observing',
+        result: observationMessage,
+        errorInfo: { code: 'manual_review_required', message: observationMessage, recoverable: true, detectedAt: startedAt },
+        runtime: {
+          runId: manualRunId,
+          attempt: (task.runtime?.attempt || 0) + 1,
+          stage: 'manual_submission_observing',
+          message: observationMessage,
+          startedAt,
+          stageStartedAt: startedAt,
+          lastHeartbeatAt: startedAt,
+          submittedAt: startedAt,
+          conversationUrl,
+          manualObservation: {
+            startedAt,
+            expiresAt,
+            source: suppliedUrl || userConfirmedCurrentUrl ? 'user_confirmed_url' : 'stored_conversation',
+            outcome: 'observing',
+          },
+          input: {
+            prompt: task.prompt,
+            mode: task.mode,
+            videoConfig: task.videoConfig,
+            attachments: [...(task.attachments || [])],
+            audioAttachment: task.audioAttachment,
+          },
+        },
+      });
+      if (useTaskStore.getState().tasks.find((item) => item.id === task.id)?.status !== 'manual_submission_observing') {
+        message.error('人工提交观察状态写入失败；任务保持原状态，未读取或绑定产物');
+        return;
+      }
+      window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } }));
+    };
+
     const handleSubmissionReconcile = async (event: Event): Promise<void> => {
       const taskId = (event as CustomEvent<{ taskId: string }>).detail?.taskId;
       if (!taskId || submissionReconcileRef.current.has(taskId)) return;
@@ -348,6 +412,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         return;
       }
 
+      const isManualObservation = task.status === 'manual_submission_observing';
+      const observationController = isManualObservation ? new AbortController() : undefined;
+      if (observationController) abortControllersRef.current.set(taskId, observationController);
       submissionReconcileRef.current.add(taskId);
       useAccountStore.getState().selectAccount(accountId);
       useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
@@ -423,19 +490,27 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         // 不能把 without_watermark=false 误判为“视频没有生成”。
         const resolution = await resolveVideoArtifact(webview, {
           conversationUrl,
-          timeoutMs: task.status === 'waiting_generation_confirmation' ? 15 * 60_000 : 45_000,
+          timeoutMs: task.status === 'waiting_generation_confirmation' || isManualObservation ? 15 * 60_000 : 45_000,
           isManual: true,
+          signal: observationController?.signal,
         });
         const outputs = resolution.status === 'resolved' && resolution.url
           ? normalizeVideoUrls([resolution.url])
           : [];
         if (outputs.length === 0) {
-          const pendingMessage = `平台已确认提交，暂未读取到产物；请稍后再次核对（${formatResolutionMessage(resolution)}）`;
+          const pendingMessage = isManualObservation
+            ? `人工提交观察已到达本轮上限，仍未读取到唯一匹配产物；请人工复核（${formatResolutionMessage(resolution)}）`
+            : `平台已确认提交，暂未读取到产物；请稍后再次核对（${formatResolutionMessage(resolution)}）`;
           await useTaskStore.getState().updateTaskRuntime(taskId, {
             status: 'paused',
             result: pendingMessage,
-            errorInfo: { code: 'submission_uncertain', message: pendingMessage, recoverable: true, detectedAt: new Date().toISOString() },
-            runtime: { stage: 'paused', message: pendingMessage, lastHeartbeatAt: new Date().toISOString() },
+            errorInfo: { code: isManualObservation ? 'manual_review_required' : 'submission_uncertain', message: pendingMessage, recoverable: true, detectedAt: new Date().toISOString() },
+            runtime: {
+              stage: 'paused', message: pendingMessage, lastHeartbeatAt: new Date().toISOString(),
+              manualObservation: isManualObservation && task.runtime?.manualObservation ? {
+                ...task.runtime.manualObservation, lastCheckedAt: new Date().toISOString(), outcome: 'manual_review',
+              } : task.runtime?.manualObservation,
+            },
           });
           message.warning(pendingMessage);
           return;
@@ -449,21 +524,34 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         message.success('平台产物核对成功，任务台账已恢复完成；未重新发送');
       } catch (error: unknown) {
         const reason = error instanceof Error ? error.message : String(error);
+        const isManualObservation = task?.status === 'manual_submission_observing';
         const pauseMessage = `核对未完成：${reason}；任务保持暂停，未重新发送`;
         await useTaskStore.getState().updateTaskRuntime(taskId, {
           status: 'paused',
           result: pauseMessage,
-          errorInfo: { code: 'submission_uncertain', message: pauseMessage, recoverable: true, detectedAt: new Date().toISOString() },
-          runtime: { stage: 'paused', message: pauseMessage, lastHeartbeatAt: new Date().toISOString() },
+          errorInfo: { code: isManualObservation ? 'manual_review_required' : 'submission_uncertain', message: pauseMessage, recoverable: true, detectedAt: new Date().toISOString() },
+          runtime: {
+            stage: 'paused', message: pauseMessage, lastHeartbeatAt: new Date().toISOString(),
+            manualObservation: isManualObservation && task.runtime?.manualObservation ? {
+              ...task.runtime.manualObservation, lastCheckedAt: new Date().toISOString(), outcome: 'manual_review',
+            } : task.runtime?.manualObservation,
+          },
         });
         message.error(pauseMessage);
       } finally {
+        if (abortControllersRef.current.get(taskId) === observationController) {
+          abortControllersRef.current.delete(taskId);
+        }
         submissionReconcileRef.current.delete(taskId);
         useTaskStore.getState().setAccountAutomationState(accountId, 'idle', '');
       }
     };
+    window.addEventListener('mark-manual-submission', handleManualSubmission);
     window.addEventListener('reconcile-task-submission', handleSubmissionReconcile);
-    return () => window.removeEventListener('reconcile-task-submission', handleSubmissionReconcile);
+    return () => {
+      window.removeEventListener('mark-manual-submission', handleManualSubmission);
+      window.removeEventListener('reconcile-task-submission', handleSubmissionReconcile);
+    };
   }, []);
 
   /** 幂等释放指定账号的 webview、监听器和定时器。 */
@@ -899,6 +987,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }
     abortControllersRef.current.set(taskId, controller);
     const pause = (ms: number) => sleepWithAbort(ms, controller.signal);
+    let initializationLease: InitializationLease | undefined;
+    let autoConfirmMaterialAuthorization = false;
+    let initializationLimit = 1;
     const clearKnownPromotion = async (): Promise<void> => {
       const result = await dismissKnownDesktopDownloadPromotion(webview);
       if (result === 'failed') {
@@ -908,6 +999,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     };
     const materialAuthorizationNotificationKey = `material-authorization-${taskId}`;
     try {
+      const settings = await window.electronAPI.settings.get();
+      autoConfirmMaterialAuthorization = settings.autoConfirmMaterialAuthorization === true;
+      initializationLimit = Math.max(1, Math.min(3, Number(settings.initializationConcurrency) || 1));
+      initializationLease = await initializationGate.acquire(taskId, { limit: initializationLimit, signal: controller.signal });
+      await updateTaskRuntime(taskId, {
+        runtime: {
+          executionDiagnostics: {
+            initializationQueueWaitMs: initializationLease.waitedMs,
+            initializationLimit,
+          },
+        },
+      });
       console.log(`[Automation:${accountId}] 开始`);
 
       setAccountAutomationState(accountId, 'injecting', '正在检测账号可用性...', 'preparing_account');
@@ -1035,7 +1138,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           if (fileDataList.length !== attachments.length) {
             throw new Error('参考图片读取不完整，已在提交前停止');
           }
-          const uploaded = await uploadReferenceImages(webview, fileDataList);
+          let lastUploadPersistAt = -Infinity;
+          const uploaded = await uploadReferenceImages(webview, fileDataList, {
+            timeoutMs: 180_000,
+            stableSamples: 3,
+            onProgress: async (diagnostic) => {
+              if (diagnostic.elapsedMs - lastUploadPersistAt < 5000 && diagnostic.failure !== undefined) return;
+              lastUploadPersistAt = diagnostic.elapsedMs;
+              const existingDiagnostics = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.executionDiagnostics;
+              await updateTaskRuntime(taskId, {
+                runtime: { executionDiagnostics: { ...existingDiagnostics, upload: diagnostic } },
+              });
+            },
+          });
           if (!uploaded) throw new Error('参考图片未全部上传稳定，已在提交前停止');
         }
 
@@ -1126,16 +1241,58 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           throw new AccountAvailabilityPauseError('素材安全确认未完成，请检查右侧页面；本次尚未提交', 'material_authorization_required');
         }
         if (authorization === 'present') {
-          const waitingMessage = '等待你在右侧页面确认素材授权；确认后将自动继续跟踪，系统不会代点或重复发送';
+          const waitingMessage = autoConfirmMaterialAuthorization
+            ? '已识别素材授权白名单，准备单次确认并只读回查'
+            : '等待你在右侧页面确认素材授权；确认后将自动继续跟踪，系统不会代点或重复发送';
           submissionMarkedAt = await markSubmissionIntent('waiting_verification', waitingMessage);
           setAccountAutomationState(accountId, 'injecting', waitingMessage, 'waiting_verification');
           useAccountStore.getState().selectAccount(accountId);
-          notification.warning({
-            key: materialAuthorizationNotificationKey,
-            message: '需要人工确认素材授权',
-            description: '请核对素材权利后在豆包页面手动选择“确认”或“拒绝”。确认后任务会继续跟踪本次生成。',
-            duration: 0,
+          const detectedAt = new Date().toISOString();
+          const currentDiagnostics = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.executionDiagnostics;
+          await updateTaskRuntime(taskId, {
+            runtime: {
+              executionDiagnostics: {
+                ...currentDiagnostics,
+                materialAuthorization: {
+                  fingerprint: 'doubao-material-authorization-v1', detectedAt, outcome: 'detected',
+                },
+              },
+            },
           });
+          if (autoConfirmMaterialAuthorization) {
+            const confirmationResult = await confirmMaterialAuthorizationIfAllowed(webview, {
+              enabled: true,
+              expectedConversationUrl: taskConversationUrl || '',
+              assetsValidated: true,
+            });
+            const latestDiagnostics = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.executionDiagnostics;
+            await updateTaskRuntime(taskId, {
+              runtime: {
+                executionDiagnostics: {
+                  ...latestDiagnostics,
+                  materialAuthorization: {
+                    fingerprint: 'doubao-material-authorization-v1',
+                    detectedAt: confirmationResult.detectedAt,
+                    clickedAt: confirmationResult.clickedAt,
+                    verifiedAt: confirmationResult.verifiedAt,
+                    outcome: confirmationResult.status === 'confirmed' ? 'confirmed' : 'uncertain',
+                  },
+                },
+              },
+            });
+            if (confirmationResult.status === 'not_allowed') {
+              throw new AccountAvailabilityPauseError(`素材授权自动确认被安全门禁拒绝（${confirmationResult.reason}），请人工核对`, 'material_authorization_required');
+            }
+          } else {
+            notification.warning({
+              key: materialAuthorizationNotificationKey,
+              message: '需要人工确认素材授权',
+              description: '请核对素材权利后在豆包页面手动选择“确认”或“拒绝”。确认后任务会继续跟踪本次生成。',
+              duration: 0,
+            });
+          }
+          initializationLease?.release();
+          initializationLease = undefined;
 
           const authorizationWaitStartedAt = Date.now();
           const authorizationTimeoutMs = 30 * 60 * 1000;
@@ -1230,6 +1387,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 新版页面不总是暴露 data-message-id 或网络监听状态；保存“用户消息已进入
       // 会话后”的文本基线，后续仅把新的会话内容认定为助手回复终态。
       conversationTextAfterSubmit = await getConversationText(webview);
+      initializationLease?.release();
+      initializationLease = undefined;
 
       // 提交成功后刷新阻断检测基线。
       // resetVideoCaptureCache 在注入提示词前设置基线，此时用户消息尚未渲染。
@@ -1495,6 +1654,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (updated) message.success('提示词已更新，任务已重新加入队列');
       }
     } finally {
+      initializationLease?.release();
       notification.destroy(materialAuthorizationNotificationKey);
       abortControllersRef.current.delete(taskId);
       pendingRestartTasksRef.current.delete(taskId);

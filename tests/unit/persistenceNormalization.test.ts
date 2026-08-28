@@ -647,6 +647,31 @@ describe('normalizeTasks', () => {
     expect(normalized.runtime?.controlReadiness).toMatchObject({ attempts: 5, elapsedMs: 3250, stableAtMs: 3250 });
   });
 
+  it('人工提交观察与最小化执行诊断跨重启保留，不引入页面文本或素材路径', () => {
+    const task = makeValidTask();
+    task.status = 'manual_submission_observing';
+    task.runtime = {
+      runId: 'manual-run', attempt: 1, stage: 'manual_submission_observing', message: '只读观察',
+      startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, submittedAt: NOW,
+      conversationUrl: 'https://www.doubao.com/chat/manual-1',
+      executionDiagnostics: {
+        initializationQueueWaitMs: 1200,
+        initializationLimit: 1,
+        upload: { attempts: 8, elapsedMs: 9000, expectedCount: 1, observedCount: 1, pending: false, stableSamples: 3 },
+        materialAuthorization: { fingerprint: 'doubao-material-authorization-v1', detectedAt: NOW, outcome: 'confirmed' },
+      },
+      manualObservation: {
+        startedAt: NOW, expiresAt: '2026-08-28T00:15:00.000Z', source: 'user_confirmed_url', outcome: 'observing',
+      },
+      input: { prompt: 'secret prompt', mode: 'video', attachments: ['D:/secret/image.png'] },
+    };
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.status).toBe('manual_submission_observing');
+    expect(normalized.runtime?.manualObservation).toEqual(task.runtime.manualObservation);
+    expect(normalized.runtime?.executionDiagnostics).toEqual(task.runtime.executionDiagnostics);
+    expect(JSON.stringify(normalized.runtime?.executionDiagnostics)).not.toContain('secret');
+  });
+
   // ---- 测试 7: 重复任务 ID 去重 ----
   it('重复任务 ID 只保留第一个且记录警告', () => {
     const t1 = makeValidTask(); t1.id = 'dup-task'; t1.prompt = '任务1';
