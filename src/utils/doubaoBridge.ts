@@ -19,6 +19,10 @@ import { classifyMaterialAuthorizationSnapshot } from './materialAuthorization';
 import type { MaterialAuthorizationState } from './materialAuthorization';
 import { nextStableUploadCount } from './uploadReadiness';
 import type { UploadReadinessSnapshot } from './uploadReadiness';
+import { classifyGenerationConfirmationText } from './generationConfirmation';
+import type { GenerationConfirmationEvidence } from './generationConfirmation';
+import { VideoControlReadinessError, waitForVideoControlReadiness } from './videoControlReadiness';
+import type { VideoControlReadinessResult } from './videoControlReadiness';
 
 // ==================== 类型 ====================
 
@@ -2996,11 +3000,12 @@ export async function detectCurrentMode(webview: WebviewHandle): Promise<string>
  */
 export async function configureVideoOptions(
   webview: WebviewHandle,
-  config: { model: string; duration: string; aspectRatio: string }
+  config: { model: string; duration: string; aspectRatio: string },
+  options?: { onReadiness?: (result: VideoControlReadinessResult) => void | Promise<void> },
 ): Promise<void> {
   // 2026-08 新版创作页把“比例 + 时长”收敛为同一个弹层；旧版三个
   // 独立下拉的兜底会在未回读时误报成功。统一走新版可见控件并逐项回读。
-  return configureVideoOptionsV2(webview, config);
+  return configureVideoOptionsV2(webview, config, options);
 
   /* istanbul ignore next -- 保留旧版适配作为历史参考，V2 失败一律抛错而不回退。 */
   // 模型名称映射（豆包页面显示的文本）
@@ -3802,6 +3807,36 @@ export async function inspectMaterialAuthorization(
   }
 }
 
+/**
+ * 只读识别平台的“视频生成参数确认”回复。返回结构化摘要，不返回完整会话文本，
+ * 更不会点击或回复“确认”。
+ */
+export async function inspectGenerationConfirmation(
+  webview: WebviewHandle,
+): Promise<GenerationConfirmationEvidence> {
+  try {
+    const text = await safeExecuteJS<string>(webview, `
+      (function () {
+        function visible(el) {
+          var r = el.getBoundingClientRect();
+          return r.width > 20 && r.height > 12 && el.offsetParent !== null;
+        }
+        var selectors = '[data-message-id],[data-testid*="message"],[class*="message"],[class*="bubble"]';
+        var candidates = Array.from(document.querySelectorAll(selectors)).filter(visible).map(function (node) {
+          return (node.innerText || '').replace(/\\s+/g, ' ').trim();
+        }).filter(function (value) {
+          return value.length > 0 && value.length < 3000 &&
+            (/视频生成参数确认/.test(value) || /确认后.{0,16}(?:开始|进行|为你)?生成视频/.test(value) || /回复[“"']?确认[”"']?.{0,16}生成/.test(value));
+        });
+        return candidates.length ? candidates[candidates.length - 1] : '';
+      })()
+    `, 5000, 'inspect_generation_confirmation');
+    return classifyGenerationConfirmationText(text);
+  } catch {
+    return { state: 'unknown', detectedAt: new Date().toISOString() };
+  }
+}
+
 /** 豆包 2026-08 创作栏稳定结构属性；文本定位仅作为受限回退。 */
 export const VIDEO_MODEL_CONTROL_SELECTOR = '[data-input-engine-actionbar-control-key="video-model"]';
 export const VIDEO_COMPOSITE_CONTROL_SELECTOR = '[data-creation-params-panel-id]';
@@ -3844,6 +3879,7 @@ export function isVideoCompositeControlText(text: string): boolean {
 async function configureVideoOptionsV2(
   webview: WebviewHandle,
   config: { model: string; duration: string; aspectRatio: string },
+  options?: { onReadiness?: (result: VideoControlReadinessResult) => void | Promise<void> },
 ): Promise<void> {
   const modelLabel = getVideoModelUiLabel(config.model);
   const durationSeconds = Number.parseInt(config.duration.replace(/s$/i, ''), 10);
@@ -3902,8 +3938,8 @@ async function configureVideoOptionsV2(
 
   // 模式切换后 React 会先显示创作栏、再挂载参数控件。必须等两个权威控件
   // 都实际可用后才继续；15 秒后仍未挂载则 fail-closed，不猜测、更不提交。
-  const waitForAuthoritativeControls = async (): Promise<boolean> => {
-    return pollUntilReady(async () => page<boolean>(`
+  const waitForAuthoritativeControls = async (): Promise<VideoControlReadinessResult> => {
+    return waitForVideoControlReadiness(async () => page<{ modelReady: boolean; compositeReady: boolean }>(`
         (function () {
           function usable(el) {
             if (!el) return false;
@@ -3914,13 +3950,18 @@ async function configureVideoOptionsV2(
           var model = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
           var composite = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
           var compositeText = composite ? (composite.innerText || '').replace(/\\s+/g, ' ').trim() : '';
-          return usable(model) && usable(composite) && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(compositeText);
+          return {
+            modelReady: usable(model),
+            compositeReady: usable(composite) && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(compositeText)
+          };
         })()
-      `, 'wait_video_controls').catch(() => false), { timeoutMs: 15_000 });
+      `, 'wait_video_controls').catch(() => ({ modelReady: false, compositeReady: false })), { timeoutMs: 30_000, stableSamples: 3 });
   };
 
-  if (!await waitForAuthoritativeControls()) {
-    throw new Error('视频参数控件未就绪，已在提交前停止');
+  const readiness = await waitForAuthoritativeControls();
+  await options?.onReadiness?.(readiness);
+  if (!readiness.ready) {
+    throw new VideoControlReadinessError(readiness.failureStage || 'stable_readback', readiness);
   }
 
   const findModelTrigger = async (): Promise<string | undefined> => {
@@ -4101,8 +4142,20 @@ async function configureVideoOptionsV2(
       });
     })()
   `, 'verify_video_composite_before_slider');
+  const verifyFinalStableReadback = async (): Promise<void> => {
+    const finalResult = await waitForVideoControlReadiness(async () => ({
+      modelReady: await verifyModel().catch(() => false),
+      compositeReady: await isCompositeAlreadyConfigured().catch(() => false),
+    }), { timeoutMs: 10_000, stableSamples: 3 });
+    const reported = finalResult.ready ? finalResult : { ...finalResult, failureStage: 'final_readback' as const };
+    await options?.onReadiness?.(reported);
+    if (!finalResult.ready) throw new VideoControlReadinessError('final_readback', reported);
+  };
   if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
-  if (await isCompositeAlreadyConfigured()) return;
+  if (await isCompositeAlreadyConfigured()) {
+    await verifyFinalStableReadback();
+    return;
+  }
 
   const findDurationSlider = async (): Promise<{ position?: string }> => page<{ position?: string }>(`
       (function () {
@@ -4153,6 +4206,7 @@ async function configureVideoOptionsV2(
   if (!configured.slider || !configured.composite) {
     throw new Error(`视频比例或时长配置回读失败: ${getVideoCompositeLabel(config.aspectRatio, config.duration)}`);
   }
+  await verifyFinalStableReadback();
 }
 
 

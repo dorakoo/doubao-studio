@@ -55,13 +55,13 @@ const VALID_GENERATION_MODES: readonly GenerationMode[] = ['chat', 'image', 'vid
 const VALID_ACCOUNT_STATUSES: readonly AccountStatus[] = ['idle', 'busy', 'error'];
 const VALID_ACCOUNT_PLATFORMS: readonly AccountPlatform[] = ['doubao', 'dola'];
 const VALID_TASK_STATUSES: readonly TaskStatus[] = [
-  'queued', 'executing', 'generating', 'waiting_verification',
+  'queued', 'executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation',
   'paused', 'done', 'fail', 'cancelled',
 ];
 const VALID_TASK_STAGES: readonly TaskStage[] = [
   'queued', 'preparing_account', 'new_conversation', 'switching_mode',
   'configuring', 'uploading_assets', 'injecting_prompt', 'submitting',
-  'waiting_verification', 'generating', 'extracting_outputs',
+  'waiting_verification', 'waiting_generation_confirmation', 'generating', 'extracting_outputs',
   'completed', 'paused', 'failed', 'cancelled',
 ];
 const VALID_DEPENDENCY_POLICIES: readonly DependencyPolicy[] = ['all_done', 'all_finished'];
@@ -440,6 +440,24 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
     lastHeartbeatAt: asISODate(r.lastHeartbeatAt, now),
     submittedAt: (() => { const v = r.submittedAt; return isValidISODate(v) ? v : undefined; })(),
     conversationUrl: asNonEmptyString(r.conversationUrl) ?? undefined,
+    controlReadiness: isObject(r.controlReadiness) ? {
+      modeEntryElapsedMs: asNonNegativeNumber(r.controlReadiness.modeEntryElapsedMs, 0) || undefined,
+      attempts: asNonNegativeNumber(r.controlReadiness.attempts, 0),
+      elapsedMs: asNonNegativeNumber(r.controlReadiness.elapsedMs, 0),
+      modelVisibleAtMs: asNonNegativeNumber(r.controlReadiness.modelVisibleAtMs, 0) || undefined,
+      compositeVisibleAtMs: asNonNegativeNumber(r.controlReadiness.compositeVisibleAtMs, 0) || undefined,
+      stableAtMs: asNonNegativeNumber(r.controlReadiness.stableAtMs, 0) || undefined,
+      failureStage: optionalOneOf(r.controlReadiness.failureStage, ['mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureStage'],
+    } : undefined,
+    generationConfirmation: isObject(r.generationConfirmation) &&
+      isValidISODate(r.generationConfirmation.detectedAt) &&
+      (r.generationConfirmation.marker === 'parameter_confirmation' || r.generationConfirmation.marker === 'confirm_before_generation') ? {
+        detectedAt: r.generationConfirmation.detectedAt,
+        marker: r.generationConfirmation.marker,
+        model: asNonEmptyString(r.generationConfirmation.model) ?? undefined,
+        duration: asNonEmptyString(r.generationConfirmation.duration) ?? undefined,
+        aspectRatio: asNonEmptyString(r.generationConfirmation.aspectRatio) ?? undefined,
+      } : undefined,
     input: {
       prompt: asString(isObject(input) ? input.prompt : '', ''),
       mode: oneOf(isObject(input) ? input.mode : taskMode, VALID_GENERATION_MODES, taskMode),

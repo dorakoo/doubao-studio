@@ -131,6 +131,22 @@ export interface TaskRunSnapshot {
   lastHeartbeatAt: string;
   submittedAt?: string;
   conversationUrl?: string;
+  controlReadiness?: {
+    modeEntryElapsedMs?: number;
+    attempts: number;
+    elapsedMs: number;
+    modelVisibleAtMs?: number;
+    compositeVisibleAtMs?: number;
+    stableAtMs?: number;
+    failureStage?: 'mode_entry' | 'model_control' | 'composite_control' | 'stable_readback' | 'final_readback';
+  };
+  generationConfirmation?: {
+    detectedAt: string;
+    marker: 'parameter_confirmation' | 'confirm_before_generation';
+    model?: string;
+    duration?: string;
+    aspectRatio?: string;
+  };
   input: {
     prompt: string;
     mode: GenerationMode;

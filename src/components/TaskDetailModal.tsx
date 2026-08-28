@@ -85,7 +85,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
 
   const mustReconcile = requiresSubmissionReconciliation(task);
   const canRetry = !mustReconcile && (task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
-    task.status === 'cancelled' || task.status === 'waiting_verification');
+    task.status === 'cancelled' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation');
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
 
@@ -139,6 +139,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
       case 'executing': return <ThunderboltOutlined style={{ color: statusCfg.color }} />;
       case 'generating': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
       case 'waiting_verification': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
+      case 'waiting_generation_confirmation': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
       case 'paused': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
       case 'done': return <CheckCircleOutlined style={{ color: statusCfg.color }} />;
       case 'fail': return <CloseCircleOutlined style={{ color: statusCfg.color }} />;
@@ -191,7 +192,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                 onClose();
               }}
             >
-              核对平台结果（不重新发送）
+              {task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
             </Button>
           )}
           {!mustReconcile && <Button
@@ -267,6 +268,12 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
             </div>
           </div>
         )}
+        {task.status === 'waiting_generation_confirmation' && (
+          <div style={{ marginBottom: 16, background: 'rgba(249,115,22,0.10)', border: '1px solid rgba(249,115,22,0.35)', borderRadius: 8, padding: 12 }}>
+            <strong style={{ color: '#fb923c' }}>等待你在原豆包会话中确认视频参数</strong>
+            <div style={{ marginTop: 6 }}>系统不会自动回复“确认”，也不会创建新对话或重复发送。</div>
+          </div>
+        )}
 
         {/* 配置信息 */}
         <Descriptions
@@ -322,8 +329,24 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                 {new Date(task.runtime.lastHeartbeatAt).toLocaleString('zh-CN')}
               </Descriptions.Item>
               <Descriptions.Item label="可恢复">
-                {task.errorInfo ? (task.errorInfo.recoverable ? '可以重新执行' : '需要更换账号或配置') : '是'}
+                {task.status === 'waiting_generation_confirmation'
+                  ? '仅允许原会话只读回读'
+                  : task.errorInfo ? (task.errorInfo.recoverable ? '可以重新执行' : '需要更换账号或配置') : '是'}
               </Descriptions.Item>
+              {task.runtime.conversationUrl && (
+                <Descriptions.Item label="原会话" span={2}>
+                  <Button size="small" onClick={() => window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }))}>
+                    打开原豆包会话
+                  </Button>
+                </Descriptions.Item>
+              )}
+              {task.runtime.controlReadiness && (
+                <Descriptions.Item label="控件诊断" span={2}>
+                  {task.runtime.controlReadiness.failureStage
+                    ? `失败阶段 ${task.runtime.controlReadiness.failureStage}`
+                    : '模型、比例与时长已连续稳定回读'} · {task.runtime.controlReadiness.elapsedMs}ms / {task.runtime.controlReadiness.attempts}次
+                </Descriptions.Item>
+              )}
             </>
           )}
           {task.batchId && <Descriptions.Item label="任务批次">{task.batchId}</Descriptions.Item>}

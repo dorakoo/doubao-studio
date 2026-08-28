@@ -56,38 +56,41 @@ describe('@doubao-studio/contracts', () => {
     expect(status).toBe('idle');
   });
 
-  it('TaskStatus 包含 8 个队列级状态', () => {
+  it('TaskStatus 包含 9 个队列级状态', () => {
     const status: TaskStatus = 'queued';
     expect(status).toBe('queued');
     const allStatuses: TaskStatus[] = [
-      'queued', 'executing', 'generating', 'waiting_verification',
+      'queued', 'executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation',
       'paused', 'done', 'fail', 'cancelled',
     ];
-    expect(allStatuses).toHaveLength(8);
+    expect(allStatuses).toHaveLength(9);
   });
 
-  it('TaskStage 包含 15 个执行阶段', () => {
+  it('TaskStage 包含 16 个执行阶段', () => {
     const stage: TaskStage = 'queued';
     expect(stage).toBe('queued');
     const allStages: TaskStage[] = [
       'queued', 'preparing_account', 'new_conversation', 'switching_mode',
       'configuring', 'uploading_assets', 'injecting_prompt', 'submitting',
-      'waiting_verification', 'generating', 'extracting_outputs',
+      'waiting_verification', 'waiting_generation_confirmation', 'generating', 'extracting_outputs',
       'completed', 'paused', 'failed', 'cancelled',
     ];
-    expect(allStages).toHaveLength(15);
+    expect(allStages).toHaveLength(16);
   });
 
-  it('TaskErrorCode 包含 13 个错误码', () => {
+  it('TaskErrorCode 包含 20 个错误码', () => {
     const code: TaskErrorCode = 'unknown';
     expect(code).toBe('unknown');
     const allCodes: TaskErrorCode[] = [
       'cancelled', 'verification', 'quota_exhausted', 'membership_required',
       'face_restricted', 'content_rejected', 'network', 'timeout',
       'page_changed', 'submission_failed', 'generation_failed',
-      'output_missing', 'unknown',
+      'output_missing', 'submission_uncertain', 'generation_confirmation_required',
+      'video_mode_entry_not_ready', 'video_model_control_not_ready',
+      'video_composite_control_not_ready', 'video_stable_readback_not_ready',
+      'video_final_readback_not_ready', 'unknown',
     ];
-    expect(allCodes).toHaveLength(13);
+    expect(allCodes).toHaveLength(20);
   });
 
   it('VideoModel 包含 3 个模型', () => {
