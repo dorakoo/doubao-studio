@@ -147,6 +147,34 @@ export interface TaskRunSnapshot {
     duration?: string;
     aspectRatio?: string;
   };
+  /** 仅保存计数、耗时与机器码，不保存页面文字、提示词或素材路径。 */
+  executionDiagnostics?: {
+    initializationQueueWaitMs?: number;
+    initializationLimit?: number;
+    upload?: {
+      attempts: number;
+      elapsedMs: number;
+      expectedCount: number;
+      observedCount: number;
+      pending: boolean;
+      stableSamples: number;
+      failure?: 'pending' | 'count_incomplete' | 'count_mismatch' | 'unstable';
+    };
+    materialAuthorization?: {
+      fingerprint: 'doubao-material-authorization-v1';
+      detectedAt: string;
+      clickedAt?: string;
+      verifiedAt?: string;
+      outcome: 'detected' | 'confirmed' | 'uncertain';
+    };
+  };
+  manualObservation?: {
+    startedAt: string;
+    expiresAt: string;
+    lastCheckedAt?: string;
+    source: 'stored_conversation' | 'user_confirmed_url';
+    outcome: 'observing' | 'completed' | 'manual_review';
+  };
   input: {
     prompt: string;
     mode: GenerationMode;

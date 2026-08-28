@@ -26,7 +26,7 @@ export const ProjectOverviewModal: React.FC<{ open: boolean; onClose: () => void
         <Descriptions.Item label="任务批次">{batches}</Descriptions.Item>
         <Descriptions.Item label="历史产物">{artifacts}</Descriptions.Item>
         <Descriptions.Item label="失败任务">{tasks.filter((task) => task.status === 'fail').length}</Descriptions.Item>
-        <Descriptions.Item label="运行/等待任务">{tasks.filter((task) => ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation'].includes(task.status)).length}</Descriptions.Item>
+        <Descriptions.Item label="运行/等待任务">{tasks.filter((task) => ['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing'].includes(task.status)).length}</Descriptions.Item>
       </Descriptions>
     </Modal>
   );

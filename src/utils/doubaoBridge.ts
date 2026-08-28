@@ -15,10 +15,10 @@
  * 3. 每个 executeJavaScript 调用都有 10s 超时保护
  */
 
-import { classifyMaterialAuthorizationSnapshot } from './materialAuthorization';
+import { classifyMaterialAuthorizationSnapshot, decideMaterialAuthorizationAutoConfirm } from './materialAuthorization';
 import type { MaterialAuthorizationState } from './materialAuthorization';
-import { nextStableUploadCount } from './uploadReadiness';
-import type { UploadReadinessSnapshot } from './uploadReadiness';
+import { classifyUploadReadinessFailure, getObservedUploadCount, nextStableUploadCount } from './uploadReadiness';
+import type { UploadReadinessDiagnostic, UploadReadinessSnapshot } from './uploadReadiness';
 import { classifyGenerationConfirmationText } from './generationConfirmation';
 import type { GenerationConfirmationEvidence } from './generationConfirmation';
 import { VideoControlReadinessError, waitForVideoControlReadiness } from './videoControlReadiness';
@@ -3764,8 +3764,22 @@ export async function dismissKnownDesktopDownloadPromotion(
 export async function inspectMaterialAuthorization(
   webview: WebviewHandle,
 ): Promise<MaterialAuthorizationState> {
+  return (await inspectMaterialAuthorizationTarget(webview)).state;
+}
+
+interface MaterialAuthorizationTarget {
+  state: MaterialAuthorizationState;
+  confirmPosition?: string;
+  visibleAttachmentCount: number;
+  pending: boolean;
+}
+
+async function inspectMaterialAuthorizationTarget(webview: WebviewHandle): Promise<MaterialAuthorizationTarget> {
   try {
-    const snapshot = await safeExecuteJS<{ title: string; body: string; actions: string[] }>(webview, `
+    const snapshot = await safeExecuteJS<{
+      title: string; body: string; actions: string[]; confirmPosition?: string;
+      visibleAttachmentCount: number; pending: boolean;
+    }>(webview, `
       (function () {
         var visible = function (el) {
           var r = el.getBoundingClientRect();
@@ -3786,25 +3800,90 @@ export async function inspectMaterialAuthorization(
           }
         }
         var pageText = (document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+        var attachments = Array.from(document.querySelectorAll('img,[class*="thumb"],[class*="preview"],[class*="attachment"],[class*="upload-item"]')).filter(visible);
+        var pending = Array.from(document.querySelectorAll('[aria-busy="true"],[class*="uploading"],[class*="progress"],[data-status="uploading"]')).some(visible);
         if (!matched && pageText.indexOf('安全确认') === -1 &&
             pageText.indexOf('上传、使用的素材') === -1) {
-          return { title: '', body: '', actions: [] };
+          return { title: '', body: '', actions: [], visibleAttachmentCount: attachments.length, pending: pending };
         }
         var body = matched ? (matched.innerText || '') : pageText;
-        var actions = actionButtons
+        var scopedButtons = actionButtons
           .filter(function (el) { return !matched || matched.contains(el); })
-          .map(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim(); });
+        var actions = scopedButtons.map(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim(); });
+        var confirm = scopedButtons.find(function (el) { return (el.innerText || '').replace(/\\s+/g, ' ').trim() === '确认'; });
+        var rect = confirm ? confirm.getBoundingClientRect() : null;
         return {
           title: body.indexOf('安全确认') !== -1 ? '安全确认' : '',
           body: body,
           actions: actions,
+          confirmPosition: rect ? (Math.round(rect.left + rect.width / 2) + ',' + Math.round(rect.top + rect.height / 2)) : undefined,
+          visibleAttachmentCount: attachments.length,
+          pending: pending,
         };
       })()
     `, 5000, 'inspect_material_authorization');
-    return classifyMaterialAuthorizationSnapshot(snapshot);
+    return {
+      state: classifyMaterialAuthorizationSnapshot(snapshot),
+      confirmPosition: snapshot.confirmPosition,
+      visibleAttachmentCount: snapshot.visibleAttachmentCount,
+      pending: snapshot.pending,
+    };
   } catch {
-    return 'blocked';
+    return { state: 'blocked', visibleAttachmentCount: 0, pending: true };
   }
+}
+
+export interface MaterialAuthorizationConfirmResult {
+  status: 'confirmed' | 'not_allowed' | 'uncertain';
+  reason?: string;
+  fingerprint?: 'doubao-material-authorization-v1';
+  detectedAt: string;
+  clickedAt?: string;
+  verifiedAt?: string;
+}
+
+/** 精确白名单的单次原生点击；点击后只回读，不做任何提交补偿。 */
+export async function confirmMaterialAuthorizationIfAllowed(
+  webview: WebviewHandle,
+  input: { enabled: boolean; expectedConversationUrl: string; assetsValidated: boolean },
+): Promise<MaterialAuthorizationConfirmResult> {
+  const detectedAt = new Date().toISOString();
+  const before = await inspectMaterialAuthorizationTarget(webview);
+  const decision = decideMaterialAuthorizationAutoConfirm({
+    enabled: input.enabled,
+    state: before.state,
+    currentUrl: webview.getURL(),
+    expectedConversationUrl: input.expectedConversationUrl,
+    assetsValidated: input.assetsValidated,
+    confirmPosition: before.confirmPosition,
+  });
+  if (!decision.allowed) return { status: 'not_allowed', reason: decision.reason, detectedAt };
+  if (typeof webview.sendInputEvent !== 'function') {
+    return { status: 'not_allowed', reason: 'native_input_unavailable', detectedAt, fingerprint: decision.fingerprint };
+  }
+  const [x, y] = before.confirmPosition!.split(',').map(Number);
+  const clickedAt = new Date().toISOString();
+  webview.sendInputEvent({ type: 'mouseMove', x, y });
+  webview.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+  await sleep(35);
+  webview.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await sleep(250);
+    const after = await inspectMaterialAuthorizationTarget(webview);
+    if (after.state === 'absent') {
+      const sameConversation = webview.getURL() === input.expectedConversationUrl;
+      const attachmentStable = after.visibleAttachmentCount === before.visibleAttachmentCount;
+      return {
+        status: sameConversation && attachmentStable ? 'confirmed' : 'uncertain',
+        reason: sameConversation ? (attachmentStable ? undefined : 'attachment_count_changed') : 'conversation_changed',
+        fingerprint: decision.fingerprint,
+        detectedAt,
+        clickedAt,
+        verifiedAt: new Date().toISOString(),
+      };
+    }
+  }
+  return { status: 'uncertain', reason: 'dialog_still_present', fingerprint: decision.fingerprint, detectedAt, clickedAt };
 }
 
 /**
@@ -4217,7 +4296,8 @@ async function configureVideoOptionsV2(
  */
 export async function uploadReferenceImages(
   webview: WebviewHandle,
-  fileDataList: Array<{ name: string; base64: string; mime: string }>
+  fileDataList: Array<{ name: string; base64: string; mime: string }>,
+  options: { timeoutMs?: number; stableSamples?: number; onProgress?: (diagnostic: UploadReadinessDiagnostic) => void | Promise<void> } = {},
 ): Promise<boolean> {
   if (!fileDataList || fileDataList.length === 0) return true;
 
@@ -4310,15 +4390,34 @@ export async function uploadReferenceImages(
     return false;
   }
 
+  const startedAt = Date.now();
+  const timeoutMs = Math.max(30_000, Math.min(options.timeoutMs || 180_000, 300_000));
+  const stableSamples = Math.max(3, options.stableSamples || 3);
   let stableCount = 0;
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    await sleep(500);
+  let attempt = 0;
+  let lastDiagnostic: UploadReadinessDiagnostic = {
+    attempts: 0, elapsedMs: 0, expectedCount: fileDataList.length,
+    observedCount: 0, pending: true, stableSamples: 0, failure: 'pending',
+  };
+  while (Date.now() - startedAt < timeoutMs) {
+    attempt += 1;
+    await sleep(Math.min(2500, 500 + attempt * 100));
     try {
       const snapshot = await safeExecuteJS<UploadReadinessSnapshot>(
         webview, snapshotCode(JSON.stringify(fileNames)), 5000, 'imageUploadReadiness',
       );
       stableCount = nextStableUploadCount(stableCount, snapshot, fileDataList.length, baselineAttachmentCount);
-      if (stableCount >= 3) {
+      lastDiagnostic = {
+        attempts: attempt,
+        elapsedMs: Date.now() - startedAt,
+        expectedCount: fileDataList.length,
+        observedCount: getObservedUploadCount(snapshot, baselineAttachmentCount),
+        pending: snapshot.pending,
+        stableSamples: stableCount,
+        failure: stableCount >= stableSamples ? undefined : classifyUploadReadinessFailure(snapshot, fileDataList.length, baselineAttachmentCount) || 'unstable',
+      };
+      await options.onProgress?.(lastDiagnostic);
+      if (stableCount >= stableSamples) {
         console.log(`[doubaoBridge] 图片上传已连续稳定: ${fileDataList.length} 张`);
         return true;
       }
@@ -4326,7 +4425,8 @@ export async function uploadReferenceImages(
       stableCount = 0;
     }
   }
-  console.warn('[doubaoBridge] 图片未在 30 秒内达到数量完整且稳定状态');
+  await options.onProgress?.({ ...lastDiagnostic, elapsedMs: Date.now() - startedAt, failure: lastDiagnostic.failure || 'unstable' });
+  console.warn(`[doubaoBridge] 图片未在 ${timeoutMs}ms 内达到数量完整且稳定状态`);
   return false;
 }
 

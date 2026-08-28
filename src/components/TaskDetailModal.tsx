@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Tag, Descriptions, Space, Divider, List, message } from 'antd';
+import { Modal, Button, Input, Tag, Descriptions, Space, Divider, List, message } from 'antd';
 import {
   ReloadOutlined,
   DeleteOutlined,
@@ -53,6 +53,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
   const accounts = useAccountStore((s) => s.accounts);
 
   const [imageBase64s, setImageBase64s] = useState<Record<string, string>>({});
+  const [manualConversationUrl, setManualConversationUrl] = useState('');
 
   // 加载参考图片缩略图
   useEffect(() => {
@@ -77,6 +78,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
     }
   }, [task?.id, task?.attachments]);
 
+  useEffect(() => {
+    setManualConversationUrl(task?.runtime?.conversationUrl || '');
+  }, [task?.id, task?.runtime?.conversationUrl]);
+
   if (!task) return null;
 
   const modeCfg = GENERATION_MODE_CONFIG[task.mode] || GENERATION_MODE_CONFIG.chat;
@@ -88,6 +93,8 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
     task.status === 'cancelled' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation');
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
+  const canObserveManualSubmission = task.mode === 'video' && !!task.assignedAccountId &&
+    !['done', 'cancelled', 'manual_submission_observing'].includes(task.status);
 
   // ---- 操作处理 ----
 
@@ -140,6 +147,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
       case 'generating': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
       case 'waiting_verification': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
       case 'waiting_generation_confirmation': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
+      case 'manual_submission_observing': return <SyncOutlined spin style={{ color: statusCfg.color }} />;
       case 'paused': return <ClockCircleOutlined style={{ color: statusCfg.color }} />;
       case 'done': return <CheckCircleOutlined style={{ color: statusCfg.color }} />;
       case 'fail': return <CloseCircleOutlined style={{ color: statusCfg.color }} />;
@@ -195,6 +203,31 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
               {task.status === 'waiting_generation_confirmation' ? '人工确认后，只读回读原会话' : '核对平台结果（不重新发送）'}
             </Button>
           )}
+          {canObserveManualSubmission && (
+            <Button
+              icon={<LinkOutlined />}
+              onClick={() => {
+                Modal.confirm({
+                  title: '确认已在当前右侧会话手动提交？',
+                  content: '系统只会读取当前账号的该会话并匹配本任务提示词、完成信号和产物；不会注入、点击发送或创建新会话。',
+                  okText: '只读观察当前会话',
+                  cancelText: '取消',
+                  onOk: () => {
+                    window.dispatchEvent(new CustomEvent('mark-manual-submission', {
+                      detail: {
+                        taskId: task.id,
+                        conversationUrl: manualConversationUrl.trim() || undefined,
+                        useCurrentPage: !manualConversationUrl.trim(),
+                      },
+                    }));
+                    onClose();
+                  },
+                });
+              }}
+            >
+              我已手动提交
+            </Button>
+          )}
           {!mustReconcile && <Button
             icon={<EditOutlined />}
             onClick={() => {
@@ -204,7 +237,7 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           >
             编辑重跑
           </Button>}
-          {(task.status === 'executing' || task.status === 'generating') && (
+          {(task.status === 'executing' || task.status === 'generating' || task.status === 'manual_submission_observing') && (
             <Button
               danger
               icon={<StopOutlined />}
@@ -272,6 +305,22 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           <div style={{ marginBottom: 16, background: 'rgba(249,115,22,0.10)', border: '1px solid rgba(249,115,22,0.35)', borderRadius: 8, padding: 12 }}>
             <strong style={{ color: '#fb923c' }}>等待你在原豆包会话中确认视频参数</strong>
             <div style={{ marginTop: 6 }}>系统不会自动回复“确认”，也不会创建新对话或重复发送。</div>
+          </div>
+        )}
+        {task.status === 'manual_submission_observing' && (
+          <div style={{ marginBottom: 16, background: 'rgba(56,189,248,0.10)', border: '1px solid rgba(56,189,248,0.35)', borderRadius: 8, padding: 12 }}>
+            <strong style={{ color: '#38bdf8' }}>正在只读观察人工提交</strong>
+            <div style={{ marginTop: 6 }}>账号观察租约不计为健康失败或冷却；系统只匹配原会话，不会重新发送。</div>
+          </div>
+        )}
+        {canObserveManualSubmission && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ color: '#9898b8', fontSize: 12, marginBottom: 6 }}>人工提交会话 URL（可选）</div>
+            <Input
+              value={manualConversationUrl}
+              onChange={(event) => setManualConversationUrl(event.target.value)}
+              placeholder="留空则在二次确认后使用当前右侧具体会话"
+            />
           </div>
         )}
 
@@ -345,6 +394,18 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
                   {task.runtime.controlReadiness.failureStage
                     ? `失败阶段 ${task.runtime.controlReadiness.failureStage}`
                     : '模型、比例与时长已连续稳定回读'} · {task.runtime.controlReadiness.elapsedMs}ms / {task.runtime.controlReadiness.attempts}次
+                </Descriptions.Item>
+              )}
+              {task.runtime.executionDiagnostics?.upload && (
+                <Descriptions.Item label="上传诊断" span={2}>
+                  {task.runtime.executionDiagnostics.upload.observedCount}/{task.runtime.executionDiagnostics.upload.expectedCount} 个素材 ·
+                  {task.runtime.executionDiagnostics.upload.elapsedMs}ms · 稳定 {task.runtime.executionDiagnostics.upload.stableSamples}/3
+                  {task.runtime.executionDiagnostics.upload.failure ? ` · ${task.runtime.executionDiagnostics.upload.failure}` : ''}
+                </Descriptions.Item>
+              )}
+              {task.runtime.manualObservation && (
+                <Descriptions.Item label="人工观察" span={2}>
+                  {task.runtime.manualObservation.outcome} · 截止 {new Date(task.runtime.manualObservation.expiresAt).toLocaleTimeString('zh-CN')}
                 </Descriptions.Item>
               )}
             </>

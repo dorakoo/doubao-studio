@@ -45,9 +45,9 @@ const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定
  * 兼容修复前被错误记录为 cancelled 的任务，确保现场中的 C01-A 也被保护。
  */
 export function requiresSubmissionReconciliation(task: SubmissionRecoveryTask | undefined): boolean {
-  if (task?.status === 'waiting_generation_confirmation') return true;
+  if (task?.status === 'waiting_generation_confirmation' || task?.status === 'manual_submission_observing') return true;
   if (!task?.runtime?.submittedAt) return false;
-  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'fail', 'cancelled'].includes(task.status || '')) return false;
+  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'fail', 'cancelled'].includes(task.status || '')) return false;
   if (task.errorInfo?.code === 'submission_uncertain' || task.errorInfo?.code === 'generation_confirmation_required') return true;
   return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
 }

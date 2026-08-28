@@ -55,13 +55,13 @@ const VALID_GENERATION_MODES: readonly GenerationMode[] = ['chat', 'image', 'vid
 const VALID_ACCOUNT_STATUSES: readonly AccountStatus[] = ['idle', 'busy', 'error'];
 const VALID_ACCOUNT_PLATFORMS: readonly AccountPlatform[] = ['doubao', 'dola'];
 const VALID_TASK_STATUSES: readonly TaskStatus[] = [
-  'queued', 'executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation',
+  'queued', 'executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing',
   'paused', 'done', 'fail', 'cancelled',
 ];
 const VALID_TASK_STAGES: readonly TaskStage[] = [
   'queued', 'preparing_account', 'new_conversation', 'switching_mode',
   'configuring', 'uploading_assets', 'injecting_prompt', 'submitting',
-  'waiting_verification', 'waiting_generation_confirmation', 'generating', 'extracting_outputs',
+  'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'generating', 'extracting_outputs',
   'completed', 'paused', 'failed', 'cancelled',
 ];
 const VALID_DEPENDENCY_POLICIES: readonly DependencyPolicy[] = ['all_done', 'all_finished'];
@@ -457,6 +457,36 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
         model: asNonEmptyString(r.generationConfirmation.model) ?? undefined,
         duration: asNonEmptyString(r.generationConfirmation.duration) ?? undefined,
         aspectRatio: asNonEmptyString(r.generationConfirmation.aspectRatio) ?? undefined,
+      } : undefined,
+    executionDiagnostics: isObject(r.executionDiagnostics) ? {
+      initializationQueueWaitMs: asNonNegativeNumber(r.executionDiagnostics.initializationQueueWaitMs, 0) || undefined,
+      initializationLimit: asNonNegativeNumber(r.executionDiagnostics.initializationLimit, 0) || undefined,
+      upload: isObject(r.executionDiagnostics.upload) ? {
+        attempts: asNonNegativeNumber(r.executionDiagnostics.upload.attempts, 0),
+        elapsedMs: asNonNegativeNumber(r.executionDiagnostics.upload.elapsedMs, 0),
+        expectedCount: asNonNegativeNumber(r.executionDiagnostics.upload.expectedCount, 0),
+        observedCount: asNonNegativeNumber(r.executionDiagnostics.upload.observedCount, 0),
+        pending: asBoolean(r.executionDiagnostics.upload.pending, false),
+        stableSamples: asNonNegativeNumber(r.executionDiagnostics.upload.stableSamples, 0),
+        failure: optionalOneOf(r.executionDiagnostics.upload.failure, ['pending', 'count_incomplete', 'count_mismatch', 'unstable']),
+      } : undefined,
+      materialAuthorization: isObject(r.executionDiagnostics.materialAuthorization) &&
+        r.executionDiagnostics.materialAuthorization.fingerprint === 'doubao-material-authorization-v1' &&
+        isValidISODate(r.executionDiagnostics.materialAuthorization.detectedAt) ? {
+          fingerprint: 'doubao-material-authorization-v1',
+          detectedAt: r.executionDiagnostics.materialAuthorization.detectedAt,
+          clickedAt: isValidISODate(r.executionDiagnostics.materialAuthorization.clickedAt) ? r.executionDiagnostics.materialAuthorization.clickedAt : undefined,
+          verifiedAt: isValidISODate(r.executionDiagnostics.materialAuthorization.verifiedAt) ? r.executionDiagnostics.materialAuthorization.verifiedAt : undefined,
+          outcome: oneOf(r.executionDiagnostics.materialAuthorization.outcome, ['detected', 'confirmed', 'uncertain'] as const, 'detected'),
+        } : undefined,
+    } : undefined,
+    manualObservation: isObject(r.manualObservation) &&
+      isValidISODate(r.manualObservation.startedAt) && isValidISODate(r.manualObservation.expiresAt) ? {
+        startedAt: r.manualObservation.startedAt,
+        expiresAt: r.manualObservation.expiresAt,
+        lastCheckedAt: isValidISODate(r.manualObservation.lastCheckedAt) ? r.manualObservation.lastCheckedAt : undefined,
+        source: oneOf(r.manualObservation.source, ['stored_conversation', 'user_confirmed_url'] as const, 'stored_conversation'),
+        outcome: oneOf(r.manualObservation.outcome, ['observing', 'completed', 'manual_review'] as const, 'observing'),
       } : undefined,
     input: {
       prompt: asString(isObject(input) ? input.prompt : '', ''),

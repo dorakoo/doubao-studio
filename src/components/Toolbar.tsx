@@ -431,7 +431,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         <Descriptions.Item label="成功率">{successRate}%</Descriptions.Item>
         <Descriptions.Item label="平均完成时间">{averageMinutes} 分钟</Descriptions.Item>
         <Descriptions.Item label="等待人工处理">
-          {tasks.filter((task) => task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation' || task.status === 'paused').length}
+          {tasks.filter((task) => task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing' || task.status === 'paused').length}
         </Descriptions.Item>
         <Descriptions.Item label="失败任务">{tasks.filter((task) => task.status === 'fail').length}</Descriptions.Item>
         <Descriptions.Item label="下载失败">{downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>

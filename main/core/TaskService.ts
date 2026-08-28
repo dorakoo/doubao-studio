@@ -52,9 +52,9 @@ export interface TaskRecoverySummary {
 const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
 
 function requiresSubmissionReconciliation(task: Task): boolean {
-  if (task.status === 'waiting_generation_confirmation') return true;
+  if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') return true;
   if (!task.runtime?.submittedAt) return false;
-  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'fail', 'cancelled'].includes(task.status)) return false;
+  if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'fail', 'cancelled'].includes(task.status)) return false;
   if (task.errorInfo?.code === 'submission_uncertain' || task.errorInfo?.code === 'generation_confirmation_required') return true;
   return LEGACY_UNCERTAIN_SUBMISSION.test(`${task.errorInfo?.message || ''} ${task.result || ''}`);
 }
@@ -100,7 +100,7 @@ export type ArtifactProbe = (
   assignedAccountId: string | null,
 ) => Promise<ArtifactProbeResult>;
 
-const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation']);
+const ACTIVE = new Set<Task['status']>(['executing', 'generating', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing']);
 const WRITE_ERROR = '任务数据写入失败，请检查磁盘空间和数据目录权限';
 const RENEW_WRITE_ERROR = '任务锁续租写入失败';
 const RELEASE_WRITE_ERROR = '任务锁释放写入失败';
@@ -315,7 +315,7 @@ export class TaskService {
     for (const task of tasks) {
       // 该状态已经释放执行锁，但平台侧仍停在一次已提交请求的人工确认边界。
       // 批量暂停不得把它降级成普通 cancelled，否则会丢失禁止重发保护。
-      if (task.status === 'waiting_generation_confirmation') continue;
+      if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') continue;
       if (ACTIVE.has(task.status)) {
         task.status = 'paused';
         task.result = '批量暂停';
@@ -342,7 +342,7 @@ export class TaskService {
     let changed = false;
 
     for (const task of tasks) {
-      if (task.status === 'waiting_generation_confirmation') {
+      if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') {
         if (task.lock) {
           task.lock = undefined;
           clearedLocks++;

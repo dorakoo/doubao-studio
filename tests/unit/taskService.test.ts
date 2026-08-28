@@ -771,6 +771,25 @@ describe('TaskService recoverInterruptedTasks', () => {
     expect(writeCount()).toBe(0);
   });
 
+  it('人工提交观察跨重启保持状态、清理底层锁并永久拒绝 retry', () => {
+    const item = activeTask('manual-observe', 'manual_submission_observing');
+    item.runtime!.stage = 'manual_submission_observing';
+    item.runtime!.manualObservation = {
+      startedAt: RECOVERY_STARTED_AT,
+      expiresAt: '2026-08-12T00:15:00.000Z',
+      source: 'stored_conversation',
+      outcome: 'observing',
+    };
+    const { service, stored } = recoveryFixture([item]);
+    expect(service.recoverInterruptedTasks()).toEqual({ success: true, data: { recoveredTasks: 0, clearedLocks: 1 } });
+    expect(stored()[0].status).toBe('manual_submission_observing');
+    expect(stored()[0].lock).toBeUndefined();
+    expect(service.retry('manual-observe')).toEqual({
+      success: false,
+      error: '任务存在已提交记录，请先核对平台结果；为避免重复扣费，禁止重新发送',
+    });
+  });
+
   it('非活动任务只清除遗留 lock，无 lock 时完全不变', () => {
     const withLock = base('t1', 'done');
     withLock.lock = { ownerId: 'old', acquiredAt: 'old', expiresAt: 'old' };
