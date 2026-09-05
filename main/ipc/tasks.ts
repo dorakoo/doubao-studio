@@ -77,6 +77,13 @@ const taskService = new TaskService({
   basename: (value) => require('path').basename(value),
 });
 
+/** 仅供同进程本机控制面只读使用；返回脱敏由控制面负责。 */
+export function listTasksForLocalControl(): Task[] {
+  const result = taskService.getTasks();
+  if (!result.success) throw new Error(result.error);
+  return result.data;
+}
+
 type CsvImportResponse = {
   success: boolean;
   tasks?: Task[];

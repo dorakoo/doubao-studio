@@ -57,7 +57,7 @@ interface TaskState {
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
   importCsv: (filePath?: string) => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
-  updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<void>;
+  updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<boolean>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<boolean>;
   retryTask: (taskId: string) => Promise<boolean>;
@@ -81,7 +81,7 @@ interface TaskState {
     accountId: string,
     message?: string,
     options?: {
-      status: 'paused' | 'waiting_verification' | 'waiting_generation_confirmation';
+      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation';
       code?: string;
       generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
     },
@@ -217,7 +217,11 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   updateTaskStatus: async (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => {
-    await window.electronAPI.tasks.updateStatus(taskId, status, result, outputs);
+    const persisted = await window.electronAPI.tasks.updateStatus(taskId, status, result, outputs);
+    if (!persisted.success) {
+      set({ error: persisted.error || '任务状态写入失败' });
+      return false;
+    }
     const tasks = get().tasks.map((t) =>
       t.id === taskId
         ? {
@@ -231,6 +235,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         : t
     );
     set({ tasks });
+    return true;
   },
 
   importCsv: async (filePath?: string) => {
@@ -418,6 +423,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
     if (get().accountBusy[accountId]) {
       console.log('[TaskStore] 账号', accountId, '忙碌，任务排队');
+      set({ error: '该账号正在执行其他任务' });
       return false;
     }
 
@@ -625,7 +631,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     accountId: string,
     pauseMessage = '用户已暂停',
     options?: {
-      status: 'paused' | 'waiting_verification' | 'waiting_generation_confirmation';
+      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation';
       code?: string;
       generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
     },

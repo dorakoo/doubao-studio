@@ -6,7 +6,7 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Source Version](https://img.shields.io/badge/source-2.3.0-6d5dfc)](CHANGELOG.md)
+[![Source Version](https://img.shields.io/badge/source-2.3.1-6d5dfc)](CHANGELOG.md)
 [![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
@@ -24,7 +24,7 @@
 
 | 渠道 | 当前状态 |
 | --- | --- |
-| `main` 源码 | `2.3.0` 开发线，包含 README 所列最新工作流改进 |
+| 当前候选源码 | `2.3.1` 维护线；本机控制面尚待合并、安装包和人工验收 |
 | GitHub Release | 以页面显示的 Latest Release 为准；安装包可能晚于 `main` |
 | 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
@@ -260,6 +260,14 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
   - `call` 是用户显式触发的唯一调用路径，每次调用追加一条脱敏审计记录（连接名/工具名/结果，不含参数值与环境变量）。
   - 客户端已与 Alice-agent 只读 MCP 服务端（`agent.health` / `agent.organizations_list` / `agent.billing_usage` / `agent.billing_invoices`）完成生产接线验证。
 - 边界纪律：CLI/MCP 相关源码零 `electron` import，可独立于桌面应用运行与测试。
+
+### 正式运行实例的本机控制面
+
+- 默认关闭；使用 `豆包工作室.exe --local-control` 显式开启，或附加 `--local-control-port=<端口>` 固定端口。
+- 只监听 `127.0.0.1`，每次启动生成短期 Bearer 令牌；发现信息与令牌分文件存放，退出即删除，令牌不进入日志。
+- Agent 通过项目 ID、批次 ID、任务 ID 调用 `start / pause / cancel / retry`，主进程和 Renderer 双重校验归属后复用正式调度链。
+- 响应不包含完整提示词、素材绝对路径、产物/会话 URL、Cookie、Token 或账号 Session，也不提供 DOM/CDP 和任意脚本执行。
+- 端点、发现文件和调用示例见 [`docs/LOCAL_CONTROL.md`](docs/LOCAL_CONTROL.md)。现有离线 CLI/MCP 后续可迁移为该控制面的客户端。
 
 ## 界面结构
 

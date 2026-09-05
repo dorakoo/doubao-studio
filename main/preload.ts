@@ -10,6 +10,24 @@ import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, 
 // ==================== 暴露 API ====================
 
 const electronAPI = {
+  control: {
+    onCommand: (handler: (command: {
+      commandId: string;
+      requestId: string;
+      action: 'start' | 'pause' | 'cancel' | 'retry';
+      projectId: string;
+      batchId: string;
+      taskId: string;
+    }) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, command: Parameters<typeof handler>[0]) => handler(command);
+      ipcRenderer.on('control:command', listener);
+      return () => ipcRenderer.removeListener('control:command', listener);
+    },
+    ready: (): void => ipcRenderer.send('control:ready'),
+    complete: (result: { commandId: string; ok: boolean; code: string; accepted?: boolean }): void => {
+      ipcRenderer.send('control:result', result);
+    },
+  },
   projects: {
     list: (): Promise<any[]> => ipcRenderer.invoke('projects:list'),
     add: (name: string, description?: string, color?: string): Promise<any> => ipcRenderer.invoke('projects:add', { name, description, color }),

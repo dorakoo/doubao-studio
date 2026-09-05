@@ -76,6 +76,25 @@ import type {
  * - src/types/electron.d.ts 通过 `import type { ElectronAPI }` 声明全局 Window
  */
 export interface ElectronAPI {
+  // ---- 本机受控自动化桥（不暴露网页、Cookie、Session 或任意脚本能力） ----
+  control: {
+    onCommand: (handler: (command: {
+      commandId: string;
+      requestId: string;
+      action: 'start' | 'pause' | 'cancel' | 'retry';
+      projectId: string;
+      batchId: string;
+      taskId: string;
+    }) => void) => () => void;
+    ready: () => void;
+    complete: (result: {
+      commandId: string;
+      ok: boolean;
+      code: string;
+      accepted?: boolean;
+    }) => void;
+  };
+
   // ---- 项目管理 ----
   projects: {
     list: () => Promise<Project[]>;
