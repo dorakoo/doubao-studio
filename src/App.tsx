@@ -16,6 +16,7 @@ import { useTaskStore } from './store/useTaskStore';
 import { useProjectStore } from './store/useProjectStore';
 import { clampSidebarWidth } from './utils/resizeMath';
 import { millisecondsUntilNextLocalMidnight } from './utils/dailyReset';
+import { handleControlCommand } from './control/handleControlCommand';
 import './styles/global.css';
 
 // ==================== 常量 ====================
@@ -76,6 +77,36 @@ const App: React.FC = () => {
     scheduleMidnightRefresh();
     return () => { if (timer) clearTimeout(timer); };
   }, [loadAccounts, loadProjects, loadTasks, refreshDailyQuota]);
+
+  // 本机控制面只通过稳定 ID 调用现有调度边界；不暴露 DOM/webview/页面会话。
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.control.onCommand(async (command) => {
+      const response = await handleControlCommand(command, {
+        readTasks: () => window.electronAPI.tasks.list(),
+        start: (taskId) => useTaskStore.getState().startAutomation(taskId),
+        retry: (taskId) => useTaskStore.getState().retryTask(taskId),
+        getLastError: () => useTaskStore.getState().error,
+        updateStatus: (taskId, status, result) => useTaskStore.getState().updateTaskStatus(taskId, status, result),
+        abortActive: (taskId, targetStatus) => window.dispatchEvent(new CustomEvent('cancel-task-automation', {
+          detail: { taskId, targetStatus },
+        })),
+      });
+      try {
+        await window.electronAPI.logs.append({
+          level: response.ok ? 'info' : 'warn',
+          scope: 'local_control',
+          message: `${command.action}:${response.code}:project=${command.projectId}:batch=${command.batchId}:request=${command.requestId}`,
+          taskId: command.taskId,
+        });
+      } catch {
+        // 审计不可用不得吞掉已执行命令的确定结果；调用方仍可按 taskId 回读。
+      }
+      window.electronAPI.control.complete(response);
+    });
+    window.electronAPI.control.ready();
+    return unsubscribe;
+  }, []);
+
 
   // ---- 面板折叠 ----
 

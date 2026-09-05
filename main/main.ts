@@ -10,14 +10,19 @@
  */
 
 import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
+import { randomBytes } from 'crypto';
+import * as fs from 'fs';
 import * as path from 'path';
 import { registerAccountIPC } from './ipc/accounts';
-import { registerTaskIPC } from './ipc/tasks';
-import { registerProjectIPC } from './ipc/projects';
+import { listTasksForLocalControl, registerTaskIPC } from './ipc/tasks';
+import { loadProjects, registerProjectIPC } from './ipc/projects';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
 import { replaceIpcHandlers } from './ipc/lifecycle';
 import { buildDevelopmentLaunchHelpUrl, resolveRendererStartupTarget } from './utils/rendererStartup';
+import { ControlCommandBroker } from './control/ControlCommandBroker';
+import { LocalControlServer } from './control/LocalControlServer';
+import type { ControlCommandResult } from './control/controlTypes';
 
 // ==================== 常量 ====================
 
@@ -33,6 +38,80 @@ let mainWindow: BrowserWindow | null = null;
 /** 应用是否正在退出，防止退出过程中创建新窗口或重新调度任务 */
 let isQuitting = false;
 let unregisterIPC: (() => void) | null = null;
+let localControlServer: LocalControlServer | null = null;
+let controlBroker: ControlCommandBroker | null = null;
+let localControlFiles: string[] = [];
+
+function resolveLocalControlPort(argv: string[]): number | null {
+  const enabled = argv.includes('--local-control') || argv.some((arg) => arg.startsWith('--local-control-port='));
+  if (!enabled) return null;
+  const portArg = argv.find((arg) => arg.startsWith('--local-control-port='));
+  if (!portArg) return 0;
+  const value = Number(portArg.slice('--local-control-port='.length));
+  if (!Number.isInteger(value) || value < 0 || value > 65535) throw new Error('本机控制端口无效');
+  return value;
+}
+
+function writePrivateJson(filePath: string, value: unknown): void {
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(tempPath, 0o600);
+  fs.renameSync(tempPath, filePath);
+  fs.chmodSync(filePath, 0o600);
+}
+
+async function startLocalControl(): Promise<void> {
+  const requestedPort = resolveLocalControlPort(process.argv.slice(1));
+  if (requestedPort === null) return;
+  const token = randomBytes(32).toString('base64url');
+  const startedAtMs = Date.now();
+  const expiresAtMs = startedAtMs + 8 * 60 * 60 * 1000;
+  const controlDir = path.join(app.getPath('userData'), 'DoubaoStudioControl');
+  fs.mkdirSync(controlDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(controlDir, 0o700);
+  const tokenPath = path.join(controlDir, 'control-token');
+  const infoPath = path.join(controlDir, 'control-info.json');
+  // 单实例锁已取得，可安全清理上次崩溃遗留的两个固定发现文件。
+  for (const stalePath of [infoPath, tokenPath]) {
+    try { fs.unlinkSync(stalePath); } catch {}
+  }
+  const broker = new ControlCommandBroker(() => mainWindow?.webContents || null);
+  controlBroker = broker;
+  localControlServer = new LocalControlServer({
+    token,
+    expiresAtMs,
+    listProjects: loadProjects,
+    listTasks: listTasksForLocalControl,
+    isRendererReady: () => broker.isReady(),
+    dispatch: (command) => broker.dispatch(command),
+  });
+  const port = await localControlServer.start(requestedPort);
+  fs.writeFileSync(tokenPath, token, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(tokenPath, 0o600);
+  writePrivateJson(infoPath, {
+    protocolVersion: 'v1',
+    address: '127.0.0.1',
+    port,
+    pid: process.pid,
+    tokenFile: 'control-token',
+    startedAt: new Date(startedAtMs).toISOString(),
+    expiresAt: new Date(expiresAtMs).toISOString(),
+  });
+  localControlFiles = [infoPath, tokenPath];
+  console.log(`[Control] 本机受控接口已启动 127.0.0.1:${port}（认证令牌未写入日志）`);
+}
+
+async function stopLocalControl(): Promise<void> {
+  controlBroker?.close();
+  controlBroker = null;
+  const server = localControlServer;
+  localControlServer = null;
+  if (server) await server.stop().catch(() => undefined);
+  for (const filePath of localControlFiles) {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+  localControlFiles = [];
+}
 
 // ==================== 窗口创建 ====================
 
@@ -131,11 +210,22 @@ function registerIPC(): void {
   ipcMain.on('window:toggleMaximize', toggleMaximizeWindow);
   ipcMain.on('window:close', closeWindow);
 
+  const completeControlCommand = (event: Electron.IpcMainEvent, result: ControlCommandResult): void => {
+    controlBroker?.complete(event.sender, result);
+  };
+  const markControlReady = (event: Electron.IpcMainEvent): void => {
+    controlBroker?.markReady(event.sender);
+  };
+  ipcMain.on('control:result', completeControlCommand);
+  ipcMain.on('control:ready', markControlReady);
+
   unregisterIPC = () => {
     for (const dispose of disposers.reverse()) dispose();
     ipcMain.removeListener('window:minimize', minimizeWindow);
     ipcMain.removeListener('window:toggleMaximize', toggleMaximizeWindow);
     ipcMain.removeListener('window:close', closeWindow);
+    ipcMain.removeListener('control:result', completeControlCommand);
+    ipcMain.removeListener('control:ready', markControlReady);
     unregisterIPC = null;
   };
 
@@ -196,12 +286,15 @@ if (!gotLock) {
 
   // ==================== 应用生命周期 ====================
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     // 注册 IPC
     registerIPC();
 
     // 创建主窗口
     mainWindow = createMainWindow();
+    mainWindow.webContents.on('did-start-loading', () => controlBroker?.markUnavailable());
+    mainWindow.webContents.on('render-process-gone', () => controlBroker?.markUnavailable());
+    await startLocalControl();
 
     // macOS: 点击 Dock 图标时重新创建窗口
     // 退出过程中不创建新窗口
@@ -228,6 +321,7 @@ if (!gotLock) {
   app.on('before-quit', () => {
     isQuitting = true;
     unregisterIPC?.();
+    void stopLocalControl();
     mainWindow = null;
   });
 }

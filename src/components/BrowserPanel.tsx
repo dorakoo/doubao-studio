@@ -149,6 +149,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const runningRef = useRef<Set<string>>(new Set());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const pendingRestartTasksRef = useRef<Map<string, TaskUpdateInput>>(new Map());
+  const pendingCancellationStatusRef = useRef<Map<string, 'paused' | 'cancelled'>>(new Map());
   const manualVideoUsageRef = useRef<Set<string>>(new Set());
   const submissionReconcileRef = useRef<Set<string>>(new Set());
   const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
@@ -883,7 +884,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   // ---- 立即终止自动化等待；可携带新提示词，在终止后重新排队 ----
   useEffect(() => {
     const handleCancelAutomation = (event: Event) => {
-      const detail = (event as CustomEvent<{ taskId: string; restartTask?: TaskUpdateInput }>).detail;
+      const detail = (event as CustomEvent<{
+        taskId: string;
+        restartTask?: TaskUpdateInput;
+        targetStatus?: 'paused' | 'cancelled';
+      }>).detail;
       if (!detail?.taskId) return;
       if (detail.restartTask?.prompt?.trim()) {
         pendingRestartTasksRef.current.set(detail.taskId, {
@@ -891,6 +896,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           prompt: detail.restartTask.prompt.trim(),
         });
       }
+      if (detail.targetStatus) pendingCancellationStatusRef.current.set(detail.taskId, detail.targetStatus);
       const controller = abortControllersRef.current.get(detail.taskId);
       if (automationEngine.abort(detail.taskId) || controller) {
         controller?.abort();
@@ -1604,10 +1610,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       console.error(`[Automation:${accountId}] ${cancelled || safetyPaused || availabilityPaused || confirmationPaused ? '已暂停' : '失败'}:`, errorMessage);
       if (cancelled || safetyPaused || availabilityPaused || confirmationPaused) {
+        const requestedCancellationStatus = pendingCancellationStatusRef.current.get(taskId);
         await pauseAutomation(
           taskId,
           accountId,
-          cancelled ? '用户已暂停，可随时重新执行' : errorMessage,
+          cancelled && requestedCancellationStatus === 'cancelled'
+            ? '任务已由本机控制面取消'
+            : cancelled ? '用户已暂停，可随时重新执行' : errorMessage,
           confirmationPaused
             ? {
                 status: 'waiting_generation_confirmation',
@@ -1624,7 +1633,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             ? { status: 'waiting_verification', code: err.code }
             : safetyPaused
               ? { status: 'paused', code: 'submission_uncertain' }
-              : undefined,
+              : cancelled && requestedCancellationStatus === 'cancelled'
+                ? { status: 'cancelled', code: 'cancelled' }
+                : undefined,
         );
       } else {
         setAccountAutomationState(accountId, 'failed', errorMessage, 'failed');
@@ -1658,6 +1669,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       notification.destroy(materialAuthorizationNotificationKey);
       abortControllersRef.current.delete(taskId);
       pendingRestartTasksRef.current.delete(taskId);
+      pendingCancellationStatusRef.current.delete(taskId);
       runningRef.current.delete(accountId);
       await automationEngine.release(taskId);
       setTimeout(() => useTaskStore.getState().processQueue(), 0);

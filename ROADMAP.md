@@ -41,7 +41,7 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 | 2.0.x 稳定性基线 | 已完成 | IPC/生命周期、任务锁、恢复、统一验证和核心回归 | 继续以回归维护为主 |
 | 2.1 Core 分层 | 部分完成 | 共享 Contracts、TaskRepository、TaskEventStream、TaskService、任务 IPC 薄适配、CSV/运行时/恢复/查询/产物校验收敛 | Account/Scheduler/Artifact 等领域仍需逐包收敛；JSON 仍是主存储 |
 | 2.2 Automation SDK 与适配器 | 部分完成 | 页面自检、dry-run、规则包、上传/控件稳定门禁、结构化错误与真实页面能力回读 | `doubaoBridge.ts` 仍偏大；正式 ProviderAdapter 拆分和更多页面 Fixture 未完成 |
-| 2.3 Agent 接入层 | 只读边界已交付 | Capability Schema v1、只读 CLI、只读 MCP Server、MCP Client、受控 `import-csv` | 无本地 HTTP 守护进程；无写入型 MCP 生成工具；事件订阅和完整 Agent 生成闭环未开放 |
+| 2.3 Agent 接入层 | 本机控制候选开发中 | Capability Schema v1、只读 CLI/MCP、MCP Client、受控 `import-csv`；2.3.1 候选新增仅本机运行实例控制面 | 控制面尚未合并/部署/人工验收；无写入型 MCP 生成工具；事件订阅和完整 Agent 生成闭环未开放 |
 | 2.4 工作流与融合 | 未开始 | CSV 依赖批次提供基础 DAG 语义 | 正式 Workflow Manifest、Webhook、连接器和插件权限模型 |
 | 3.0 平台化 | 未开始 | 无 | SQLite、Controller/Worker、团队权限与远程 API |
 
@@ -168,8 +168,8 @@ Agent 接入前必须稳定以下对象，建议使用 TypeScript 定义并生�
 2. 拆分 `doubaoBridge.ts`，先冻结 ProviderAdapter 契约与页面 Fixture，再迁移真实 DOM 行为。
 3. 建立可查询的账号可用性与 `action_required` 公共投影，但保持平台写操作 fail-closed。
 4. 为 CSV 导入补可视化字段映射和导入前检查；当前按钮、拖放与受控 CLI 继续共用 `TaskService.importCsv()`。
-5. 评估本地 API/事件订阅的认证、单实例和审计模型；未通过安全评审前不开放写入型 MCP 或公网监听。
-6. 完成 2.3.0 源码线的安装包人工验收、版本同步和 Release 收口；发布必须单独授权。
+5. 收口 2.3.1 本机控制面候选的 PR/CI、安装包和隔离人工验收；任何局域网、公网或通用 DOM/CDP 能力继续禁止。
+6. 后续独立包再补批次安全清理、CSV 幂等导入和控制客户端；不得与本控制面核心混包。
 7. 2.4 工作流、连接器和远程 Worker 继续延期，避免在 Core/Adapter 未稳定前扩大分布式面。
 
 ## 暂缓事项
