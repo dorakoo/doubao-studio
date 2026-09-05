@@ -68,6 +68,7 @@ import type { GenerationConfirmationEvidence } from '../utils/generationConfirma
 import { VideoControlReadinessError } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
+import { getWebviewHydrationAccountIds } from '../utils/webviewHydration';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -596,10 +597,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
 
-    // 为新增账号创建 webview
-    accounts.forEach((account) => {
-      createWebview(account, container);
-    });
+    // 启动时只挂载当前账号，避免十几个账号同时访问平台后留下黑屏。
+    // 已经进入执行态的后台账号必须同时挂载；其余账号在用户切换时按需创建。
+    const hydrationIds = getWebviewHydrationAccountIds(
+      accounts,
+      activeAccount?.id || null,
+      executingTasks,
+    );
+    for (const accountId of hydrationIds) {
+      const account = accounts.find((item) => item.id === accountId);
+      if (account) createWebview(account, container);
+    }
 
     // 确保当前活跃账号的加载状态同步
     if (activeAccount) {
@@ -610,7 +618,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     } else {
       console.log(`[BrowserPanel] webview 池同步完成 (当前 ${registryRef.current.size} 个), 无活跃账号`);
     }
-  }, [accountsKey, refreshKey, activeAccount?.id]);
+  }, [accountsKey, refreshKey, activeAccount?.id, executingTasks]);
 
   // ---- 创建单个 webview ----
   const createWebview = (account: Account, container: HTMLDivElement) => {
@@ -634,6 +642,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     let availabilityTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilitySettleTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilityFinalTimer: ReturnType<typeof setTimeout> | undefined;
+    let activeLoadRecoveryAttempts = 0;
 
     const runAvailabilityCheck = async (source: AccountAvailabilitySource): Promise<void> => {
       const dismissed = await dismissKnownDesktopDownloadPromotion(webview);
@@ -697,6 +706,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     scope.listen(webview, 'did-navigate', () => { markLoaded('did-navigate'); scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'did-navigate-in-page', () => { markLoaded('did-navigate-in-page'); scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'dom-ready', () => {
+      activeLoadRecoveryAttempts = 0;
       markLoaded('dom-ready');
       scheduleAvailabilityCheck(account.health?.availability ? 'navigation' : 'startup');
     });
@@ -708,6 +718,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (accId === cur) {
         setActiveLoading(false);
         setLoadText('加载失败');
+        if (activeLoadRecoveryAttempts < 1) {
+          activeLoadRecoveryAttempts += 1;
+          const recoveryTimer = setTimeout(() => {
+            if (!scope.active || registryRef.current.get(accId) !== webview) return;
+            if (useAccountStore.getState().selectedAccountId !== accId) return;
+            loadingMapRef.current.set(accId, true);
+            setActiveLoading(true);
+            setLoadText('正在重新加载账号页面...');
+            webview.reload();
+          }, 1200);
+          scope.trackTimer(recoveryTimer);
+        }
       }
       scheduleAvailabilityCheck('navigation', 0);
     });
