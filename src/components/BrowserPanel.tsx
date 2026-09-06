@@ -68,7 +68,13 @@ import type { GenerationConfirmationEvidence } from '../utils/generationConfirma
 import { VideoControlReadinessError } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
-import { applyWebviewActivationStyle, getWebviewHydrationAccountIds } from '../utils/webviewHydration';
+import {
+  applyWebviewActivationStyle,
+  forceWebviewLayoutRepaint,
+  getSupersededLoadingAccountIds,
+  getWebviewHydrationAccountIds,
+  isWebviewDocumentReady,
+} from '../utils/webviewHydration';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -156,6 +162,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   const submissionReconcileUsageRef = useRef<Set<string>>(new Set());
   const availabilityRequestHandledRef = useRef<Record<string, number>>({});
   const availabilityProbeSequenceRef = useRef<Record<string, number>>({});
+  /** 启动期后台巡检一次只保留一个临时 Webview，完成后立即释放。 */
+  const backgroundProbeRef = useRef<Set<string>>(new Set());
+  const backgroundAuditedRef = useRef<Set<string>>(new Set());
+  /** 当前预热完成后直接唤醒下一账号；定时轮询仅作为 Electron 漏事件兜底。 */
+  const advanceBackgroundWarmupRef = useRef<() => void>(() => undefined);
   /** 每个账号的 webview 监听器与定时器作用域。 */
   const resourceScopesRef = useRef<Map<string, WebviewResourceScope>>(new Map());
 
@@ -597,6 +608,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
     });
 
+    // 用户快速切换账号时，只保留最后选择的前台加载。没有执行任务的旧加载页
+    // 立即释放，防止多个 Chromium 导航同时堆积并拖死 NetworkService。
+    const loadingIds = new Set(
+      [...loadingMapRef.current.entries()]
+        .filter(([, loading]) => loading)
+        .map(([accountId]) => accountId),
+    );
+    const supersededIds = getSupersededLoadingAccountIds(
+      [...registryRef.current.keys()],
+      loadingIds,
+      activeAccount?.id || null,
+      executingTasks,
+    );
+    for (const accountId of supersededIds) {
+      backgroundProbeRef.current.delete(accountId);
+      disposeAccountWebview(accountId);
+    }
+
     // 启动时只挂载当前账号，避免十几个账号同时访问平台后留下黑屏。
     // 已经进入执行态的后台账号必须同时挂载；其余账号在用户切换时按需创建。
     const hydrationIds = getWebviewHydrationAccountIds(
@@ -630,17 +659,32 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     loadingMapRef.current.set(accId, true);
 
     const webview = document.createElement('webview') as HTMLWebViewElement;
-    webview.setAttribute('src', getAccountHome(account));
+    // partition 必须在首次导航前固定；先设置隔离分区，再设置地址。
     webview.setAttribute('partition', getAccountSessionPartition(account));
+    webview.setAttribute('src', getAccountHome(account));
     webview.setAttribute('allowpopups', 'true');
-    webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;visibility:visible;opacity:0;pointer-events:none;z-index:0;';
+    webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;visibility:visible;';
+    // 首次创建发生在 hydration effect 内；不要等待另一个 effect 才激活当前页，
+    // 否则 guest 可能以透明状态启动并被 Chromium 延迟合成或加载。
+    applyWebviewActivationStyle(
+      webview.style,
+      useAccountStore.getState().selectedAccountId === accId,
+    );
 
     let pollInterval: ReturnType<typeof setInterval> | undefined;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     let availabilityTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilitySettleTimer: ReturnType<typeof setTimeout> | undefined;
     let availabilityFinalTimer: ReturnType<typeof setTimeout> | undefined;
+    let warmupReleaseTimer: ReturnType<typeof setTimeout> | undefined;
     let activeLoadRecoveryAttempts = 0;
+
+    const finishBackgroundProbe = (): void => {
+      if (!backgroundProbeRef.current.has(accId)) return;
+      backgroundProbeRef.current.delete(accId);
+      backgroundAuditedRef.current.add(accId);
+      queueMicrotask(() => advanceBackgroundWarmupRef.current());
+    };
 
     const runAvailabilityCheck = async (source: AccountAvailabilitySource): Promise<void> => {
       const dismissed = await dismissKnownDesktopDownloadPromotion(webview);
@@ -669,7 +713,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       // 多账号同时打开时，隐藏 webview 的账号壳可能需要更长时间才稳定。
       availabilityFinalTimer = setTimeout(() => {
         if (!scope.active || registryRef.current.get(accId) !== webview) return;
-        void runAvailabilityCheck(source);
+        void runAvailabilityCheck(source).finally(finishBackgroundProbe);
       }, Math.max(15_000, delayMs + 12_000));
       scope.trackTimer(availabilityFinalTimer);
     };
@@ -684,13 +728,27 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       console.log(`[BrowserPanel] markLoaded: ${accId} via ${evt}`);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
-        setActiveLoading(false);
-        setLoadText('');
+        setLoadText('正在显示账号页面...');
+        void forceWebviewLayoutRepaint(webview).finally(() => {
+          if (!scope.active || useAccountStore.getState().selectedAccountId !== accId) return;
+          if (loadingMapRef.current.get(accId)) return;
+          setActiveLoading(false);
+          setLoadText('');
+        });
+      }
+      if (backgroundProbeRef.current.has(accId)) {
+        scope.clearTimer(warmupReleaseTimer);
+        // 只保留一个很短的稳定窗口，随后由完成事件直接串行启动下一账号。
+        // 可用性复检继续在后台执行，不再阻塞整个账号池的预热。
+        warmupReleaseTimer = setTimeout(finishBackgroundProbe, 250);
+        scope.trackTimer(warmupReleaseTimer);
       }
     };
 
     scope.listen(webview, 'did-start-loading', () => {
       if (!scope.active) return;
+      // 稳定窗口内再次导航说明页面尚未真正就绪，禁止提前并发下一账号。
+      scope.clearTimer(warmupReleaseTimer);
       loadingMapRef.current.set(accId, true);
       const cur = useAccountStore.getState().selectedAccountId;
       if (accId === cur) {
@@ -709,8 +767,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       markLoaded('dom-ready');
       scheduleAvailabilityCheck(account.health?.availability ? 'navigation' : 'startup');
     });
-    scope.listen(webview, 'did-fail-load', () => {
+    scope.listen(webview, 'did-fail-load', (rawEvent) => {
       if (!scope.active) return;
+      const event = rawEvent as Event & { errorCode?: number; isMainFrame?: boolean };
+      // Chromium 导航替换会产生 ERR_ABORTED；子资源失败也不等于主页面不可用。
+      if (event.errorCode === -3 || event.isMainFrame === false) return;
       loadingMapRef.current.set(accId, false);
       scope.clearTimers();
       const cur = useAccountStore.getState().selectedAccountId;
@@ -730,7 +791,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           scope.trackTimer(recoveryTimer);
         }
       }
-      scheduleAvailabilityCheck('navigation', 0);
+      void useAccountStore.getState().setAccountAvailability(accId, {
+        state: 'unavailable',
+        reason: 'network_error',
+        message: '页面加载失败，请检查网络后重新检测',
+        checkedAt: new Date().toISOString(),
+        source: 'navigation',
+      }).finally(finishBackgroundProbe);
     });
 
     container.appendChild(webview);
@@ -752,12 +819,23 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         const url = wv.getURL?.() || '';
         const isLoaded = loadingMapRef.current.get(accId);
         if (!isLoaded || !url.startsWith('http') || !url.includes(getAccountHost(account))) return;
-        const hasDocument = await wv.executeJavaScript(
-          'Boolean(document.body && document.body.childElementCount > 0 && document.readyState !== "loading")',
-        );
+        const title = (wv as HTMLWebViewElement & { getTitle?: () => string }).getTitle?.() || '';
+        if (isWebviewDocumentReady(url, title, getAccountHost(account))) {
+          console.log(`[BrowserPanel] 轮询检测到 webview 标题已就绪: ${accId}`);
+          markLoaded('poll-title');
+          scheduleAvailabilityCheck('navigation');
+          return;
+        }
+        const hasDocument = await Promise.race([
+          wv.executeJavaScript(
+            'Boolean(document.body && document.body.childElementCount > 0 && document.readyState !== "loading")',
+          ),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1200)),
+        ]);
         if (hasDocument) {
           console.log(`[BrowserPanel] 轮询检测到 webview 文档已就绪: ${accId}`);
           markLoaded('poll-document');
+          scheduleAvailabilityCheck('navigation');
         }
       } catch {
         // guest 尚未允许执行脚本时继续等待正式加载事件。
@@ -783,6 +861,42 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     }, 60000);
     scope.trackTimer(timeoutId);
   };
+
+  // 启动后以单通道顺序巡检其余账号。每次只新增一个后台 Webview，完成
+  // 稳定化检测后保持常驻；兼顾快速切换和避免 13 个页面同时抢占网络。
+  useEffect(() => {
+    let disposed = false;
+    const startNextWarmup = (): void => {
+      if (disposed) return;
+      if (backgroundProbeRef.current.size > 0) return;
+      if ([...loadingMapRef.current.values()].some(Boolean)) return;
+      if (Object.values(useTaskStore.getState().accountBusy).some(Boolean)) return;
+      const selectedId = useAccountStore.getState().selectedAccountId;
+      const candidate = useAccountStore.getState().accounts.find((account) =>
+        account.id !== selectedId &&
+        !registryRef.current.has(account.id) &&
+        !backgroundAuditedRef.current.has(account.id) &&
+        !useTaskStore.getState().executingTasks[account.id],
+      );
+      const container = poolRef.current;
+      if (!candidate || !container) return;
+      backgroundProbeRef.current.add(candidate.id);
+      createWebview(candidate, container);
+    };
+
+    advanceBackgroundWarmupRef.current = startNextWarmup;
+    const initialTimer = setTimeout(startNextWarmup, 0);
+    // Electron 偶发漏发 guest load 事件时仍能继续，不把正常路径降级成轮询等待。
+    const fallbackInterval = setInterval(startNextWarmup, 1000);
+    return () => {
+      disposed = true;
+      clearTimeout(initialTimer);
+      clearInterval(fallbackInterval);
+      if (advanceBackgroundWarmupRef.current === startNextWarmup) {
+        advanceBackgroundWarmupRef.current = () => undefined;
+      }
+    };
+  }, [accountsKey]);
 
   // 账号菜单中的“立即检测”请求由 BrowserPanel 使用该账号的隔离 webview 执行。
   useEffect(() => {
@@ -818,14 +932,23 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     if (!activeAccount) return;
     registryRef.current.forEach((webview, accountId) => {
       const isActive = accountId === activeAccount.id;
+      if (isActive) backgroundProbeRef.current.delete(accountId);
       applyWebviewActivationStyle(webview.style, isActive);
       if (isActive) {
         const isLoading = loadingMapRef.current.get(accountId);
         setActiveLoading(!!isLoading);
-        if (!isLoading) setLoadText('');
+        if (!isLoading) {
+          setActiveLoading(true);
+          setLoadText('正在显示账号页面...');
+          void forceWebviewLayoutRepaint(webview).finally(() => {
+            if (useAccountStore.getState().selectedAccountId !== accountId) return;
+            setActiveLoading(false);
+            setLoadText('');
+          });
+        }
       }
     });
-  }, [activeAccount?.id]);
+  }, [activeAccount?.id, webviewEpoch]);
 
   /** 从当前账号的可见对话手动提取视频；实验通道只在显式开关开启时参与。 */
   const handleExtractCurrentVideo = async (): Promise<void> => {

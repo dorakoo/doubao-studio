@@ -38,6 +38,20 @@ const PAGE_ERROR_PHRASES = [
   '当前功能受限', 'something went wrong', 'service unavailable',
 ];
 
+/**
+ * 账号列表的本次启动预热优先级：已确认可用最靠前，已完成检测但需处理居中，
+ * 尚未确认或仍在预热的账号靠后。调用方应在同一等级内保留用户原顺序。
+ */
+export function getAccountWarmupSortRank(
+  availability: Pick<AccountAvailability, 'state'> | undefined,
+): number {
+  if (availability?.state === 'ready') return 0;
+  if (availability && ['action_required', 'login_required', 'unavailable'].includes(availability.state)) {
+    return 1;
+  }
+  return 2;
+}
+
 function includesAny(text: string, phrases: readonly string[]): boolean {
   const normalized = text.toLowerCase();
   return phrases.some((phrase) => normalized.includes(phrase.toLowerCase()));
@@ -202,7 +216,9 @@ export async function probeAccountAvailability(
     ]) as Omit<AccountAvailabilityEvidence, 'platform' | 'url'>;
     return classifyAccountAvailability({ ...page, platform, url }, source, checkedAt);
   } catch {
-    return classifyAccountAvailability({ platform, url, loadError: true }, source, checkedAt);
+    // executeJavaScript 暂不可用不等于网络失败；只有 Webview 的 did-fail-load
+    // 事件能提供权威加载失败证据。正确平台 URL 下继续保持 unknown 并复检。
+    return classifyAccountAvailability({ platform, url, documentReady: false }, source, checkedAt);
   }
 }
 
@@ -212,13 +228,13 @@ export function availabilityBlocksAutomation(availability: AccountAvailability |
 
 /**
  * 持久化的 ready 只能证明上一次运行时可用。每次打开软件必须先改为待复检，
- * 避免在 webview 尚未稳定时把旧结果用于自动指派。已明确的阻断状态保留，直到新探测推翻。
+ * 避免在 webview 尚未稳定时把任何旧结果用于自动指派。网络错误、登录状态与
+ * 验证弹窗都可能在应用关闭期间被用户修复，因此必须由本次运行的真实页面重新判定。
  */
 export function requireStartupAvailabilityRecheck(
   availability: AccountAvailability | undefined,
   checkedAt: string = new Date().toISOString(),
 ): AccountAvailability {
-  if (availability && availability.state !== 'ready' && availability.state !== 'unknown') return availability;
   return result(
     'unknown',
     'startup_recheck_required',
