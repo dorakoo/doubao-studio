@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   availabilityBlocksAutomation,
   classifyAccountAvailability,
+  getAccountWarmupSortRank,
   probeAccountAvailability,
   requireStartupAvailabilityRecheck,
 } from '../../src/utils/accountAvailability';
@@ -9,6 +10,15 @@ import {
 const CHECKED_AT = '2026-08-24T10:00:00.000Z';
 
 describe('账号自动化可用性检测', () => {
+  it('账号列表按已可用、已检测需处理、尚未预热的顺序排列', () => {
+    expect(getAccountWarmupSortRank({ state: 'ready' })).toBe(0);
+    for (const state of ['action_required', 'login_required', 'unavailable'] as const) {
+      expect(getAccountWarmupSortRank({ state })).toBe(1);
+    }
+    expect(getAccountWarmupSortRank({ state: 'unknown' })).toBe(2);
+    expect(getAccountWarmupSortRank(undefined)).toBe(2);
+  });
+
   it.each([
     ['doubao', 'https://www.doubao.com/chat/', true, true],
     ['dola', 'https://www.dola.com/chat', true, false],
@@ -116,12 +126,12 @@ describe('账号自动化可用性检测', () => {
     expect(executeJavaScript).toHaveBeenCalledTimes(1);
   });
 
-  it('探针异常或超时 fail-closed 为 network_error', async () => {
+  it('脚本探针异常或超时保持 unknown，不能伪报网络失败', async () => {
     const result = await probeAccountAvailability({
       getURL: () => 'https://www.doubao.com/chat/',
       executeJavaScript: async () => new Promise(() => undefined),
     }, 'doubao', 'pre_task', 5);
-    expect(result).toMatchObject({ state: 'unavailable', reason: 'network_error' });
+    expect(result).toMatchObject({ state: 'unknown', reason: 'page_loading' });
   });
 
   it('只有 ready 不阻断自动化', () => {
@@ -132,7 +142,7 @@ describe('账号自动化可用性检测', () => {
     }
   });
 
-  it('软件重新打开时必须使旧 ready 失效，已明确阻断状态则保留', () => {
+  it('软件重新打开时所有旧结论都必须失效，等待当前隔离页面重新探测', () => {
     const ready = requireStartupAvailabilityRecheck({
       state: 'ready', reason: 'ready', message: '可用', checkedAt: '2026-08-23T10:00:00.000Z', source: 'manual',
     }, CHECKED_AT);
@@ -140,9 +150,12 @@ describe('账号自动化可用性检测', () => {
       state: 'unknown', reason: 'startup_recheck_required', source: 'startup', checkedAt: CHECKED_AT,
     });
 
-    const loginRequired = {
-      state: 'login_required', reason: 'login_required', message: '需要登录', checkedAt: CHECKED_AT, source: 'manual',
-    } as const;
-    expect(requireStartupAvailabilityRecheck(loginRequired, CHECKED_AT)).toBe(loginRequired);
+    for (const state of ['login_required', 'action_required', 'unavailable', 'unknown'] as const) {
+      expect(requireStartupAvailabilityRecheck({
+        state, reason: 'stale', message: '旧结论', checkedAt: '2026-08-23T10:00:00.000Z', source: 'manual',
+      }, CHECKED_AT)).toMatchObject({
+        state: 'unknown', reason: 'startup_recheck_required', source: 'startup', checkedAt: CHECKED_AT,
+      });
+    }
   });
 });

@@ -29,6 +29,7 @@ import { AUTO_STATE_DISPLAY } from '../types';
 import type { Account, AccountPlatform } from '../types';
 import type { AutomationState } from '../store/useTaskStore';
 import { canSelectAccount, findInteractiveAccountId } from '../utils/interactiveAccount';
+import { getAccountWarmupSortRank } from '../utils/accountAvailability';
 
 export const AccountList: React.FC = () => {
   const {
@@ -146,15 +147,20 @@ export const AccountList: React.FC = () => {
   );
 
   // ---- 排序逻辑 ----
-  /** 搜索过滤 + 置顶优先 → 空闲靠前 → 忙碌靠后 */
+  /** 搜索过滤 + 本次预热结果优先 → 既有业务优先级；同级保持用户原顺序。 */
   const sortedAccounts = useMemo(() => {
     let filtered = accounts;
     if (searchText.trim()) {
       const kw = searchText.trim().toLowerCase();
       filtered = accounts.filter(a => a.name.toLowerCase().includes(kw));
     }
+    const originalOrder = new Map(filtered.map((account, index) => [account.id, index]));
     return [...filtered].sort((a, b) => {
-      // 1. 不健康或冷却中的账号沉底
+      // 1. 当前启动已确认可用的账号最靠前；待确认/仍预热的账号最后。
+      const warmupRank = getAccountWarmupSortRank(a.health?.availability) -
+        getAccountWarmupSortRank(b.health?.availability);
+      if (warmupRank !== 0) return warmupRank;
+      // 2. 同一预热等级内，不健康或冷却中的账号沉底
       const now = Date.now();
       const aUnavailable = ['action_required', 'login_required', 'unavailable'].includes(a.health?.availability?.state || '') ||
         a.health?.loginState === 'expired' || !!a.health?.verificationRequired ||
@@ -163,22 +169,24 @@ export const AccountList: React.FC = () => {
         b.health?.loginState === 'expired' || !!b.health?.verificationRequired ||
         (!!b.health?.cooldownUntil && new Date(b.health.cooldownUntil).getTime() > now);
       if (aUnavailable !== bUnavailable) return aUnavailable ? 1 : -1;
-      // 2. Seedance 今日额度用尽的账号统一沉底
+      // 3. Seedance 今日额度用尽的账号统一沉底
       const aExhausted = !!a.seedanceQuota?.exhausted;
       const bExhausted = !!b.seedanceQuota?.exhausted;
       if (aExhausted !== bExhausted) return aExhausted ? 1 : -1;
-      // 3. 置顶优先
+      // 4. 置顶优先
       if (a.pinned !== b.pinned) {
         return a.pinned ? -1 : 1;
       }
-      // 4. 空闲 vs 忙碌
+      // 5. 空闲 vs 忙碌
       const aBusy = accountBusy[a.id] || false;
       const bBusy = accountBusy[b.id] || false;
       if (aBusy !== bBusy) {
         return aBusy ? 1 : -1;
       }
-      // 5. 连续失败少的账号优先
-      return (a.health?.consecutiveFailures || 0) - (b.health?.consecutiveFailures || 0);
+      // 6. 连续失败少的账号优先；完全同级时显式维持用户原顺序。
+      const failureRank = (a.health?.consecutiveFailures || 0) - (b.health?.consecutiveFailures || 0);
+      if (failureRank !== 0) return failureRank;
+      return (originalOrder.get(a.id) || 0) - (originalOrder.get(b.id) || 0);
     });
   }, [accounts, accountBusy, searchText]);
 

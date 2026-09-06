@@ -23,6 +23,15 @@ import { buildDevelopmentLaunchHelpUrl, resolveRendererStartupTarget } from './u
 import { ControlCommandBroker } from './control/ControlCommandBroker';
 import { LocalControlServer } from './control/LocalControlServer';
 import type { ControlCommandResult } from './control/controlTypes';
+import { resolveLocalCdpConfig } from './utils/localCdp';
+import { resolveLoopbackProxy } from './utils/localProxy';
+import {
+  archiveRegenerableCacheDirectories,
+  getRecoverablePartitions,
+  recoverWebviewNetworkCaches,
+  WEBVIEW_NETWORK_RECOVERY_VERSION,
+} from './utils/webviewNetworkRecovery';
+import { getDataDir, readJSON } from './utils/store';
 
 // ==================== 常量 ====================
 
@@ -31,6 +40,20 @@ const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 
 /** 豆包网页地址 */
 const DOUBAO_URL = 'https://www.doubao.com';
+
+// 必须在 app ready 前设置 Chromium 开关。默认关闭；地址固定为 IPv4 loopback，
+// 不接受远端地址参数。该入口仅用于短时人工验收，用后随应用进程退出。
+const localCdp = resolveLocalCdpConfig(process.argv.slice(1));
+if (localCdp.enabled) {
+  app.commandLine.appendSwitch('remote-debugging-address', localCdp.address);
+  app.commandLine.appendSwitch('remote-debugging-port', String(localCdp.port));
+}
+
+// Windows 上 Chromium 未必继承 shell 代理。仅自动采用无凭据的 loopback
+// 代理；若用户显式给出 Chromium 参数，则不覆盖。
+const hasExplicitProxy = process.argv.some((arg) => arg.startsWith('--proxy-server='));
+const loopbackProxy = hasExplicitProxy ? null : resolveLoopbackProxy(process.env);
+if (loopbackProxy) app.commandLine.appendSwitch('proxy-server', loopbackProxy);
 
 // ==================== 全局状态 ====================
 
@@ -113,6 +136,32 @@ async function stopLocalControl(): Promise<void> {
   localControlFiles = [];
 }
 
+async function runOneTimeWebviewNetworkRecovery(): Promise<void> {
+  const marker = readJSON<{ version?: string }>('webview-network-recovery.json', {});
+  if (marker.version === WEBVIEW_NETWORK_RECOVERY_VERSION) return;
+
+  const accounts = readJSON<Array<{ partition?: unknown; platform?: unknown }>>('accounts.json', []);
+  const partitions = getRecoverablePartitions(accounts);
+  const suffix = `2.3.4-${Date.now()}`;
+  let archivedCacheDirectories = 0;
+  for (const partition of partitions) {
+    const diskName = partition.slice('persist:'.length);
+    const partitionDirectory = path.join(app.getPath('userData'), 'Partitions', diskName);
+    archivedCacheDirectories += archiveRegenerableCacheDirectories(partitionDirectory, suffix).length;
+  }
+  const recovered = await recoverWebviewNetworkCaches(
+    partitions,
+    (partition) => session.fromPartition(partition),
+  );
+  writePrivateJson(path.join(getDataDir(), 'webview-network-recovery.json'), {
+    version: WEBVIEW_NETWORK_RECOVERY_VERSION,
+    recoveredPartitions: recovered,
+    archivedCacheDirectories,
+    completedAt: new Date().toISOString(),
+  });
+  console.log(`[Network] 2.3.4 Webview 网络缓存自愈完成（${recovered} 个分区，登录存储未清理）`);
+}
+
 // ==================== 窗口创建 ====================
 
 function createMainWindow(): BrowserWindow {
@@ -140,7 +189,8 @@ function createMainWindow(): BrowserWindow {
   // 窗口准备好后显示
   win.once('ready-to-show', () => {
     win.show();
-    if (isDev) {
+    // CDP 验收已能观察 renderer；不要再额外打开 DevTools 窗口和渲染进程。
+    if (isDev && !localCdp.enabled) {
       win.webContents.openDevTools({ mode: 'detach' });
     }
   });
@@ -287,6 +337,10 @@ if (!gotLock) {
   // ==================== 应用生命周期 ====================
 
   app.whenReady().then(async () => {
+    if (localCdp.enabled) {
+      console.log(`[CDP] 本机验收入口已开启 ${localCdp.address}:${localCdp.port}`);
+    }
+    await runOneTimeWebviewNetworkRecovery();
     // 注册 IPC
     registerIPC();
 
