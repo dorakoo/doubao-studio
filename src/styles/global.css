@@ -521,13 +521,13 @@ body {
   z-index: 10;
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
+  align-items: center;
   justify-content: center;
   gap: 8px;
-  background: transparent;
+  background: #0f0f14;
   color: #9898b8;
   font-size: 12px;
-  padding-top: 8px;
+  padding-top: 0;
   pointer-events: none;
 }
 
