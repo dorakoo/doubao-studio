@@ -19,3 +19,24 @@ export function getWebviewHydrationAccountIds(
 
   return [...desired];
 }
+
+interface WebviewActivationStyle {
+  opacity: string;
+  pointerEvents: string;
+  zIndex: string;
+  visibility: string;
+}
+
+/**
+ * Electron 的 guest view 从 visibility:hidden 恢复时可能不触发合成器重绘。
+ * webview 始终保留在可合成树中，仅用透明度和层级切换前后台。
+ */
+export function applyWebviewActivationStyle(
+  style: WebviewActivationStyle,
+  active: boolean,
+): void {
+  style.visibility = 'visible';
+  style.opacity = active ? '1' : '0';
+  style.pointerEvents = active ? 'auto' : 'none';
+  style.zIndex = active ? '1' : '0';
+}

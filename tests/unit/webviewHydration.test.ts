@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getWebviewHydrationAccountIds } from '../../src/utils/webviewHydration';
+import { applyWebviewActivationStyle, getWebviewHydrationAccountIds } from '../../src/utils/webviewHydration';
 
 const accounts = [{ id: 'account-a' }, { id: 'account-b' }, { id: 'account-c' }];
 
@@ -24,5 +24,14 @@ describe('webview 按需挂载策略', () => {
       'account-a': '',
       missing: 'task-x',
     })).toEqual([]);
+  });
+
+  it('隐藏账号仍保留在合成树中，避免恢复可见时黑屏', () => {
+    const style = { opacity: '', pointerEvents: '', zIndex: '', visibility: '' };
+    applyWebviewActivationStyle(style, false);
+    expect(style).toEqual({ opacity: '0', pointerEvents: 'none', zIndex: '0', visibility: 'visible' });
+
+    applyWebviewActivationStyle(style, true);
+    expect(style).toEqual({ opacity: '1', pointerEvents: 'auto', zIndex: '1', visibility: 'visible' });
   });
 });

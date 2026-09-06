@@ -68,7 +68,7 @@ import type { GenerationConfirmationEvidence } from '../utils/generationConfirma
 import { VideoControlReadinessError } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
-import { getWebviewHydrationAccountIds } from '../utils/webviewHydration';
+import { applyWebviewActivationStyle, getWebviewHydrationAccountIds } from '../utils/webviewHydration';
 
 /** 将当前对话的结构化解析结果转换为用户可读消息。 */
 const formatResolutionMessage = (result: VideoArtifactResolution): string => {
@@ -633,9 +633,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     webview.setAttribute('src', getAccountHome(account));
     webview.setAttribute('partition', getAccountSessionPartition(account));
     webview.setAttribute('allowpopups', 'true');
-    webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;';
-    webview.style.visibility = 'hidden';
-    webview.style.pointerEvents = 'none';
+    webview.style.cssText = 'width:100%;height:100%;border:none;position:absolute;top:0;left:0;visibility:visible;opacity:0;pointer-events:none;z-index:0;';
 
     let pollInterval: ReturnType<typeof setInterval> | undefined;
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -703,8 +701,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     scope.listen(webview, 'did-finish-load', () => { markLoaded('did-finish-load'); scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'did-stop-loading', () => { markLoaded('did-stop-loading'); scheduleAvailabilityCheck('navigation'); });
-    scope.listen(webview, 'did-navigate', () => { markLoaded('did-navigate'); scheduleAvailabilityCheck('navigation'); });
-    scope.listen(webview, 'did-navigate-in-page', () => { markLoaded('did-navigate-in-page'); scheduleAvailabilityCheck('navigation'); });
+    // did-navigate 只代表主文档地址变化，豆包 SPA 此时可能仍是空壳；不能提前撤掉加载层。
+    scope.listen(webview, 'did-navigate', () => undefined);
+    scope.listen(webview, 'did-navigate-in-page', () => { scheduleAvailabilityCheck('navigation'); });
     scope.listen(webview, 'dom-ready', () => {
       activeLoadRecoveryAttempts = 0;
       markLoaded('dom-ready');
@@ -741,30 +740,43 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
 
     // 轮询兜底：每 2s 检查一次 webview 是否已加载内容
     // 解决 Electron webview 事件不触发的问题
-    pollInterval = setInterval(() => {
+    let pollRunning = false;
+    pollInterval = setInterval(async () => {
       const wv = registryRef.current.get(accId);
-      if (!wv) {
-        scope.clearTimers();
+      if (!wv || pollRunning) {
+        if (!wv) scope.clearTimers();
         return;
       }
-      
-      const url = wv.getURL?.() || '';
-      const isLoaded = loadingMapRef.current.get(accId);
-      
-      if (isLoaded && url.startsWith('http') && url.includes(getAccountHost(account))) {
-        console.log(`[BrowserPanel] 轮询检测到 webview 已加载: ${accId}, url=${url}`);
-        markLoaded('poll');
+      pollRunning = true;
+      try {
+        const url = wv.getURL?.() || '';
+        const isLoaded = loadingMapRef.current.get(accId);
+        if (!isLoaded || !url.startsWith('http') || !url.includes(getAccountHost(account))) return;
+        const hasDocument = await wv.executeJavaScript(
+          'Boolean(document.body && document.body.childElementCount > 0 && document.readyState !== "loading")',
+        );
+        if (hasDocument) {
+          console.log(`[BrowserPanel] 轮询检测到 webview 文档已就绪: ${accId}`);
+          markLoaded('poll-document');
+        }
+      } catch {
+        // guest 尚未允许执行脚本时继续等待正式加载事件。
+      } finally {
+        pollRunning = false;
       }
     }, 2000);
     scope.trackTimer(pollInterval);
 
-    // 60s 后停止轮询
+    // 60s 后停止高频轮询，但保留不透明加载层；后续正式加载事件仍可解除。
     timeoutId = setTimeout(() => {
       scope.clearTimer(pollInterval);
       if (!scope.active) return;
       if (loadingMapRef.current.get(accId)) {
-        console.warn(`[BrowserPanel] 60s 超时，强制清除加载状态: ${accId}`);
-        markLoaded('timeout');
+        console.warn(`[BrowserPanel] 60s 超时，账号页面仍未形成可用文档: ${accId}`);
+        if (useAccountStore.getState().selectedAccountId === accId) {
+          setActiveLoading(true);
+          setLoadText('账号页面加载较慢，请稍候或点击刷新');
+        }
       }
       scope.clearTimer(timeoutId);
       scope.clearTimer(pollInterval);
@@ -805,15 +817,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
   useEffect(() => {
     if (!activeAccount) return;
     registryRef.current.forEach((webview, accountId) => {
-      if (accountId === activeAccount.id) {
-        webview.style.visibility = 'visible';
-        webview.style.pointerEvents = 'auto';
+      const isActive = accountId === activeAccount.id;
+      applyWebviewActivationStyle(webview.style, isActive);
+      if (isActive) {
         const isLoading = loadingMapRef.current.get(accountId);
         setActiveLoading(!!isLoading);
         if (!isLoading) setLoadText('');
-      } else {
-        webview.style.visibility = 'hidden';
-        webview.style.pointerEvents = 'none';
       }
     });
   }, [activeAccount?.id]);
