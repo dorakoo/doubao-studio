@@ -79,7 +79,7 @@ pnpm run lint
 ## 核心架构决策
 
 ### Session 隔离
-每个账号使用独立的 Electron session partition (`persist:doubao_<account_uuid>`)，实现 Cookie/Storage 隔离。Webview 可以常驻并随账号显示/隐藏，执行中的配置、上传和提交阶段由前台交互租约保护；不要恢复“切换即销毁”或绕过租约直接操作隐藏页面。
+每个账号使用独立的 Electron session partition (`persist:doubao_<account_uuid>`)，实现 Cookie/Storage 隔离。2.3.4 启动时按单通道顺序预热全部账号；已创建的 Webview 常驻，当前账号原位交互，后台账号移到屏外保活。任务账号受前台交互租约保护，不得回收、复用其他账号 partition，或恢复 lazy-only / “切换即销毁”策略。可用性排序只能改变列表投影，不得改变账号 ID、partition 或用户置顶事实。
 
 ### 数据持久化
 使用本地 JSON 文件存储（`electron.app.getPath('userData')/DoubaoStudioData/`），避免引入额外原生依赖。accounts.json 和 tasks.json 分别存储账号和任务数据。
@@ -94,6 +94,13 @@ Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接�
 
 ### IPC 通信
 主进程通过 `ipcMain.handle` 注册处理器，渲染进程通过 `contextBridge.exposeInMainWorld` 暴露的 `window.electronAPI` 调用，严格遵循 contextIsolation + 无 nodeIntegration 的安全模式。
+
+### 本机控制接口
+
+- 正式 Agent 控制只使用 `--local-control`：固定监听 `127.0.0.1`、Bearer 鉴权、按项目/批次/任务 ID 定位，并复用正式调度链。
+- `--local-cdp` 默认关闭，只允许开发者短时诊断或隔离验收；不得作为长期生产控制、任务归属或完成判定接口。
+- 不得依赖截图坐标、跨会话 DOM/元素编号、长期 Computer Use 或任意脚本注入驱动生产。
+- 任何控制输出均不得包含 Cookie、Token、完整 Session、提示词全文、素材绝对路径或内部页面 URL。详见 `docs/LOCAL_CONTROL.md`。
 
 ## 代码规范
 - 所有函数参数和返回值**必须标注类型**，禁止隐式 any

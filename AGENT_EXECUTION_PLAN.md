@@ -4,7 +4,7 @@
 
 ## 当前基线
 
-- 当前源码版本：`2.3.0`；GitHub 安装包版本以 Latest Release 为准，两者不得混写。
+- 当前源码与 GitHub Release：`2.3.4`；release merge 为 `249f478`。实现、CI、安装验收和发布证据见 `docs/USAGE_NOTICE_2.3.4.md` 与 2.3.4 release handoff。
 - 当前分支：`main`
 - 2.0.x 至 G-401 的历史任务均已集成；新任务必须从最新 `origin/main` 建独立分支或 worktree，不得再使用 `e87ae0b` 等历史基线开工。
 

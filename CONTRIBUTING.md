@@ -23,6 +23,8 @@ pnpm install --frozen-lockfile
 - 页面状态不确定、人工验证未完成或权限/额度无法确认时必须 fail-closed。
 - 不通过请求改写绕过平台会员、额度、风控或服务端校验。
 - 修改共享 DTO 时同步检查 `packages/contracts`、preload、IPC 和调用方。
+- 修改控制面时保持 `--local-control` 与短时 `--local-cdp` 分离：前者是带鉴权的稳定任务协议，后者只用于开发诊断；不得新增局域网监听、任意 DOM/脚本执行或敏感会话输出。
+- 修改 Webview 生命周期时必须保留 2.3.4 的唯一 partition、顺序预热、后台屏外常驻和任务账号租约，并验证快速切换不串层。
 
 ## 验证
 

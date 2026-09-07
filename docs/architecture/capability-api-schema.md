@@ -1,6 +1,6 @@
 # Capability API Schema v1 设计文档
 
-> **状态**：设计阶段，待 Codex 审查批准后方可实施
+> **状态**：历史设计基线；Capability API Schema v1 已集成。Schema 表示公共目标契约，不代表所有 CLI/HTTP/MCP 能力均已实现；2.3.4 实际控制端点见 [`../LOCAL_CONTROL.md`](../LOCAL_CONTROL.md)。
 > **任务**：G-302 Capability API Schema 初稿
 > **基线**：`9b1c28f`
 > **约束**：本文件仅提供设计文档和 JSON Schema，不实施 HTTP、CLI、MCP Server，不修改业务运行逻辑
