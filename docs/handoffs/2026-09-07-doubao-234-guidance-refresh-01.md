@@ -3,7 +3,12 @@
 - 包：`DOUBAO-234-GUIDANCE-REFRESH-01`
 - 基线：`origin/main@249f478103c04296a49fa9d767dca6404e7f7dc5`
 - 类型：docs-only
-- 状态：候选文档；提交、PR、CI 与合并证据在收口时补记
+- 状态：已收口
+- candidate：`71a661ff15af2e59f0f25603df8f1e493c887a52`
+- PR：[#35](https://github.com/dorakoo/doubao-studio/pull/35)
+- merge/main：`efea5c2fe9c23ddfd06d0c72c21b98e556033ca1`
+- PR CI：`34120595774` SUCCESS
+- main CI：`34121400704` SUCCESS
 
 ## 冻结验收包
 
@@ -12,6 +17,8 @@
 1. 将当前版本、Webview 常驻预热和列表排序说明对齐 2.3.4；
 2. 明确正式 `--local-control` 与短时 `--local-cdp` 的用途、安全边界和 Agent 使用顺序；
 3. 同步当前业务使用指南并为不可变历史事故/旧 SOP 添加 supersedes 指向。
+
+后续补充：Agent 工具降级顺序明确为“内置直接接口 → 浏览器/CDP 接口 → Computer Use”，并增加逐操作能力矩阵。
 
 非目标：不改功能代码、Contracts、持久化数据、账号 Session、任务、产物或平台状态；不执行真实生成。
 
