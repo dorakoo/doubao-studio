@@ -6,7 +6,7 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Source Version](https://img.shields.io/badge/source-2.3.1-6d5dfc)](CHANGELOG.md)
+[![Source Version](https://img.shields.io/badge/source-2.3.4-6d5dfc)](CHANGELOG.md)
 [![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
@@ -24,8 +24,8 @@
 
 | 渠道 | 当前状态 |
 | --- | --- |
-| 当前候选源码 | `2.3.1` 维护线；本机控制面尚待合并、安装包和人工验收 |
-| GitHub Release | 以页面显示的 Latest Release 为准；安装包可能晚于 `main` |
+| 当前源码 | `2.3.4`；Webview 常驻、顺序预热和本机控制面已合并 |
+| GitHub Release | [`v2.3.4`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.4) |
 | 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
 > [!IMPORTANT]
@@ -49,7 +49,9 @@
 
 ### 生产连续性
 
-- **启动与 Webview 恢复**：开发端口自动发现，渲染页加载失败可重试；启动时恢复上次前台账号并重建可用网页工作区。
+- **启动与 Webview 恢复**：13 个账号使用各自唯一持久 Session；启动时按单通道顺序预热并常驻，前台账号可交互，其余页面移到屏外保活，避免黑屏、串层和快速切换后的加载风暴。
+- **预热可见性**：本次确认可用的账号自动排到前部，已检测但需处理的账号居中，未确认或仍在预热的账号靠后；同级继续尊重置顶、额度、忙碌和原始顺序。
+- **Windows 网络自愈**：Electron NetworkService 显式继承无凭据 loopback 代理；2.3.4 首次启动只重建可再生网页缓存，不清 Cookie、Local Storage、IndexedDB 或账号登录 Session。
 - **账号前台交互租约**：任务配置、上传、提交和结果回读期间锁定对应账号页面。用户切换查看其他账号不会再让执行中的任务失去输入框或控件上下文。
 - **调度恢复**：全局暂停后清理遗留锁并重新处理可恢复队列；恢复失败会显示真实阻塞原因。
 
@@ -268,6 +270,9 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 - Agent 通过项目 ID、批次 ID、任务 ID 调用 `start / pause / cancel / retry`，主进程和 Renderer 双重校验归属后复用正式调度链。
 - 响应不包含完整提示词、素材绝对路径、产物/会话 URL、Cookie、Token 或账号 Session，也不提供 DOM/CDP 和任意脚本执行。
 - 端点、发现文件和调用示例见 [`docs/LOCAL_CONTROL.md`](docs/LOCAL_CONTROL.md)。现有离线 CLI/MCP 后续可迁移为该控制面的客户端。
+
+> [!IMPORTANT]
+> Agent 的正式生产控制应使用 `--local-control`。`--local-cdp` 只供开发者短时、只读或隔离验收；它不是稳定业务协议，也不得长期常驻。坐标点击、长期 Computer Use、DOM 序号和 CDP 元素编号都不能作为任务完成证据。完整边界见 [`docs/USAGE_NOTICE_2.3.4.md`](docs/USAGE_NOTICE_2.3.4.md)。
 
 ## 界面结构
 

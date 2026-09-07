@@ -1,10 +1,24 @@
 # CLI 与 MCP 映射设计
 
-> **状态**：设计阶段，待 Codex 审查批准后方可实施
+> **状态**：G-303 历史设计基线；下方完整 Capability API 映射仍是目标设计，不代表全部已实现
 > **任务**：G-303 CLI 与 MCP 映射设计
 > **基线**：`6ae3201`
 > **前置**：G-301 Shared 类型迁移设计、G-302 Capability API Schema v1
-> **约束**：本文件仅提供设计文档，不实施 HTTP Server、CLI、MCP Server，不修改业务运行逻辑、IPC channel、preload、Cookie、Session、Webview、DOM 或豆包内部接口
+> **当前事实（2.3.4）**：已实现只读 CLI/MCP、受控 CSV 写入 CLI、MCP 客户端，以及正式实例的本机受控任务接口；精确端点以 [`../LOCAL_CONTROL.md`](../LOCAL_CONTROL.md) 为准。完整 `tasks create`、资产 API、事件订阅、Webhook 和写入型 MCP 仍未实现。
+
+## 0. 2.3.4 实现切片
+
+| 能力 | 当前状态 | 权威说明 |
+| --- | --- | --- |
+| CLI `list/task/outputs/diagnostics` | 已实现，只读 | `README.md` 的 CLI/MCP 边界 |
+| CLI `import-csv` | 已实现，受控写入；桌面程序运行时禁用 | `README.md` 的 CSV 批量导入 |
+| MCP Server `doubao.list_tasks` / `doubao.get_task` | 已实现，只读 | `README.md` 的 CLI/MCP 边界 |
+| MCP Client | 已实现，显式连接、secret 脱敏、调用审计 | `README.md` 的 CLI/MCP 边界 |
+| `--local-control` | 已实现；Bearer 鉴权，按项目/批次/任务执行 `start/pause/cancel/retry` | [`../LOCAL_CONTROL.md`](../LOCAL_CONTROL.md) |
+| `--local-cdp` | 已实现但只供短时开发验收 | [`../LOCAL_CONTROL.md`](../LOCAL_CONTROL.md) |
+| 完整 Capability HTTP/CLI/MCP、资产上传、事件订阅、Webhook | 未实现 | 本文后续目标设计 |
+
+本文件后续出现“当前”“实施顺序”或“不涉及”时，均指 G-303 当时的设计任务范围；不得覆盖上表的 2.3.4 运行事实。
 
 ## 1. 设计目标
 
@@ -54,7 +68,7 @@ doubao-studio capabilities show [--format json|table]
 ```json
 {
   "protocolVersion": "1.0.0",
-  "serviceVersion": "2.3.0",
+  "serviceVersion": "2.3.4",
   "supportedModes": ["chat", "image", "video", "music"],
   "models": [
     {
@@ -933,7 +947,7 @@ Schema 的 `additionalProperties: false` 仅约束已送入 JSON Schema 校验�
 - 校验失败时返回 `invalid_request` 错误，`details.field` 指明非法字段名。
 - 校验必须在业务逻辑执行前完成，不得先执行后校验。
 
-## 8. 未来实施顺序与兼容性规则
+## 8. 历史目标实施顺序与兼容性规则
 
 ### 8.1 实施顺序
 
@@ -1116,7 +1130,7 @@ MCP tool 的 `inputSchema` 优先引用已有 Schema：
 - ROADMAP 列出的 `retry_task` 在 G-303 中未映射为独立命令。取消后重新提交使用 `tasks create` + 新 `requestId` 即可实现重试语义，避免引入与 cancel 语义冲突的独立 retry 命令。如未来需要原地重试（保持同一 taskId），再增加 `tasks retry` 命令。
 - ROADMAP 列出的 `download_artifact` 在 G-303 中映射为 `artifacts get`（返回 `ArtifactDescriptor`）。实际下载端点（返回二进制流）属于 HTTP API 实施范畴，不在本设计文档中定义。CLI `artifacts get` 只返回描述符，不直接下载文件。
 
-## 12. 不涉及清单
+## 12. G-303 当时不涉及清单
 
 本任务**不实现**以下内容：
 

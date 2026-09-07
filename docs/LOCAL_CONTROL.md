@@ -1,6 +1,12 @@
 # 本机受控自动化接口
 
-豆包工作室 2.3 的受控接口用于让本机 Agent 可靠控制**正在运行的正式实例**。它按项目、批次和任务 ID 定位，不依赖截图坐标、DOM 序号或跨会话元素编号。
+豆包工作室 2.3.4 的受控接口用于让本机 Agent 可靠控制**正在运行的正式实例**。它按项目、批次和任务 ID 定位，不依赖截图坐标、DOM 序号或跨会话元素编号。
+
+| 入口 | 用途 | 是否可用于正式任务 | 生命周期 |
+| --- | --- | --- | --- |
+| `--local-control` | 项目、批次和任务的查询与 `start/pause/cancel/retry` | 是；必须 Bearer 鉴权并先确认 `ready=true` | 随正式实例运行，最长受 8 小时令牌期限约束 |
+| `--local-cdp` | Webview 加载、partition 与合成问题的开发诊断 | 否；不提供稳定业务语义 | 有人值守短时开启，用后退出应用并确认端口关闭 |
+| Computer Use / 截图坐标 | 临时人工辅助 | 否 | 不得长时间持有控制宿主 |
 
 ## 启动
 
@@ -54,6 +60,15 @@
 写命令会在主进程和 Renderer 各自重新校验项目、批次、任务归属，然后调用应用现有的依赖、账号健康、额度、任务锁和防重复调度链。控制面不会直接写 `tasks.json`。
 
 `GET /v1/health` 的 `ready` / `rendererReady` 只有在 Renderer 已注册调度桥时才为 `true`。HTTP 存活但 `ready=false` 时不得发送写命令。命令被调度门禁拒绝时返回稳定机器码，例如 `SCHEDULER_PAUSED`、`ACCOUNT_REQUIRED`、`DEPENDENCY_NOT_READY`、`QUOTA_UNAVAILABLE`、`ACCOUNT_ACTION_REQUIRED`、`ACCOUNT_BUSY`、`TASK_LOCKED` 和 `INVALID_TASK_STATUS`，不回显内部页面文案。
+
+## Agent 使用顺序
+
+1. 启动唯一一个带 `--local-control` 的正式实例，等待账号顺序预热；不要并行启动第二个桌面实例。
+2. 读取发现文件与令牌文件，调用健康端点；只有 `ready=true` 且 `rendererReady=true` 才继续。
+3. 依次列出项目、批次和任务，用返回的稳定 ID 构造完整路径；不得用显示名称代替 ID。
+4. 每个写动作生成新的 UUID `requestId`；网络结果不确定时用同一 `requestId` 重试查询，不得换新 ID 盲目重发。
+5. 遇到账号登录、人机验证、额度、会员、未知弹窗或提交状态不确定，保留任务状态并交由人工处理；不得通过 CDP 或坐标脚本绕过。
+6. 工作结束后关闭客户端；若曾开启 CDP，退出整个应用并确认调试端口不再监听。
 
 ## 安全边界
 

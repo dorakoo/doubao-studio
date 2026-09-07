@@ -11,6 +11,7 @@
 - 首次启动执行一次仅限 HTTP/DNS 缓存与连接池的账号分区自愈；不清 Cookie、Local Storage、IndexedDB 或登录 Session。
 - 新增默认关闭、仅监听 `127.0.0.1` 的短时 CDP 验收入口，完成后随应用退出。
 - 顺序预热改为就绪事件直接衔接下一账号；账号列表将本次已确认可用的账号排在待确认账号之前。
+- 正式本机控制面随 2.3.4 发布：`--local-control` 使用短期 Bearer 令牌，按项目、批次和任务 ID 提供脱敏查询与 `start/pause/cancel/retry`，不开放 DOM、任意脚本或账号会话读取。
 
 ## 2.3.3 (2026-09-06)
 
@@ -29,15 +30,6 @@
 > `package.json` 的源码版本与 GitHub Release 是两个状态。只有创建 Tag/Release 并上传安装包后，才能表述为“已发布”。
 
 ## [Unreleased]
-
-## [2.3.1] - Unreleased
-
-### 本机受控自动化接口
-
-- 默认关闭，仅通过显式启动参数开启并严格监听 `127.0.0.1`；使用 256-bit、8 小时有效的本机 Bearer 令牌。
-- 按项目、批次和任务 ID 提供脱敏查询及启动、暂停、取消、重试；写命令复用正式 Renderer 调度链，不直接覆盖任务台账。
-- 增加 Renderer 就绪门禁、requestId 并发单飞与重放保护、稳定拒绝错误码、Host/Origin 校验和脱敏命令审计。
-- 不开放裸 CDP、任意 JavaScript、DOM、Cookie、平台 Token、账号 Session、完整提示词或素材绝对路径。
 
 ## [2.3.0] - 2026-08-29
 
