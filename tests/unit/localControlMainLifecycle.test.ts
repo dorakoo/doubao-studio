@@ -36,4 +36,10 @@ describe('本机控制主进程生命周期', () => {
     expect(lifecycle).toContain('clearInterval(readinessInterval)');
     expect(lifecycle).toContain('clearTimeout(readinessStop)');
   });
+
+  it('后台页面加载不会撤销主 Renderer 调度桥就绪', () => {
+    expect(source).not.toContain("webContents.on('did-start-loading'");
+    expect(source).toContain("webContents.on('did-start-navigation'");
+    expect(source).toContain('if (isMainFrame) controlBroker?.markUnavailable()');
+  });
 });

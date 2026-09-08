@@ -354,7 +354,11 @@ if (!gotLock) {
 
     // 创建主窗口
     mainWindow = createMainWindow();
-    mainWindow.webContents.on('did-start-loading', () => controlBroker?.markUnavailable());
+    // 只有主 Renderer 自身开始导航时才撤销调度桥就绪。did-start-loading
+    // 会被后台 Webview/子资源加载放大，账号顺序预热期间会误把健康桥降级。
+    mainWindow.webContents.on('did-start-navigation', (_event, _url, _isInPlace, isMainFrame) => {
+      if (isMainFrame) controlBroker?.markUnavailable();
+    });
     mainWindow.webContents.on('render-process-gone', () => controlBroker?.markUnavailable());
     await startLocalControl(requestedControlPort);
 
