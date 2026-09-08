@@ -83,9 +83,10 @@ function writePrivateJson(filePath: string, value: unknown): void {
   fs.chmodSync(filePath, 0o600);
 }
 
-async function startLocalControl(): Promise<void> {
-  const requestedPort = resolveLocalControlPort(process.argv.slice(1));
+async function startLocalControl(requestedPort: number | null): Promise<void> {
   if (requestedPort === null) return;
+  const broker = controlBroker;
+  if (!broker) throw new Error('本机控制命令代理未初始化');
   const token = randomBytes(32).toString('base64url');
   const startedAtMs = Date.now();
   const expiresAtMs = startedAtMs + 8 * 60 * 60 * 1000;
@@ -98,8 +99,6 @@ async function startLocalControl(): Promise<void> {
   for (const stalePath of [infoPath, tokenPath]) {
     try { fs.unlinkSync(stalePath); } catch {}
   }
-  const broker = new ControlCommandBroker(() => mainWindow?.webContents || null);
-  controlBroker = broker;
   localControlServer = new LocalControlServer({
     token,
     expiresAtMs,
@@ -129,11 +128,13 @@ async function stopLocalControl(): Promise<void> {
   controlBroker = null;
   const server = localControlServer;
   localControlServer = null;
-  if (server) await server.stop().catch(() => undefined);
+  // before-quit 不会等待异步 Promise；先同步删除发现文件，避免正常退出后
+  // 留下已失效的端口/PID/令牌文件误导下一次 Agent 探测。
   for (const filePath of localControlFiles) {
     try { fs.unlinkSync(filePath); } catch {}
   }
   localControlFiles = [];
+  if (server) await server.stop().catch(() => undefined);
 }
 
 async function runOneTimeWebviewNetworkRecovery(): Promise<void> {
@@ -344,11 +345,18 @@ if (!gotLock) {
     // 注册 IPC
     registerIPC();
 
+    const requestedControlPort = resolveLocalControlPort(process.argv.slice(1));
+    // Broker 必须早于 renderer 导航创建。打包后的本地页面可能在控制服务
+    // 启动完成前就发送 control:ready；若此时 Broker 尚不存在，信号会永久丢失。
+    if (requestedControlPort !== null) {
+      controlBroker = new ControlCommandBroker(() => mainWindow?.webContents || null);
+    }
+
     // 创建主窗口
     mainWindow = createMainWindow();
     mainWindow.webContents.on('did-start-loading', () => controlBroker?.markUnavailable());
     mainWindow.webContents.on('render-process-gone', () => controlBroker?.markUnavailable());
-    await startLocalControl();
+    await startLocalControl(requestedControlPort);
 
     // macOS: 点击 Dock 图标时重新创建窗口
     // 退出过程中不创建新窗口

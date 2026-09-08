@@ -6,7 +6,7 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Source Version](https://img.shields.io/badge/source-2.3.4-6d5dfc)](CHANGELOG.md)
+[![Source Version](https://img.shields.io/badge/source-2.3.5-6d5dfc)](CHANGELOG.md)
 [![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
@@ -24,8 +24,8 @@
 
 | 渠道 | 当前状态 |
 | --- | --- |
-| 当前源码 | `2.3.4`；Webview 常驻、顺序预热和本机控制面已合并 |
-| GitHub Release | [`v2.3.4`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.4) |
+| 当前源码 | `2.3.5`；Webview 常驻、顺序预热和本机控制面启动竞态已修复 |
+| GitHub Release | [`v2.3.5`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.5) |
 | 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
 > [!IMPORTANT]
