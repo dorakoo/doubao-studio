@@ -103,8 +103,18 @@ const App: React.FC = () => {
       }
       window.electronAPI.control.complete(response);
     });
-    window.electronAPI.control.ready();
-    return unsubscribe;
+    // Electron 的 did-start-loading 可能与首次 effect 交错并把 Main 侧就绪态
+    // 重置。监听器已经注册后做短时、有界的幂等重申，避免服务永久停在
+    // ready=false；不使用常驻心跳，也不会触发任何任务动作。
+    const announceReady = () => window.electronAPI.control.ready();
+    announceReady();
+    const readinessInterval = setInterval(announceReady, 250);
+    const readinessStop = setTimeout(() => clearInterval(readinessInterval), 5_000);
+    return () => {
+      unsubscribe();
+      clearInterval(readinessInterval);
+      clearTimeout(readinessStop);
+    };
   }, []);
 
 
