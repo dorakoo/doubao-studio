@@ -132,13 +132,22 @@ export interface TaskRunSnapshot {
   submittedAt?: string;
   conversationUrl?: string;
   controlReadiness?: {
+    schemaVersion?: 1;
+    ready?: boolean;
+    currentStage?: 'account' | 'new_conversation' | 'video_entry' | 'model' | 'aspect_ratio' | 'duration' | 'assets' | 'prompt' | 'submission_controls';
     modeEntryElapsedMs?: number;
     attempts: number;
     elapsedMs: number;
+    stableSamples?: number;
+    recoveryAttempts?: number;
+    pageStructureVersion?: string;
+    missingControl?: 'account_page' | 'conversation_editor' | 'video_entry' | 'model_control' | 'aspect_ratio_control' | 'duration_control' | 'asset_upload' | 'prompt_editor' | 'send_control';
     modelVisibleAtMs?: number;
+    aspectRatioVisibleAtMs?: number;
+    durationVisibleAtMs?: number;
     compositeVisibleAtMs?: number;
     stableAtMs?: number;
-    failureStage?: 'mode_entry' | 'model_control' | 'composite_control' | 'stable_readback' | 'final_readback';
+    failureStage?: 'account' | 'new_conversation' | 'video_entry' | 'model' | 'aspect_ratio' | 'duration' | 'assets' | 'prompt' | 'submission_controls' | 'mode_entry' | 'model_control' | 'composite_control' | 'stable_readback' | 'final_readback';
   };
   generationConfirmation?: {
     detectedAt: string;

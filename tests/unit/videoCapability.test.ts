@@ -580,7 +580,7 @@ describe('新版视频控件适配契约', () => {
     const bridgeSource = readFileSync(resolve(__dirname, '../../src/utils/doubaoBridge.ts'), 'utf8');
     expect(bridgeSource).toContain('{ timeoutMs: 30_000, stableSamples: 3 }');
     expect(bridgeSource).toContain('throw new VideoControlReadinessError');
-    expect(bridgeSource).toContain("'final_readback'");
+    expect(bridgeSource).toContain("'submission_controls'");
     expect(bridgeSource).toContain('const waitForExactOverlayOption = async');
     expect(bridgeSource).toContain("waitForExactOverlayOption(modelLabel, 'video_model')");
     expect(bridgeSource).toContain('const waitForModelVerification = async');

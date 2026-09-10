@@ -441,13 +441,22 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
     submittedAt: (() => { const v = r.submittedAt; return isValidISODate(v) ? v : undefined; })(),
     conversationUrl: asNonEmptyString(r.conversationUrl) ?? undefined,
     controlReadiness: isObject(r.controlReadiness) ? {
+      schemaVersion: r.controlReadiness.schemaVersion === 1 ? 1 : undefined,
+      ready: typeof r.controlReadiness.ready === 'boolean' ? r.controlReadiness.ready : undefined,
+      currentStage: optionalOneOf(r.controlReadiness.currentStage, ['account', 'new_conversation', 'video_entry', 'model', 'aspect_ratio', 'duration', 'assets', 'prompt', 'submission_controls']) as NonNullable<TaskRunSnapshot['controlReadiness']>['currentStage'],
       modeEntryElapsedMs: asNonNegativeNumber(r.controlReadiness.modeEntryElapsedMs, 0) || undefined,
       attempts: asNonNegativeNumber(r.controlReadiness.attempts, 0),
       elapsedMs: asNonNegativeNumber(r.controlReadiness.elapsedMs, 0),
+      stableSamples: asNonNegativeNumber(r.controlReadiness.stableSamples, 0) || undefined,
+      recoveryAttempts: asNonNegativeNumber(r.controlReadiness.recoveryAttempts, 0) || undefined,
+      pageStructureVersion: asNonEmptyString(r.controlReadiness.pageStructureVersion)?.slice(0, 96),
+      missingControl: optionalOneOf(r.controlReadiness.missingControl, ['account_page', 'conversation_editor', 'video_entry', 'model_control', 'aspect_ratio_control', 'duration_control', 'asset_upload', 'prompt_editor', 'send_control']) as NonNullable<TaskRunSnapshot['controlReadiness']>['missingControl'],
       modelVisibleAtMs: asNonNegativeNumber(r.controlReadiness.modelVisibleAtMs, 0) || undefined,
+      aspectRatioVisibleAtMs: asNonNegativeNumber(r.controlReadiness.aspectRatioVisibleAtMs, 0) || undefined,
+      durationVisibleAtMs: asNonNegativeNumber(r.controlReadiness.durationVisibleAtMs, 0) || undefined,
       compositeVisibleAtMs: asNonNegativeNumber(r.controlReadiness.compositeVisibleAtMs, 0) || undefined,
       stableAtMs: asNonNegativeNumber(r.controlReadiness.stableAtMs, 0) || undefined,
-      failureStage: optionalOneOf(r.controlReadiness.failureStage, ['mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureStage'],
+      failureStage: optionalOneOf(r.controlReadiness.failureStage, ['account', 'new_conversation', 'video_entry', 'model', 'aspect_ratio', 'duration', 'assets', 'prompt', 'submission_controls', 'mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback']) as NonNullable<TaskRunSnapshot['controlReadiness']>['failureStage'],
     } : undefined,
     generationConfirmation: isObject(r.generationConfirmation) &&
       isValidISODate(r.generationConfirmation.detectedAt) &&

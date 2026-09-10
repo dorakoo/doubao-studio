@@ -3968,9 +3968,16 @@ async function configureVideoOptionsV2(
   }
 
   const click = async (position: string | undefined, label: string): Promise<void> => {
-    if (!position) throw new Error(`${label}不可见，已在提交前停止`);
+    const stage = label.includes('模型') ? 'model' : label.includes('时长') ? 'duration' : 'aspect_ratio';
+    const missingControl = stage === 'model' ? 'model_control' : stage === 'duration' ? 'duration_control' : 'aspect_ratio_control';
+    const fail = (): never => {
+      throw new VideoControlReadinessError(stage, {
+        ready: false, failureStage: stage, missingControl, attempts: 1, elapsedMs: 0,
+      });
+    };
+    if (!position) return fail();
     const [x, y] = position.split(',').map(Number);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`${label}坐标无效，已在提交前停止`);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) fail();
     // webview.sendInputEvent 的坐标在新版嵌套页面会落到宿主视口而非创作页。
     // 这里按页面内命中元素派发完整指针/鼠标序列，仍只触发用户可见控件。
     const activated = await safeExecuteJS<boolean>(webview, `
@@ -3989,7 +3996,7 @@ async function configureVideoOptionsV2(
         return true;
       })()
     `, 5000, `activate_${label}`);
-    if (!activated) throw new Error(`${label}无法激活，已在提交前停止`);
+    if (!activated) fail();
     await sleep(80);
   };
 
@@ -4018,7 +4025,7 @@ async function configureVideoOptionsV2(
   // 模式切换后 React 会先显示创作栏、再挂载参数控件。必须等两个权威控件
   // 都实际可用后才继续；15 秒后仍未挂载则 fail-closed，不猜测、更不提交。
   const waitForAuthoritativeControls = async (): Promise<VideoControlReadinessResult> => {
-    return waitForVideoControlReadiness(async () => page<{ modelReady: boolean; compositeReady: boolean }>(`
+    return waitForVideoControlReadiness(async () => page<{ modelReady: boolean; aspectRatioReady: boolean; durationReady: boolean; pageVariant: 'composite-v2' }>(`
         (function () {
           function usable(el) {
             if (!el) return false;
@@ -4029,12 +4036,15 @@ async function configureVideoOptionsV2(
           var model = document.querySelector(${JSON.stringify(VIDEO_MODEL_CONTROL_SELECTOR)});
           var composite = document.querySelector(${JSON.stringify(VIDEO_COMPOSITE_CONTROL_SELECTOR)});
           var compositeText = composite ? (composite.innerText || '').replace(/\\s+/g, ' ').trim() : '';
+          var compositeMatch = compositeText.match(/^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*([0-9]+)s$/);
           return {
             modelReady: usable(model),
-            compositeReady: usable(composite) && /^(?:自动|[0-9]+:[0-9]+)\\s*·\\s*[0-9]+s$/.test(compositeText)
+            aspectRatioReady: usable(composite) && Boolean(compositeMatch),
+            durationReady: usable(composite) && Boolean(compositeMatch),
+            pageVariant: 'composite-v2'
           };
         })()
-      `, 'wait_video_controls').catch(() => ({ modelReady: false, compositeReady: false })), { timeoutMs: 30_000, stableSamples: 3 });
+      `, 'wait_video_controls').catch(() => ({ modelReady: false, aspectRatioReady: false, durationReady: false, pageVariant: 'composite-v2' as const })), { timeoutMs: 30_000, stableSamples: 3 });
   };
 
   const readiness = await waitForAuthoritativeControls();
@@ -4174,7 +4184,12 @@ async function configureVideoOptionsV2(
     await click(await findModelTrigger(), '视频模型控件');
     if (await membershipBlocked()) throw new Error('membership_required: 视频模型需要会员操作，已停止提交');
     await click(await waitForExactOverlayOption(modelLabel, 'video_model'), '视频模型选项');
-    if (!await waitForModelVerification()) throw new Error(`视频模型配置回读失败: ${config.model}`);
+    if (!await waitForModelVerification()) {
+      throw new VideoControlReadinessError('model', {
+        ready: false, failureStage: 'model', missingControl: 'model_control', attempts: 1, elapsedMs: 10_000,
+        pageStructureVersion: readiness.pageStructureVersion,
+      });
+    }
   }
 
   const currentCompositeLabel = async (): Promise<string | undefined> => page<string | undefined>(`
@@ -4224,11 +4239,13 @@ async function configureVideoOptionsV2(
   const verifyFinalStableReadback = async (): Promise<void> => {
     const finalResult = await waitForVideoControlReadiness(async () => ({
       modelReady: await verifyModel().catch(() => false),
-      compositeReady: await isCompositeAlreadyConfigured().catch(() => false),
+      aspectRatioReady: await isCompositeAlreadyConfigured().catch(() => false),
+      durationReady: await isCompositeAlreadyConfigured().catch(() => false),
+      pageVariant: 'composite-v2' as const,
     }), { timeoutMs: 10_000, stableSamples: 3 });
-    const reported = finalResult.ready ? finalResult : { ...finalResult, failureStage: 'final_readback' as const };
+    const reported = finalResult.ready ? finalResult : { ...finalResult, failureStage: finalResult.failureStage || 'submission_controls' };
     await options?.onReadiness?.(reported);
-    if (!finalResult.ready) throw new VideoControlReadinessError('final_readback', reported);
+    if (!finalResult.ready) throw new VideoControlReadinessError(reported.failureStage || 'submission_controls', reported);
   };
   if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
   if (await isCompositeAlreadyConfigured()) {
@@ -4257,7 +4274,12 @@ async function configureVideoOptionsV2(
     await openComposite();
     slider = await findDurationSlider();
   }
-  if (!slider.position) throw new Error(`视频时长控件不可见: ${config.duration}`);
+  if (!slider.position) {
+    throw new VideoControlReadinessError('duration', {
+      ready: false, failureStage: 'duration', missingControl: 'duration_control', attempts: 2, elapsedMs: 700,
+      pageStructureVersion: readiness.pageStructureVersion,
+    });
+  }
   if (typeof webview.sendInputEvent === 'function') {
     await click(slider.position, '视频时长控件');
     webview.sendInputEvent({ type: 'keyDown', keyCode: 'Home' });
@@ -4283,7 +4305,11 @@ async function configureVideoOptionsV2(
   `, 'verify_video_composite');
   if (await membershipBlocked()) throw new Error('membership_required: 视频参数需要会员操作，已停止提交');
   if (!configured.slider || !configured.composite) {
-    throw new Error(`视频比例或时长配置回读失败: ${getVideoCompositeLabel(config.aspectRatio, config.duration)}`);
+    const stage = configured.slider ? 'aspect_ratio' : 'duration';
+    throw new VideoControlReadinessError(stage, {
+      ready: false, failureStage: stage, missingControl: configured.slider ? 'aspect_ratio_control' : 'duration_control',
+      attempts: 1, elapsedMs: 350, pageStructureVersion: readiness.pageStructureVersion,
+    });
   }
   await verifyFinalStableReadback();
 }
