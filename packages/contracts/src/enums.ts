@@ -94,4 +94,4 @@ export type VideoDuration = '4s' | '5s' | '6s' | '7s' | '8s' | '9s' | '10s' | '1
 export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
 
 /** 任务依赖策略 */
-export type DependencyPolicy = 'all_done' | 'all_finished';
+export type DependencyPolicy = 'all_done' | 'all_accepted' | 'all_finished';

@@ -131,6 +131,37 @@ export interface TaskRunSnapshot {
   lastHeartbeatAt: string;
   submittedAt?: string;
   conversationUrl?: string;
+  /** 平台明确受理后的可恢复观察绑定；不包含提示词、素材路径或账号凭据。 */
+  acceptanceObservation?: {
+    schemaVersion: 1;
+    accountId: string;
+    runId: string;
+    conversationUrl: string;
+    acceptedAt: string;
+    evidence: {
+      kind: 'generation_started' | 'prompt_published' | 'material_authorization_confirmed';
+      messageCount?: number;
+      generationStartedAt?: number;
+    };
+    cursor: {
+      messageCount: number;
+      generationStartedAt?: number;
+      pollCount: number;
+    };
+    expectedArtifact: {
+      kind: 'video' | 'image' | 'file';
+      runId: string;
+      artifactId?: string;
+    };
+    lease: {
+      ownerId: string;
+      acquiredAt: string;
+      expiresAt: string;
+      lastHeartbeatAt: string;
+    };
+    outcome: 'observing' | 'completed' | 'manual_review';
+    completedAt?: string;
+  };
   controlReadiness?: {
     schemaVersion?: 1;
     ready?: boolean;

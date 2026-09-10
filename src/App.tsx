@@ -63,9 +63,11 @@ const App: React.FC = () => {
   // ---- 初始化加载 ----
 
   useEffect(() => {
-    loadAccounts();
-    loadProjects();
-    loadTasks(true);
+    let startupQueueTimer: ReturnType<typeof setTimeout> | undefined;
+    void Promise.all([loadAccounts(), loadProjects(), loadTasks(true)]).then(() => {
+      // 账号/任务加载完成后做一次启动队列评估；否则已满足 all_accepted 的排队任务可能没有调度事件。
+      startupQueueTimer = setTimeout(() => useTaskStore.getState().processQueue(), 0);
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     const scheduleMidnightRefresh = () => {
       timer = setTimeout(async () => {
@@ -75,7 +77,10 @@ const App: React.FC = () => {
       }, millisecondsUntilNextLocalMidnight() + 250);
     };
     scheduleMidnightRefresh();
-    return () => { if (timer) clearTimeout(timer); };
+    return () => {
+      if (timer) clearTimeout(timer);
+      if (startupQueueTimer) clearTimeout(startupQueueTimer);
+    };
   }, [loadAccounts, loadProjects, loadTasks, refreshDailyQuota]);
 
   // 本机控制面只通过稳定 ID 调用现有调度边界；不暴露 DOM/webview/页面会话。

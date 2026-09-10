@@ -199,7 +199,7 @@ flowchart LR
 - 从 CSV 批量导入提示词、模式、视频模型、时长、比例、素材和账号。
 - 可点击 CSV 按钮选择文件，也可把单个 `.csv` 文件直接拖到任务调度区；导入结果会明确显示成功、跳过和未指派数量。
 - 使用 `depends_on` 指定前置 CSV 行号，多个行号使用 `|` 分隔。
-- `all_done` 要求所有前置任务成功；`all_finished` 允许前置任务失败后继续。
+- `all_done` 要求所有前置任务成功；`all_accepted` 在所有前置任务获得平台明确受理并建立可恢复观察绑定后放行；`all_finished` 允许前置任务失败后继续。
 - 任务批次页面汇总总数、进度、运行、排队和失败数量。
 - 可对整个批次中的失败任务一键重新排队。
 
@@ -217,7 +217,7 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 | `ratio` | 画面比例 | `9:16` |
 | `reference_images` | 参考图片绝对路径；多值按模板规则填写 | `D:\assets\hero.png` |
 | `depends_on` | 前置 CSV 行号，多个使用 `|` 分隔 | `1|2` |
-| `dependency_policy` | `all_done` 或 `all_finished` | `all_done` |
+| `dependency_policy` | `all_done`、`all_accepted` 或 `all_finished` | `all_done` |
 
 > [!CAUTION]
 > `import-csv` CLI 会写入项目和任务数据。必须先退出豆包工作室，再显式提供真实 `tasks.json` 与同目录 `projects.json`；不要让桌面程序与 CLI 同时写同一数据文件，也不要猜测历史工作树中的数据路径。`--project-id` 必须是真实 ID；如需新项目，使用 `--project-name` 创建，不要把项目名称填入 `--project-id`。

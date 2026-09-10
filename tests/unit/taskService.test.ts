@@ -38,6 +38,23 @@ describe('TaskService 核心用例', () => {
     expect(stored()[0].outputs).toEqual(['u']); expect(stored()[0].artifacts).toHaveLength(1); expect(stored()[0].errorInfo).toBeUndefined();
   });
 
+  it('完成任务时在同一次写入中绑定 artifact 并收口受理观察', () => {
+    const item = withRuntime(base('accepted', 'generating'), 'generating');
+    item.runtime!.acceptanceObservation = {
+      schemaVersion: 1, accountId: 'a1', runId: 'r', conversationUrl: 'https://www.doubao.com/chat/r',
+      acceptedAt: 'old', evidence: { kind: 'generation_started' }, cursor: { messageCount: 1, pollCount: 0 },
+      expectedArtifact: { kind: 'video', runId: 'r' },
+      lease: { ownerId: 'o', acquiredAt: 'old', expiresAt: 'old', lastHeartbeatAt: 'old' }, outcome: 'observing',
+    };
+    const { service, stored } = fixture([item]);
+    expect(service.updateStatus({ taskId: 'accepted', status: 'done', outputs: ['https://video.example/a.mp4'] }).success).toBe(true);
+    const task = stored()[0];
+    expect(task.runtime?.acceptanceObservation).toMatchObject({
+      outcome: 'completed', completedAt: 'now', expectedArtifact: { artifactId: task.artifacts?.[0].id },
+      lease: { lastHeartbeatAt: 'now', expiresAt: 'now' },
+    });
+  });
+
   it('执行中或存在下游依赖时禁止删除', () => {
     expect(fixture([base('t1', 'executing')]).service.delete('t1').success).toBe(false);
     const child = base('child'); child.dependsOnTaskIds = ['t1'];
@@ -790,6 +807,25 @@ describe('TaskService recoverInterruptedTasks', () => {
     });
   });
 
+  it('已有受理绑定的 generating 跨重启转为只读观察且不结束 runHistory', () => {
+    const item = activeTask('accepted-observe', 'generating');
+    item.runtime!.acceptanceObservation = {
+      schemaVersion: 1, accountId: 'a1', runId: 'r', conversationUrl: 'https://www.doubao.com/chat/r',
+      acceptedAt: RECOVERY_STARTED_AT, evidence: { kind: 'generation_started' }, cursor: { messageCount: 2, pollCount: 0 },
+      expectedArtifact: { kind: 'video', runId: 'r' }, lease: {
+        ownerId: 'observer-r', acquiredAt: RECOVERY_STARTED_AT, expiresAt: RECOVERY_NOW, lastHeartbeatAt: RECOVERY_STARTED_AT,
+      }, outcome: 'observing',
+    };
+    const { service, stored } = recoveryFixture([item]);
+    expect(service.recoverInterruptedTasks()).toEqual({ success: true, data: { recoveredTasks: 1, clearedLocks: 1 } });
+    expect(stored()[0]).toMatchObject({
+      status: 'manual_submission_observing', lock: undefined,
+      runtime: { stage: 'manual_submission_observing', acceptanceObservation: { outcome: 'observing', lease: { expiresAt: RECOVERY_NOW } } },
+    });
+    expect(stored()[0].runHistory?.[0].finishedAt).toBeUndefined();
+    expect(service.retry('accepted-observe').success).toBe(false);
+  });
+
   it('非活动任务只清除遗留 lock，无 lock 时完全不变', () => {
     const withLock = base('t1', 'done');
     withLock.lock = { ownerId: 'old', acquiredAt: 'old', expiresAt: 'old' };
@@ -1239,6 +1275,7 @@ describe('TaskService importCsv', () => {
 
   it.each([
     ['all_finished', 'all_finished'],
+    ['all_accepted', 'all_accepted'],
     ['all_done', 'all_done'],
     ['', 'all_done'],
   ])('dependencyPolicy「%s」映射为 %s', (input, expected) => {

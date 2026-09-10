@@ -52,6 +52,7 @@ export interface TaskRecoverySummary {
 const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
 
 function requiresSubmissionReconciliation(task: Task): boolean {
+  if (task.runtime?.acceptanceObservation?.outcome === 'observing') return true;
   if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') return true;
   if (!task.runtime?.submittedAt) return false;
   if (!['paused', 'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'fail', 'cancelled'].includes(task.status)) return false;
@@ -257,6 +258,7 @@ export class TaskService {
     if (!task) return { success: false, error: '任务不存在' };
     task.status = params.status;
     if (params.result !== undefined) task.result = params.result;
+    const timestamp = this.now();
     if (params.outputs !== undefined) {
       task.outputs = [...new Set(params.outputs.filter(Boolean))];
       const existing = new Map((task.artifacts || []).map((artifact) => [artifact.url, artifact]));
@@ -265,13 +267,30 @@ export class TaskService {
           id: artifactId(url), url,
           kind: task.mode === 'video' ? 'video' : task.mode === 'image' ? 'image' : 'file',
           source: 'network', runId: task.runtime?.runId,
-          conversationUrl: task.runtime?.conversationUrl, discoveredAt: this.now(),
+          conversationUrl: task.runtime?.conversationUrl, discoveredAt: timestamp,
         });
       }
       task.artifacts = [...existing.values()];
     }
-    if (params.status === 'done') task.errorInfo = undefined;
-    task.updatedAt = this.now();
+    if (params.status === 'done') {
+      task.errorInfo = undefined;
+      const runtime = task.runtime;
+      const observation = runtime?.acceptanceObservation;
+      const artifact = task.artifacts?.find((item) => item.runId === task.runtime?.runId) || task.artifacts?.[0];
+      if (runtime && observation && artifact) {
+        task.runtime = {
+          ...runtime,
+          acceptanceObservation: {
+            ...observation,
+            expectedArtifact: { ...observation.expectedArtifact, artifactId: artifact.id },
+            lease: { ...observation.lease, lastHeartbeatAt: timestamp, expiresAt: timestamp },
+            outcome: 'completed',
+            completedAt: timestamp,
+          },
+        };
+      }
+    }
+    task.updatedAt = timestamp;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true };
   }
@@ -342,6 +361,29 @@ export class TaskService {
     let changed = false;
 
     for (const task of tasks) {
+      const acceptedObservation = task.runtime?.acceptanceObservation;
+      if (task.status === 'generating' && acceptedObservation?.outcome === 'observing' &&
+        acceptedObservation.runId === task.runtime?.runId) {
+        task.status = 'manual_submission_observing';
+        task.result = '程序重启，正在从原会话恢复只读产物观察';
+        task.runtime = {
+          ...task.runtime,
+          stage: 'manual_submission_observing',
+          message: task.result,
+          stageStartedAt: timestamp,
+          lastHeartbeatAt: timestamp,
+          acceptanceObservation: {
+            ...acceptedObservation,
+            lease: { ...acceptedObservation.lease, lastHeartbeatAt: timestamp, expiresAt: timestamp },
+          },
+        };
+        task.updatedAt = timestamp;
+        if (task.lock) clearedLocks++;
+        task.lock = undefined;
+        recoveredTasks++;
+        changed = true;
+        continue;
+      }
       if (task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing') {
         if (task.lock) {
           task.lock = undefined;
@@ -554,7 +596,7 @@ export class TaskService {
       videoConfig: Task['videoConfig'];
       attachments: string[] | undefined;
       audioAttachment: string | undefined;
-      dependencyPolicy: 'all_done' | 'all_finished';
+      dependencyPolicy: 'all_done' | 'all_accepted' | 'all_finished';
       dependsOnRaw: string;
     }
     const partialTasks: CsvPartialTask[] = [];
@@ -594,7 +636,7 @@ export class TaskService {
         continue;
       }
       const rawPolicy = policyIndex >= 0 ? (row[policyIndex] || '').trim() : '';
-      if (rawPolicy && rawPolicy !== 'all_done' && rawPolicy !== 'all_finished') {
+      if (rawPolicy && rawPolicy !== 'all_done' && rawPolicy !== 'all_accepted' && rawPolicy !== 'all_finished') {
         errors.push(`第 ${dataIndex + 1} 行：依赖策略「${rawPolicy}」无效`);
         continue;
       }
@@ -612,7 +654,7 @@ export class TaskService {
           ? (row[attachmentsIndex] || '').split('|').map((item) => item.trim()).filter(Boolean)
           : undefined,
         audioAttachment: audioIndex >= 0 ? (row[audioIndex] || '').trim() || undefined : undefined,
-        dependencyPolicy: rawPolicy === 'all_finished' ? 'all_finished' : 'all_done',
+        dependencyPolicy: rawPolicy === 'all_finished' ? 'all_finished' : rawPolicy === 'all_accepted' ? 'all_accepted' : 'all_done',
         dependsOnRaw: dependsIndex >= 0 ? (row[dependsIndex] || '') : '',
       });
       sourceRows.push(dataIndex + 1);
