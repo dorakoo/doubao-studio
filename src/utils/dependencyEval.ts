@@ -4,6 +4,7 @@
  */
 
 import type { Task } from '../types';
+import { hasPlatformAcceptance } from './acceptedObservation';
 
 export type DependencyEvaluation = {
   state: 'ready' | 'waiting' | 'missing' | 'failed' | 'invalid';
@@ -38,11 +39,13 @@ export function evaluateDependencies(task: Task, tasks: Task[]): DependencyEvalu
   if (hasCycle(task.id)) {
     return { state: 'invalid', message: '任务依赖存在自依赖或循环，当前任务已停止' };
   }
-  if (task.dependencyPolicy !== 'all_finished' && dependencies.some((item) => ['fail', 'cancelled'].includes(item.status))) {
+  if (task.dependencyPolicy === 'all_done' && dependencies.some((item) => ['fail', 'cancelled'].includes(item.status))) {
     return { state: 'failed', message: '前置任务未成功，当前任务已停止' };
   }
   const ready = task.dependencyPolicy === 'all_finished'
     ? dependencies.every((item) => ['done', 'fail', 'cancelled'].includes(item.status))
+    : task.dependencyPolicy === 'all_accepted'
+      ? dependencies.every(hasPlatformAcceptance)
     : dependencies.every((item) => item.status === 'done');
   return ready ? { state: 'ready' } : { state: 'waiting', message: '前置任务尚未满足执行条件' };
 }

@@ -95,6 +95,48 @@ describe('evaluateDependencies', () => {
     expect(evaluateDependencies(task, [dep1, dep2, task]).state).toBe('ready');
   });
 
+  // ---- all_accepted 策略 ----
+
+  it.each([
+    ['done 历史任务', makeTask({ id: 'd1', status: 'done' }), 'ready'],
+    ['明确受理并观察中', makeTask({ id: 'd1', status: 'generating', runtime: {
+      runId: 'run-1', attempt: 1, stage: 'generating', message: '观察中', startedAt: '2025-01-01T00:00:00.000Z',
+      stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+      acceptanceObservation: {
+        schemaVersion: 1, accountId: 'a1', runId: 'run-1', conversationUrl: 'https://www.doubao.com/chat/one',
+        acceptedAt: '2025-01-01T00:00:00.000Z', evidence: { kind: 'generation_started' },
+        cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'video', runId: 'run-1' },
+        lease: { ownerId: 'o1', acquiredAt: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-01T00:01:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z' },
+        outcome: 'observing',
+      }, input: { prompt: 'x', mode: 'video', attachments: [] },
+    } }), 'ready'],
+    ['generating 但无绑定', makeTask({ id: 'd1', status: 'generating' }), 'waiting'],
+    ['仅有 submittedAt', makeTask({ id: 'd1', status: 'paused', runtime: {
+      runId: 'r', attempt: 1, stage: 'paused', message: 'uncertain', startedAt: '2025-01-01T00:00:00.000Z',
+      stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z', submittedAt: '2025-01-01T00:00:00.000Z',
+      input: { prompt: 'x', mode: 'video', attachments: [] },
+    }, errorInfo: { code: 'submission_uncertain', message: 'unknown', recoverable: true, detectedAt: '2025-01-01T00:00:00.000Z' } }), 'waiting'],
+  ])('all_accepted: %s → %s', (_label, dependency, expected) => {
+    const task = makeTask({ id: 't1', dependsOnTaskIds: ['d1'], dependencyPolicy: 'all_accepted' });
+    expect(evaluateDependencies(task, [dependency, task]).state).toBe(expected);
+  });
+
+  it('all_accepted: 前置受理后即使后续进入 fail，仍视为已受理且不重复提交', () => {
+    const dependency = makeTask({ id: 'd1', status: 'fail', runtime: {
+      runId: 'run-accepted', attempt: 1, stage: 'failed', message: '产物观察失败', startedAt: '2025-01-01T00:00:00.000Z',
+      stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+      acceptanceObservation: {
+        schemaVersion: 1, accountId: 'a1', runId: 'run-accepted', conversationUrl: 'https://www.doubao.com/chat/accepted',
+        acceptedAt: '2025-01-01T00:00:00.000Z', evidence: { kind: 'prompt_published' }, cursor: { messageCount: 1, pollCount: 0 },
+        expectedArtifact: { kind: 'video', runId: 'run-accepted' }, lease: {
+          ownerId: 'o1', acquiredAt: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-01T00:01:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+        }, outcome: 'observing',
+      }, input: { prompt: 'x', mode: 'video', attachments: [] },
+    } });
+    const task = makeTask({ id: 't1', dependsOnTaskIds: ['d1'], dependencyPolicy: 'all_accepted' });
+    expect(evaluateDependencies(task, [dependency, task]).state).toBe('ready');
+  });
+
   // ---- 缺失依赖 ----
 
   it('依赖不存在的任务 → missing', () => {

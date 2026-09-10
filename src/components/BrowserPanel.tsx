@@ -56,6 +56,7 @@ import {
   matchesSubmissionConversation,
   requiresSubmissionReconciliation,
   updateStableStreak,
+  type SubmissionReadback,
 } from '../utils/realSendStateMachine';
 import { createWebviewResourceScope } from '../utils/webviewLifecycle';
 import type { WebviewResourceScope } from '../utils/webviewLifecycle';
@@ -65,6 +66,7 @@ import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } f
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
 import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
 import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
+import { createAcceptedObservationBinding, renewObservationLease } from '../utils/acceptedObservation';
 import { createVideoReadinessCheckpoint, VideoControlReadinessError } from '../utils/videoControlReadiness';
 import type { VideoControlReadinessResult, VideoPageReadinessStage } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
@@ -433,6 +435,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       useAccountStore.getState().selectAccount(accountId);
       useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
       try {
+        if (task.runtime?.acceptanceObservation?.outcome === 'observing') {
+          const heartbeatAt = new Date().toISOString();
+          const renewed = renewObservationLease(task.runtime.acceptanceObservation, heartbeatAt, 60_000);
+          const renewedOk = await useTaskStore.getState().updateTaskRuntime(taskId, {
+            runtime: { acceptanceObservation: renewed, lastHeartbeatAt: heartbeatAt },
+          });
+          if (!renewedOk) throw new Error('观察租约续期失败');
+        }
         const currentUrl = webview.getURL();
         // 只允许回到台账在原提交链中保存的会话 URL。即使同账号 WebView 当前停在
         // 另一个具体会话，也不得把它猜作目标会话，避免错绑产物或间接放开重发。
@@ -1123,6 +1133,17 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     });
   }, [accountBusy, executingTasks, tasks, webviewEpoch]);
 
+  // 应用重启或页面重新挂载后，只沿已持久化的原会话恢复观察；不进入注入/发送流程。
+  useEffect(() => {
+    tasks.forEach((task) => {
+      if (task.status !== 'manual_submission_observing' ||
+        task.runtime?.acceptanceObservation?.outcome !== 'observing' ||
+        !task.assignedAccountId || !registryRef.current.has(task.assignedAccountId) ||
+        submissionReconcileRef.current.has(task.id)) return;
+      window.dispatchEvent(new CustomEvent('reconcile-task-submission', { detail: { taskId: task.id } }));
+    });
+  }, [tasks, webviewEpoch]);
+
   // ---- 自动化执行 ----
   const executeAutomation = async (
     accountId: string,
@@ -1613,11 +1634,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       let submissionConfirmed = false;
+      let confirmedEvidence: SubmissionReadback | undefined;
       for (let attempt = 0; attempt < 4; attempt++) {
         await pause(500);
         const evidence = await getSubmissionEvidence(webview, prompt, generationStartTimeBeforeSubmit, initialMsgCount);
         if (classifySubmissionReadback(evidence) === 'confirmed') {
           submissionConfirmed = true;
+          confirmedEvidence = evidence;
           break;
         }
       }
@@ -1661,11 +1684,45 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         throw new AccountAvailabilityPauseError('检测到机器人验证，请人工处理并核对会话；系统不会自动重新提交', 'human_verification');
       }
 
+      const acceptedAt = new Date().toISOString();
+      const acceptedTask = useTaskStore.getState().tasks.find((item) => item.id === taskId);
+      const acceptedRunId = acceptedTask?.runtime?.runId;
+      const conversationUrl = webview.getURL();
+      if (!confirmedEvidence || !acceptedRunId || !conversationUrl) {
+        throw new SubmissionSafetyPauseError('平台已受理，但无法建立完整观察绑定；系统不会自动重发');
+      }
+      const generationStartedAt = await getGenerationStartTime(webview);
+      const acceptanceObservation = createAcceptedObservationBinding({
+        accountId,
+        runId: acceptedRunId,
+        conversationUrl,
+        acceptedAt,
+        ownerId: `renderer-${acceptedRunId}`,
+        mode: mode as Task['mode'],
+        evidence: confirmedEvidence,
+        generationStartedAt,
+        materialAuthorizationConfirmed: authorizationTriggeredSubmission,
+      });
+      const observationPersisted = await updateTaskRuntime(taskId, {
+        status: 'generating',
+        result: '平台已明确受理，正在观察原会话产物',
+        errorInfo: null,
+        runtime: {
+          stage: 'generating',
+          message: '平台已明确受理，正在观察原会话产物',
+          stageStartedAt: acceptedAt,
+          lastHeartbeatAt: acceptedAt,
+          conversationUrl,
+          acceptanceObservation,
+        },
+      });
+      const persistedObservation = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.acceptanceObservation;
+      if (!observationPersisted || persistedObservation?.runId !== acceptedRunId || persistedObservation.outcome !== 'observing') {
+        throw new SubmissionSafetyPauseError('平台已受理，但观察绑定写入或回读不一致；系统不会自动重发');
+      }
+      // 只有持久化与回读成功后才触发队列；all_accepted 依赖此时才可放行其他账号。
       setAccountAutomationState(accountId, 'generating', '等待豆包生成回复...', 'generating');
       await pause(3000);
-      await updateTaskRuntime(taskId, {
-        runtime: { conversationUrl: webview.getURL(), lastHeartbeatAt: new Date().toISOString() },
-      });
 
       let generating = true;
       let imageUrls: string[] = [];
@@ -1835,6 +1892,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           console.error(`[Automation:${accountId}] 视频就绪诊断持久化失败:`, persistError);
         }
       }
+      const acceptedObservationActive = useTaskStore.getState().tasks.find((item) => item.id === taskId)
+        ?.runtime?.acceptanceObservation?.outcome === 'observing';
       const errorMessage = cancelled ? '用户已取消等待' : (err.message || String(err));
       const errorInfo = controlReadinessFailure
         ? { code: err.code, message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() }
@@ -1846,11 +1905,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       const quotaExhausted = mode === 'video' && errorInfo.code === 'quota_exhausted';
       if (quotaExhausted) await useAccountStore.getState().markSeedanceExhausted(accountId);
-      if (!cancelled && !safetyPaused && !availabilityPaused && !confirmationPaused && !controlReadinessFailure) {
+      if (!cancelled && !safetyPaused && !availabilityPaused && !confirmationPaused && !controlReadinessFailure && !acceptedObservationActive) {
         await useAccountStore.getState().recordAccountOutcome(accountId, 'failure', errorInfo.code);
       }
       console.error(`[Automation:${accountId}] ${cancelled || safetyPaused || availabilityPaused || confirmationPaused ? '已暂停' : '失败'}:`, errorMessage);
-      if (cancelled || safetyPaused || availabilityPaused || confirmationPaused) {
+      if (cancelled || safetyPaused || availabilityPaused || confirmationPaused || acceptedObservationActive) {
         const requestedCancellationStatus = pendingCancellationStatusRef.current.get(taskId);
         await pauseAutomation(
           taskId,
@@ -1858,7 +1917,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           cancelled && requestedCancellationStatus === 'cancelled'
             ? '任务已由本机控制面取消'
             : cancelled ? '用户已暂停，可随时重新执行' : errorMessage,
-          confirmationPaused
+          acceptedObservationActive
+            ? { status: 'manual_submission_observing', code: 'manual_review_required' }
+            : confirmationPaused
             ? {
                 status: 'waiting_generation_confirmation',
                 code: 'generation_confirmation_required',

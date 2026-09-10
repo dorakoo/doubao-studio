@@ -64,7 +64,7 @@ const VALID_TASK_STAGES: readonly TaskStage[] = [
   'waiting_verification', 'waiting_generation_confirmation', 'manual_submission_observing', 'generating', 'extracting_outputs',
   'completed', 'paused', 'failed', 'cancelled',
 ];
-const VALID_DEPENDENCY_POLICIES: readonly DependencyPolicy[] = ['all_done', 'all_finished'];
+const VALID_DEPENDENCY_POLICIES: readonly DependencyPolicy[] = ['all_done', 'all_accepted', 'all_finished'];
 const VALID_DOWNLOAD_STATUSES = ['queued', 'downloading', 'done', 'failed'] as const;
 const VALID_ARTIFACT_KINDS = ['image', 'video', 'file'] as const;
 const VALID_ARTIFACT_SOURCES = ['network', 'page', 'manual'] as const;
@@ -421,6 +421,46 @@ function normalizeErrorInfo(raw: unknown, now: string): TaskErrorInfo | undefine
   };
 }
 
+function normalizeAcceptanceObservation(raw: unknown): TaskRunSnapshot['acceptanceObservation'] {
+  if (!isObject(raw) || raw.schemaVersion !== 1 || !isObject(raw.evidence) ||
+    !isObject(raw.cursor) || !isObject(raw.expectedArtifact) || !isObject(raw.lease)) return undefined;
+  const accountId = asNonEmptyString(raw.accountId);
+  const runId = asNonEmptyString(raw.runId);
+  const conversationUrl = asNonEmptyString(raw.conversationUrl);
+  const artifactRunId = asNonEmptyString(raw.expectedArtifact.runId);
+  const ownerId = asNonEmptyString(raw.lease.ownerId);
+  if (!accountId || !runId || !conversationUrl || !artifactRunId || !ownerId ||
+    !isValidISODate(raw.acceptedAt) || !isValidISODate(raw.lease.acquiredAt) ||
+    !isValidISODate(raw.lease.expiresAt) || !isValidISODate(raw.lease.lastHeartbeatAt)) return undefined;
+  return {
+    schemaVersion: 1,
+    accountId, runId, conversationUrl, acceptedAt: raw.acceptedAt,
+    evidence: {
+      kind: oneOf(raw.evidence.kind, ['generation_started', 'prompt_published', 'material_authorization_confirmed'] as const, 'prompt_published'),
+      messageCount: asNonNegativeNumber(raw.evidence.messageCount, 0) || undefined,
+      generationStartedAt: asNonNegativeNumber(raw.evidence.generationStartedAt, 0) || undefined,
+    },
+    cursor: {
+      messageCount: asNonNegativeNumber(raw.cursor.messageCount, 0),
+      generationStartedAt: asNonNegativeNumber(raw.cursor.generationStartedAt, 0) || undefined,
+      pollCount: asNonNegativeNumber(raw.cursor.pollCount, 0),
+    },
+    expectedArtifact: {
+      kind: oneOf(raw.expectedArtifact.kind, ['video', 'image', 'file'] as const, 'file'),
+      runId: artifactRunId,
+      artifactId: asNonEmptyString(raw.expectedArtifact.artifactId) ?? undefined,
+    },
+    lease: {
+      ownerId,
+      acquiredAt: raw.lease.acquiredAt,
+      expiresAt: raw.lease.expiresAt,
+      lastHeartbeatAt: raw.lease.lastHeartbeatAt,
+    },
+    outcome: oneOf(raw.outcome, ['observing', 'completed', 'manual_review'] as const, 'observing'),
+    completedAt: isValidISODate(raw.completedAt) ? raw.completedAt : undefined,
+  };
+}
+
 /**
  * 归一化 TaskRunSnapshot（运行快照）。
  */
@@ -440,6 +480,7 @@ function normalizeRuntime(raw: unknown, taskMode: GenerationMode, now: string): 
     lastHeartbeatAt: asISODate(r.lastHeartbeatAt, now),
     submittedAt: (() => { const v = r.submittedAt; return isValidISODate(v) ? v : undefined; })(),
     conversationUrl: asNonEmptyString(r.conversationUrl) ?? undefined,
+    acceptanceObservation: normalizeAcceptanceObservation(r.acceptanceObservation),
     controlReadiness: isObject(r.controlReadiness) ? {
       schemaVersion: r.controlReadiness.schemaVersion === 1 ? 1 : undefined,
       ready: typeof r.controlReadiness.ready === 'boolean' ? r.controlReadiness.ready : undefined,

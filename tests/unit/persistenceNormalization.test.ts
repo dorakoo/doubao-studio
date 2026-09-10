@@ -699,6 +699,30 @@ describe('normalizeTasks', () => {
     expect(JSON.stringify(normalized.runtime?.executionDiagnostics)).not.toContain('secret');
   });
 
+  it('受理观察绑定与 all_accepted 跨重启白名单保留，未知嵌套字段被删除', () => {
+    const task = makeValidTask();
+    task.dependencyPolicy = 'all_accepted';
+    task.runtime = {
+      runId: 'run-accepted', attempt: 1, stage: 'generating', message: '观察中',
+      startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW,
+      input: { prompt: 'secret prompt', mode: 'video', attachments: ['D:/secret.png'] },
+      acceptanceObservation: {
+        schemaVersion: 1, accountId: 'account-1', runId: 'run-accepted', conversationUrl: 'https://www.doubao.com/chat/accepted',
+        acceptedAt: NOW, evidence: { kind: 'generation_started', messageCount: 4, generationStartedAt: 100 },
+        cursor: { messageCount: 4, generationStartedAt: 100, pollCount: 2 }, expectedArtifact: { kind: 'video', runId: 'run-accepted' },
+        lease: { ownerId: 'observer-1', acquiredAt: NOW, expiresAt: '2026-08-28T00:01:00.000Z', lastHeartbeatAt: NOW }, outcome: 'observing',
+      },
+    };
+    (task.runtime.acceptanceObservation as unknown as Record<string, unknown>).cookie = 'must-not-survive';
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.dependencyPolicy).toBe('all_accepted');
+    expect(normalized.runtime?.acceptanceObservation).toMatchObject({
+      schemaVersion: 1, accountId: 'account-1', runId: 'run-accepted', outcome: 'observing',
+      cursor: { messageCount: 4, generationStartedAt: 100, pollCount: 2 },
+    });
+    expect(JSON.stringify(normalized.runtime?.acceptanceObservation)).not.toContain('must-not-survive');
+  });
+
   // ---- 测试 7: 重复任务 ID 去重 ----
   it('重复任务 ID 只保留第一个且记录警告', () => {
     const t1 = makeValidTask(); t1.id = 'dup-task'; t1.prompt = '任务1';

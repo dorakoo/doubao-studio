@@ -25,6 +25,13 @@ import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
 import { findInteractiveAccountId } from '../utils/interactiveAccount';
+import { completeAcceptedObservation, renewObservationLease, shouldResumeAcceptedObservation } from '../utils/acceptedObservation';
+
+// 账号启动复检可能仍处于 unknown；队列遇到这种软阻断时不能永久停在那里。
+// 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
+const availabilityRetryAttempts = new Map<string, number>();
+const availabilityRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 
 // ==================== 类型 ====================
 
@@ -74,14 +81,14 @@ interface TaskState {
     runtime?: Partial<TaskRunSnapshot>;
     errorInfo?: TaskErrorInfo | null;
     result?: string;
-  }) => Promise<void>;
+  }) => Promise<boolean>;
   completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
   pauseAutomation: (
     taskId: string,
     accountId: string,
     message?: string,
     options?: {
-      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation';
+      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation' | 'manual_submission_observing';
       code?: string;
       generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
     },
@@ -143,7 +150,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     try {
       let tasks = await window.electronAPI.tasks.list();
       if (recoverInterrupted) {
-        const activeTasks = tasks.filter((task) => ['executing', 'generating', 'waiting_verification'].includes(task.status));
+        const resumableObservations = tasks.filter(shouldResumeAcceptedObservation);
+        for (const task of resumableObservations) {
+          const now = new Date().toISOString();
+          await window.electronAPI.tasks.updateRuntime(task.id, {
+            status: 'manual_submission_observing',
+            result: '应用界面重新载入，正在从原会话恢复只读产物观察',
+            runtime: { stage: 'manual_submission_observing', message: '正在恢复只读产物观察', stageStartedAt: now, lastHeartbeatAt: now },
+          });
+          if (task.lock?.ownerId) await window.electronAPI.tasks.releaseLock(task.id, task.lock.ownerId);
+        }
+        const activeTasks = tasks.filter((task) =>
+          ['executing', 'generating', 'waiting_verification'].includes(task.status) && !shouldResumeAcceptedObservation(task),
+        );
         for (const task of activeTasks) {
           const now = new Date().toISOString();
           await window.electronAPI.tasks.updateRuntime(task.id, {
@@ -156,7 +175,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             await window.electronAPI.tasks.releaseLock(task.id, task.lock.ownerId);
           }
         }
-        if (activeTasks.length > 0) tasks = await window.electronAPI.tasks.list();
+        if (activeTasks.length > 0 || resumableObservations.length > 0) tasks = await window.electronAPI.tasks.list();
       }
       set({ tasks, loading: false, executingTasks: {}, accountBusy: {} });
     } catch (err: any) {
@@ -511,6 +530,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               stageStartedAt: stage && stage !== task.runtime.stage ? now : task.runtime.stageStartedAt,
               lastHeartbeatAt: now,
               submittedAt: stage === 'submitting' ? (task.runtime.submittedAt || now) : task.runtime.submittedAt,
+              acceptanceObservation: state === 'generating' && task.runtime.acceptanceObservation?.outcome === 'observing'
+                ? renewObservationLease(task.runtime.acceptanceObservation, now)
+                : task.runtime.acceptanceObservation,
             } : task.runtime,
             updatedAt: now,
           }
@@ -549,7 +571,10 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     const result = await window.electronAPI.tasks.updateRuntime(taskId, patch);
     if (result.success && result.task) {
       set({ tasks: get().tasks.map((task) => task.id === taskId ? result.task! : task) });
+      return true;
     }
+    set({ error: result.error || '任务运行状态写入失败' });
+    return false;
   },
 
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
@@ -567,6 +592,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       errorInfo: null,
     });
 
+    const completedAt = new Date().toISOString();
     const tasks = get().tasks.map((t) =>
       t.id === taskId
         ? {
@@ -576,8 +602,15 @@ export const useTaskStore = create<TaskState>((set, get) => ({
             outputs: finalOutputs,
             artifacts: mergeArtifacts(t, finalOutputs),
             errorInfo: undefined,
-            runtime: t.runtime ? { ...t.runtime, stage: 'completed' as TaskStage, message: '生成完成' } : t.runtime,
-            updatedAt: new Date().toISOString(),
+            runtime: t.runtime ? {
+              ...t.runtime,
+              stage: 'completed' as TaskStage,
+              message: '生成完成',
+              acceptanceObservation: t.runtime.acceptanceObservation
+                ? completeAcceptedObservation(t.runtime.acceptanceObservation, artifactId(finalOutputs[0]), completedAt)
+                : undefined,
+            } : t.runtime,
+            updatedAt: completedAt,
           }
         : t
     );
@@ -631,7 +664,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     accountId: string,
     pauseMessage = '用户已暂停',
     options?: {
-      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation';
+      status: 'paused' | 'cancelled' | 'waiting_verification' | 'waiting_generation_confirmation' | 'manual_submission_observing';
       code?: string;
       generationConfirmation?: NonNullable<TaskRunSnapshot['generationConfirmation']>;
     },
@@ -643,6 +676,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       ? 'waiting_verification'
       : targetStatus === 'waiting_generation_confirmation'
         ? 'waiting_generation_confirmation'
+        : targetStatus === 'manual_submission_observing'
+          ? 'manual_submission_observing'
         : 'paused';
     const errorInfo: TaskErrorInfo = {
       code: options?.code || 'cancelled',
@@ -798,7 +833,33 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         }
         if (dependency.state !== 'ready') continue;
         const accountId = task.assignedAccountId!;
+        const accountHasObservation = state.tasks.some((item) =>
+          item.id !== task.id && item.assignedAccountId === accountId &&
+          item.runtime?.acceptanceObservation?.outcome === 'observing',
+        );
+        if (accountHasObservation) continue;
         const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
+        // 启动后账号会进入“待复检”。若依赖已满足但因为未知可用性被挡住，
+        // 应主动请求一次复检并做有界退避，而不是永久跳过该账号。
+        const availabilityState = account?.health?.availability?.state;
+        if (availabilityState === 'unknown') {
+          const attempts = availabilityRetryAttempts.get(accountId) || 0;
+          if (attempts < 30) {
+            availabilityRetryAttempts.set(accountId, attempts + 1);
+            useAccountStore.getState().requestAvailabilityCheck(accountId);
+            if (!availabilityRetryTimers.has(accountId)) {
+              const delay = Math.min(30_000, 2_000 * 2 ** Math.min(attempts, 4));
+              const timer = setTimeout(() => {
+                availabilityRetryTimers.delete(accountId);
+                get().processQueue();
+              }, delay);
+              availabilityRetryTimers.set(accountId, timer);
+            }
+          }
+          continue;
+        }
+        availabilityRetryAttempts.delete(accountId);
+
         if (getAssignedAccountBlockReason(account, task)) {
           // 用户已明确指派的任务必须保持绑定，不得因冷却/额度/登录状态而静默改派。
           // 自动指派只发生在任务创建或 CSV 导入阶段。

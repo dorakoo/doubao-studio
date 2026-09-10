@@ -213,6 +213,7 @@ describe('P0-2 已提交任务只读核对门禁', () => {
     const cases = [
       { name: '新错误码', task: { status: 'paused', runtime: { submittedAt }, errorInfo: { code: 'submission_uncertain' } }, expected: true },
       { name: '旧 cancelled 文案', task: { status: 'paused', runtime: { submittedAt }, errorInfo: { code: 'cancelled', message: '发送按钮不可用或点击结果不确定' } }, expected: true },
+      { name: '已受理观察即使状态异常也禁止重发', task: { status: 'fail', runtime: { acceptanceObservation: { outcome: 'observing' } } }, expected: true },
       { name: '无提交记录的普通暂停', task: { status: 'paused', errorInfo: { code: 'cancelled', message: '用户暂停' } }, expected: false },
       { name: '已完成任务', task: { status: 'done', runtime: { submittedAt }, errorInfo: { code: 'submission_uncertain' } }, expected: false },
     ];

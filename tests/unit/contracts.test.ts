@@ -108,9 +108,9 @@ describe('@doubao-studio/contracts', () => {
     expect(ratio).toBe('1:1');
   });
 
-  it('DependencyPolicy 包含 all_done / all_finished', () => {
-    const policy: DependencyPolicy = 'all_done';
-    expect(policy).toBe('all_done');
+  it('DependencyPolicy 包含 all_done / all_accepted / all_finished', () => {
+    const policies: DependencyPolicy[] = ['all_done', 'all_accepted', 'all_finished'];
+    expect(policies).toContain('all_accepted');
   });
 
   it('所有类型均为字符串字面量联合（运行时仍为 string）', () => {
