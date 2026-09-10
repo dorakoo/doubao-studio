@@ -6,7 +6,7 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Source Version](https://img.shields.io/badge/source-2.3.6-6d5dfc)](CHANGELOG.md)
+[![Source Version](https://img.shields.io/badge/source-2.3.7-6d5dfc)](CHANGELOG.md)
 [![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
@@ -24,8 +24,8 @@
 
 | 渠道 | 当前状态 |
 | --- | --- |
-| 当前源码 | `2.3.6`；Webview 常驻、顺序预热和本机控制面生命周期已修复 |
-| GitHub Release | [`v2.3.6`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.6) |
+| 当前源码 | `2.3.7`；视频控件就绪与受理后观察流水线已完成稳定性收口 |
+| GitHub Release | [`v2.3.7`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.7) |
 | 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
 > [!IMPORTANT]
@@ -60,6 +60,8 @@
 - **上传连续稳定门禁**：参考素材数量正确、上传进度消失且页面连续稳定后才进入下一步。
 - **控件连续稳定门禁**：模型、时长、比例和提交控件都必须可见并连续回读一致，避免页面慢加载时误判。
 - **提交意图先持久化**：发送前记录提交意图；发送后以平台页面回读为准。结果不确定时停止，禁止对同一任务高频重发。
+- **受理后可靠观察**：平台明确受理后持久化原会话定位、观察租约和产物游标；应用重启继续观察同一会话，不新建会话或重复发送。
+- **跨账号流水线**：`all_accepted` 允许前序已受理并建立观察后释放不同账号后继；同账号后继仍保持串行，避免串单。
 - **素材授权弹窗接管**：人工确认可能直接触发平台提交时，工作室只进行状态回读和产物跟踪，不再次点击发送。
 - **推广弹窗白名单处理**：只自动关闭已识别的“下载电脑版 / 使用完整功能”推广弹窗，优先点击“下次提醒我”；登录、人机验证、额度、素材授权和未知弹窗一律不误关。
 
