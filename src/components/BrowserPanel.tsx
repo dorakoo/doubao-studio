@@ -65,7 +65,8 @@ import { isExperimentalNoWatermarkEnabled, setExperimentalNoWatermarkEnabled } f
 import { decideMaterialAuthorizationProgress } from '../utils/materialAuthorization';
 import { selectQuotaFallbackAccount } from '../utils/quotaRecovery';
 import type { GenerationConfirmationEvidence } from '../utils/generationConfirmation';
-import { VideoControlReadinessError } from '../utils/videoControlReadiness';
+import { createVideoReadinessCheckpoint, VideoControlReadinessError } from '../utils/videoControlReadiness';
+import type { VideoControlReadinessResult, VideoPageReadinessStage } from '../utils/videoControlReadiness';
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
 import {
@@ -1150,6 +1151,33 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     let initializationLease: InitializationLease | undefined;
     let autoConfirmMaterialAuthorization = false;
     let initializationLimit = 1;
+    let videoReadinessStartedAt = Date.now();
+    let videoReadinessRecoveryAttempts = 0;
+    const persistVideoReadiness = async (
+      stage: VideoPageReadinessStage,
+      diagnostic?: VideoControlReadinessResult,
+    ): Promise<void> => {
+      if (mode !== 'video') return;
+      const current = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.controlReadiness;
+      const checkpoint = diagnostic ?? createVideoReadinessCheckpoint(stage, {
+        elapsedMs: Date.now() - videoReadinessStartedAt,
+        recoveryAttempts: videoReadinessRecoveryAttempts,
+      });
+      await updateTaskRuntime(taskId, {
+        runtime: {
+          controlReadiness: {
+            ...current,
+            ...checkpoint,
+            currentStage: stage,
+            recoveryAttempts: videoReadinessRecoveryAttempts,
+            pageStructureVersion: checkpoint.pageStructureVersion ?? current?.pageStructureVersion,
+            failureStage: checkpoint.failureStage,
+            missingControl: checkpoint.missingControl,
+          },
+          lastHeartbeatAt: new Date().toISOString(),
+        },
+      });
+    };
     const clearKnownPromotion = async (): Promise<void> => {
       const result = await dismissKnownDesktopDownloadPromotion(webview);
       if (result === 'failed') {
@@ -1177,9 +1205,16 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       await clearKnownPromotion();
       const preTaskAvailability = await performAvailabilityCheck(accountId, webview, 'pre_task');
       if (availabilityBlocksAutomation(preTaskAvailability)) {
+        if (mode === 'video') {
+          await persistVideoReadiness('account', {
+            ...createVideoReadinessCheckpoint('account'), ready: false, failureStage: 'account', missingControl: 'account_page',
+          });
+        }
         useAccountStore.getState().selectAccount(accountId);
         throw new AccountAvailabilityPauseError(preTaskAvailability.message, preTaskAvailability.reason);
       }
+      videoReadinessStartedAt = Date.now();
+      await persistVideoReadiness('account');
 
       // 视频能力预检：在提交前基于本地已知状态判断是否允许提交
       if (mode === 'video' && videoConfig) {
@@ -1219,12 +1254,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           throw new AccountAvailabilityPauseError(failedAvailability.message, failedAvailability.reason);
         }
         // reason 为脱敏状态码（如 PAGE_NOT_READY/EDITOR_NOT_FOUND/SESSION_NOT_EMPTY），不泄露页面细节。
+        if (mode === 'video') {
+          throw new VideoControlReadinessError('new_conversation', {
+            ...createVideoReadinessCheckpoint('new_conversation'), ready: false, failureStage: 'new_conversation',
+            missingControl: 'conversation_editor',
+          });
+        }
         throw new Error(`创建新对话失败（${newConversationResult.reason || 'PAGE_UNKNOWN'}）`);
       }
       await waitForWebviewReady(webview, 15000);
       await clearKnownPromotion();
       taskConversationUrl = webview.getURL();
       await updateTaskRuntime(taskId, { runtime: { conversationUrl: taskConversationUrl } });
+      await persistVideoReadiness('new_conversation');
       // 根据任务模式切换到对应页面
       if (mode && mode !== 'chat') {
         const modeLabel = mode === 'image' ? '图片' : mode === 'video' ? '视频' : mode === 'music' ? '音乐' : mode;
@@ -1247,6 +1289,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             }
             throw new Error(`${modeLabel}模式入口未就绪，已在提交前停止`);
           }
+          if (mode === 'video') await persistVideoReadiness('video_entry');
           await pause(1500); // 等待 Tab 切换动画
         }
 
@@ -1254,24 +1297,25 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         if (mode === 'video') {
           if (videoConfig) {
             setAccountAutomationState(accountId, 'injecting', '配置视频参数...', 'configuring');
-            await configureVideoOptions(webview, videoConfig, {
-              onReadiness: async (diagnostic) => {
-                await updateTaskRuntime(taskId, {
-                  runtime: {
-                    controlReadiness: {
-                      modeEntryElapsedMs,
-                      attempts: diagnostic.attempts,
-                      elapsedMs: diagnostic.elapsedMs,
-                      modelVisibleAtMs: diagnostic.modelVisibleAtMs,
-                      compositeVisibleAtMs: diagnostic.compositeVisibleAtMs,
-                      stableAtMs: diagnostic.stableAtMs,
-                      failureStage: diagnostic.failureStage,
-                    },
-                    lastHeartbeatAt: new Date().toISOString(),
-                  },
-                });
-              },
+            const configure = () => configureVideoOptions(webview, videoConfig, {
+              onReadiness: async (diagnostic) => persistVideoReadiness(diagnostic.currentStage || 'model', {
+                ...diagnostic, modeEntryElapsedMs,
+              }),
             });
+            try {
+              await configure();
+            } catch (error: unknown) {
+              if (!(error instanceof VideoControlReadinessError) || videoReadinessRecoveryAttempts >= 1) throw error;
+              // 仅在尚未产生提交意图时允许一次页面重绘恢复；配置函数逐项回读，重复执行是幂等的。
+              videoReadinessRecoveryAttempts += 1;
+              await persistVideoReadiness(error.diagnostic.currentStage || 'model', {
+                ...error.diagnostic, recoveryAttempts: videoReadinessRecoveryAttempts,
+              });
+              const recovered = await clickAITab(webview, 'video');
+              if (!recovered) throw error;
+              await pause(750);
+              await configure();
+            }
             await pause(500);
           }
         }
@@ -1296,7 +1340,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             }
           }
           if (fileDataList.length !== attachments.length) {
-            throw new Error('参考图片读取不完整，已在提交前停止');
+            throw new VideoControlReadinessError('assets', {
+              ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
+            });
           }
           let lastUploadPersistAt = -Infinity;
           const uploaded = await uploadReferenceImages(webview, fileDataList, {
@@ -1311,7 +1357,9 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               });
             },
           });
-          if (!uploaded) throw new Error('参考图片未全部上传稳定，已在提交前停止');
+          if (!uploaded) throw new VideoControlReadinessError('assets', {
+            ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
+          });
         }
 
         // 有参考音频时上传（仅视频模式）
@@ -1325,15 +1373,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
               const mime = mimeMatch ? mimeMatch[1] : 'audio/mpeg';
               const base64 = result.data.replace(/^data:audio\/[\w.+-]+;base64,/, '');
               const uploaded = await uploadReferenceAudio(webview, { name: fileName, base64, mime });
-              if (!uploaded) throw new Error('参考音频未上传完成，已在提交前停止');
+              if (!uploaded) throw new VideoControlReadinessError('assets', {
+                ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
+              });
             } else {
-              throw new Error('参考音频读取失败，已在提交前停止');
+              throw new VideoControlReadinessError('assets', {
+                ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
+              });
             }
           } catch (error: unknown) {
+            if (error instanceof VideoControlReadinessError) throw error;
             const reason = error instanceof Error ? error.message : '参考音频处理失败';
-            throw new Error(reason.includes('已在提交前停止') ? reason : '参考音频处理失败，已在提交前停止');
+            throw new VideoControlReadinessError('assets', {
+              ...createVideoReadinessCheckpoint('assets'), ready: false, failureStage: 'assets', missingControl: 'asset_upload',
+              elapsedMs: reason.includes('超时') ? 60_000 : 0,
+            });
           }
         }
+        if (mode === 'video') await persistVideoReadiness('assets');
       } else {
         await waitForWebviewReady(webview, 15000);
       }
@@ -1352,15 +1409,27 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       setAccountAutomationState(accountId, 'injecting', '正在注入提示词...', 'injecting_prompt');
-      const injected = await Promise.race([
-        injectPrompt(webview, prompt),
-        new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 60000)),
-      ]);
-      if (!injected) throw new Error('注入失败');
+      let injected = false;
+      try {
+        injected = await Promise.race([
+          injectPrompt(webview, prompt),
+          new Promise<boolean>((_, rej) => setTimeout(() => rej(new Error('注入超时')), 60000)),
+        ]);
+      } catch {
+        throw new VideoControlReadinessError('prompt', {
+          ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor', elapsedMs: 60_000,
+        });
+      }
+      if (!injected) throw new VideoControlReadinessError('prompt', {
+        ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor',
+      });
       await pause(800);
       if (!await verifyPromptReadyForSubmission(webview, prompt)) {
-        throw new Error('提示词全文回读不一致，可能存在截断或台词缺失；已在提交前停止');
+        throw new VideoControlReadinessError('prompt', {
+          ...createVideoReadinessCheckpoint('prompt'), ready: false, failureStage: 'prompt', missingControl: 'prompt_editor',
+        });
       }
+      await persistVideoReadiness('prompt');
 
       // 素材确认可能在用户点击后直接继续发送。先取只读基线，确认后只回读，
       // 绝不能再点一次发送。
@@ -1494,8 +1563,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
 
       if (!authorizationTriggeredSubmission && !await waitForSubmissionControlsStable(webview)) {
-        throw new Error('发送控件或素材上传状态未连续稳定，已在提交前停止');
+        throw new VideoControlReadinessError('submission_controls', {
+          ...createVideoReadinessCheckpoint('submission_controls', {
+            elapsedMs: Date.now() - videoReadinessStartedAt,
+            attempts: 1,
+            stableSamples: 0,
+            recoveryAttempts: videoReadinessRecoveryAttempts,
+          }),
+          ready: false,
+          failureStage: 'submission_controls',
+          missingControl: 'send_control',
+        });
       }
+      await persistVideoReadiness('submission_controls');
 
       // P0：真实发送是不可重复副作用。先从当前任务快照核对 runId/submittedAt，
       // 再把本次提交意图持久化；写入失败或运行已变化时绝不点击页面。
@@ -1748,6 +1828,13 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const availabilityPaused = err instanceof AccountAvailabilityPauseError;
       const confirmationPaused = err instanceof GenerationConfirmationPauseError;
       const controlReadinessFailure = err instanceof VideoControlReadinessError;
+      if (controlReadinessFailure && mode === 'video') {
+        try {
+          await persistVideoReadiness(err.diagnostic.currentStage || 'submission_controls', err.diagnostic);
+        } catch (persistError) {
+          console.error(`[Automation:${accountId}] 视频就绪诊断持久化失败:`, persistError);
+        }
+      }
       const errorMessage = cancelled ? '用户已取消等待' : (err.message || String(err));
       const errorInfo = controlReadinessFailure
         ? { code: err.code, message: errorMessage, recoverable: true, detectedAt: new Date().toISOString() }

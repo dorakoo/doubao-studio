@@ -637,14 +637,41 @@ describe('normalizeTasks', () => {
       startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW, submittedAt: NOW,
       conversationUrl: 'https://www.doubao.com/chat/conversation-1',
       input: { prompt: task.prompt, mode: 'video', attachments: [] },
-      controlReadiness: { attempts: 5, elapsedMs: 3250, modelVisibleAtMs: 250, compositeVisibleAtMs: 750, stableAtMs: 3250 },
+      controlReadiness: {
+        schemaVersion: 1, currentStage: 'duration', attempts: 5, elapsedMs: 3250, stableSamples: 3, recoveryAttempts: 1,
+        pageStructureVersion: 'doubao-video-v2:composite-v2:m1r1d1', modelVisibleAtMs: 250,
+        aspectRatioVisibleAtMs: 500, durationVisibleAtMs: 750, compositeVisibleAtMs: 750, stableAtMs: 3250,
+      },
       generationConfirmation: { detectedAt: NOW, marker: 'parameter_confirmation', model: 'Seedance 2.0 Fast', duration: '5s', aspectRatio: '9:16' },
     };
     const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
     expect(normalized.status).toBe('waiting_generation_confirmation');
     expect(normalized.runtime?.stage).toBe('waiting_generation_confirmation');
     expect(normalized.runtime?.generationConfirmation).toEqual(task.runtime.generationConfirmation);
-    expect(normalized.runtime?.controlReadiness).toMatchObject({ attempts: 5, elapsedMs: 3250, stableAtMs: 3250 });
+    expect(normalized.runtime?.controlReadiness).toMatchObject({
+      schemaVersion: 1, currentStage: 'duration', attempts: 5, elapsedMs: 3250, stableSamples: 3,
+      recoveryAttempts: 1, pageStructureVersion: 'doubao-video-v2:composite-v2:m1r1d1', stableAtMs: 3250,
+    });
+  });
+
+  it('非法页面就绪诊断被白名单归一化且结构版本长度受限', () => {
+    const task = makeValidTask() as unknown as Record<string, unknown>;
+    task.runtime = {
+      runId: 'run-invalid-readiness', attempt: 1, stage: 'configuring', message: '配置中',
+      startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW,
+      input: { prompt: task.prompt, mode: 'video', attachments: [] },
+      controlReadiness: {
+        schemaVersion: 999, currentStage: 'invented', failureStage: 'invented', missingControl: 'cookie',
+        attempts: -1, elapsedMs: -1, pageStructureVersion: `doubao-video-v2:${'x'.repeat(200)}`,
+      },
+    };
+    const readiness = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0].runtime?.controlReadiness;
+    expect(readiness).toMatchObject({ attempts: 0, elapsedMs: 0 });
+    expect(readiness?.schemaVersion).toBeUndefined();
+    expect(readiness?.currentStage).toBeUndefined();
+    expect(readiness?.failureStage).toBeUndefined();
+    expect(readiness?.missingControl).toBeUndefined();
+    expect(readiness?.pageStructureVersion?.length).toBe(96);
   });
 
   it('人工提交观察与最小化执行诊断跨重启保留，不引入页面文本或素材路径', () => {

@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { classifyGenerationConfirmationText, isGenerationConfirmationTask } from '../../src/utils/generationConfirmation';
-import { VideoControlReadinessError, waitForVideoControlReadiness } from '../../src/utils/videoControlReadiness';
+import {
+  buildVideoPageStructureVersion,
+  createVideoReadinessCheckpoint,
+  VideoControlReadinessError,
+  waitForVideoControlReadiness,
+} from '../../src/utils/videoControlReadiness';
 import { matchesSubmissionConversation, requiresSubmissionReconciliation } from '../../src/utils/realSendStateMachine';
 
 describe('视频生成参数确认独立状态', () => {
@@ -72,15 +77,39 @@ describe('视频参数控件有界分段等待', () => {
   });
 
   it.each([
-    [{ modelReady: false, compositeReady: true }, 'model_control'],
-    [{ modelReady: true, compositeReady: false }, 'composite_control'],
-  ] as const)('缺失权威控件时输出具体失败阶段', async (snapshot, failureStage) => {
+    [{ modelReady: false, aspectRatioReady: true, durationReady: true }, 'model', 'model_control'],
+    [{ modelReady: true, aspectRatioReady: false, durationReady: true }, 'aspect_ratio', 'aspect_ratio_control'],
+    [{ modelReady: true, aspectRatioReady: true, durationReady: false }, 'duration', 'duration_control'],
+  ] as const)('缺失权威控件时输出具体失败阶段', async (snapshot, failureStage, missingControl) => {
     let now = 0;
     const result = await waitForVideoControlReadiness(() => snapshot, {
       timeoutMs: 1_000, now: () => now, wait: async (ms) => { now += ms; },
     });
-    expect(result).toMatchObject({ ready: false, failureStage });
+    expect(result).toMatchObject({ ready: false, failureStage, missingControl });
   });
+
+  it('比例和时长必须独立就绪，组合控件不再掩盖具体缺失项', async () => {
+    let now = 0;
+    const result = await waitForVideoControlReadiness(
+      () => ({ modelReady: true, aspectRatioReady: true, durationReady: false, pageVariant: 'composite-v2' }),
+      { timeoutMs: 500, now: () => now, wait: async (ms) => { now += ms; } },
+    );
+    expect(result).toMatchObject({ failureStage: 'duration', pageStructureVersion: 'doubao-video-v2:composite-v2:m1r1d0' });
+  });
+
+  it('结构版本只由白名单能力位生成，不接受页面文本', () => {
+    const version = buildVideoPageStructureVersion({ modelReady: true, aspectRatioReady: false, durationReady: true, pageVariant: 'composite-v2' });
+    expect(version).toBe('doubao-video-v2:composite-v2:m1r0d1');
+    expect(version).not.toMatch(/prompt|cookie|session|D:\\|https?:/i);
+  });
+
+  it.each(['account', 'new_conversation', 'video_entry', 'model', 'aspect_ratio', 'duration', 'assets', 'prompt', 'submission_controls'] as const)(
+    '九阶段检查点 %s 使用统一 schema 且不包含业务正文', (stage) => {
+      const checkpoint = createVideoReadinessCheckpoint(stage, { elapsedMs: 123, recoveryAttempts: 1 });
+      expect(checkpoint).toMatchObject({ schemaVersion: 1, currentStage: stage, elapsedMs: 123, recoveryAttempts: 1 });
+      expect(JSON.stringify(checkpoint)).not.toMatch(/提示词|素材路径|cookie|token|session/i);
+    },
+  );
 
   it('指数退避有上限且总等待受 timeout 约束', async () => {
     let now = 0;
@@ -94,10 +123,18 @@ describe('视频参数控件有界分段等待', () => {
     expect(delays.reduce((sum, value) => sum + value, 0)).toBe(5_000);
   });
 
-  it.each(['mode_entry', 'model_control', 'composite_control', 'stable_readback', 'final_readback'] as const)(
-    '错误 %s 为机器可读阶段码且明确提交前停止', (stage) => {
+  it.each([
+    ['mode_entry', 'video_mode_entry_not_ready'],
+    ['model_control', 'video_model_control_not_ready'],
+    ['composite_control', 'video_aspect_ratio_control_not_ready'],
+    ['duration', 'video_duration_control_not_ready'],
+    ['submission_controls', 'video_submission_controls_not_ready'],
+    ['stable_readback', 'video_stable_readback_not_ready'],
+    ['final_readback', 'video_final_readback_not_ready'],
+  ] as const)(
+    '错误 %s 为机器可读阶段码且明确提交前停止', (stage, code) => {
       const error = new VideoControlReadinessError(stage, { ready: false, failureStage: stage, attempts: 3, elapsedMs: 1000 });
-      expect(error.code).toBe(`video_${stage}_not_ready`);
+      expect(error.code).toBe(code);
       expect(error.message).toContain('已在提交前停止');
     },
   );
@@ -125,5 +162,22 @@ describe('源码安全边界', () => {
     expect(body).not.toContain('injectPrompt(');
     expect(body).not.toContain('submitPromptWithNativeClick(');
     expect(body).not.toContain('startNewConversation(');
+  });
+
+  it('提交前恢复严格限制一次，提交后不走配置恢复分支', () => {
+    expect(panel).toContain('videoReadinessRecoveryAttempts >= 1');
+    expect(panel).toContain("if (!submissionMarkedAt)");
+    const recoveryStart = panel.indexOf('仅在尚未产生提交意图时允许一次页面重绘恢复');
+    const submissionStart = panel.indexOf("const markSubmissionIntent", recoveryStart);
+    expect(recoveryStart).toBeGreaterThan(-1);
+    expect(submissionStart).toBeGreaterThan(recoveryStart);
+  });
+
+  it('提交不确定仍走安全暂停且只有明确回读才进入 generating', () => {
+    expect(panel).toContain("throw new SubmissionSafetyPauseError('发送状态不确定");
+    expect(panel).toContain("classifySubmissionReadback(evidence) === 'confirmed'");
+    const confirmationGuard = panel.indexOf("if (!submissionConfirmed)");
+    expect(confirmationGuard).toBeGreaterThan(-1);
+    expect(confirmationGuard).toBeLessThan(panel.indexOf("'generating'", confirmationGuard));
   });
 });
