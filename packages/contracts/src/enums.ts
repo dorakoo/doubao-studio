@@ -95,3 +95,11 @@ export type VideoAspectRatio = '1:1' | '3:4' | '4:3' | '9:16' | '16:9' | '21:9';
 
 /** 任务依赖策略 */
 export type DependencyPolicy = 'all_done' | 'all_accepted' | 'all_finished';
+
+/**
+ * 任务执行意图。
+ * - hold：仅已保存/已指派，不得进入调度；
+ * - armed：用户已明确请求执行，可由调度器按门禁启动。
+ * 历史 queued 任务缺省迁移为 hold，active/observing 恢复不受影响。
+ */
+export type TaskExecutionIntent = 'hold' | 'armed';

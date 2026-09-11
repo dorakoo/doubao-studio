@@ -18,6 +18,7 @@ import type {
   VideoModel,
   VideoDuration,
   VideoAspectRatio,
+  TaskExecutionIntent,
   DependencyPolicy,
 } from './enums';
 
@@ -289,6 +290,8 @@ export interface Task {
   prompt: string;
   /** 分配的目标账号 ID */
   assignedAccountId: string | null;
+  /** 执行意图：hold 不得调度，armed 才允许进入队列调度 */
+  executionIntent?: TaskExecutionIntent;
   /** 任务状态 */
   status: TaskStatus;
   /** 生成模式 */

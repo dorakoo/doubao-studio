@@ -294,7 +294,7 @@ export function registerTaskIPC(): () => void {
   // ---- 指派任务给账号 ----
   ipcMain.handle(
     'tasks:assign',
-    async (_event, params: TaskAssignParams): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: TaskAssignParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       return taskService.assign(params);
     }
   );

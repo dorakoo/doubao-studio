@@ -19,6 +19,7 @@ import type {
   AccountScheduling,
 } from '../domain';
 import type {
+  TaskExecutionIntent,
   GenerationMode,
   AccountPlatform,
   TaskStatus,
@@ -130,7 +131,7 @@ export interface ElectronAPI {
       audioAttachment?: string,
       projectId?: string
     ) => Promise<TaskAddResult>;
-    assign: (taskId: string, accountId: string) => Promise<TaskOperationResult>;
+    assign: (taskId: string, accountId: string) => Promise<TaskResult>;
     updateStatus: (
       taskId: string,
       status: string,
@@ -141,6 +142,7 @@ export interface ElectronAPI {
       status?: TaskStatus;
       runtime?: Partial<TaskRunSnapshot>;
       errorInfo?: TaskErrorInfo | null;
+      executionIntent?: TaskExecutionIntent;
       result?: string;
     }) => Promise<TaskResult>;
     acquireLock: (taskId: string, ownerId: string) => Promise<TaskResult>;

@@ -12,6 +12,7 @@ import type {
   TaskArtifact,
 } from '../domain';
 import type {
+  TaskExecutionIntent,
   GenerationMode,
   TaskStatus,
 } from '../enums';
@@ -46,6 +47,8 @@ export interface TaskAddParams {
   videoConfig?: Task['videoConfig'];
   attachments?: string[];
   audioAttachment?: string;
+  /** 创建时的执行意图；默认 hold，只有显式导入执行才允许 armed */
+  executionIntent?: TaskExecutionIntent;
   projectId?: string;
 }
 
@@ -66,6 +69,8 @@ export interface TaskUpdateRuntimeParams {
   status?: TaskStatus;
   runtime?: Partial<TaskRunSnapshot>;
   errorInfo?: TaskErrorInfo | null;
+  /** 执行意图变更（可选）；用于显式启动持久化 */
+  executionIntent?: TaskExecutionIntent;
   result?: string;
 }
 

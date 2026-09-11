@@ -1155,7 +1155,7 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     attachments?: string[],
     audioAttachment?: string
   ) => {
-    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, retryTask, assignTask } =
+    const { setAccountAutomationState, updateTaskRuntime, completeAutomation, pauseAutomation, failAutomation, updateTask, retryTask, assignTask, armTasks } =
       useTaskStore.getState();
     const expectedRunId = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.runId;
     let controller: AbortController;
@@ -1952,8 +1952,18 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
             accountId,
           ) : null;
           if (fallbackAccountId) {
-            await assignTask(taskId, fallbackAccountId);
-            message.warning('原账号视频额度已清零，任务已安全改派到其他可用账号');
+            const assigned = await assignTask(taskId, fallbackAccountId);
+            if (!assigned) {
+              const reason = useTaskStore.getState().error || '改派账号失败';
+              message.error(`原账号视频额度已清零，改派失败：${reason}`);
+            } else {
+              const armResult = await armTasks([taskId]);
+              if (armResult.armed === 1 && armResult.failed === 0) {
+                message.warning('原账号视频额度已清零，任务已安全改派到其他可用账号');
+              } else {
+                message.error(armResult.error || '改派后的执行授权写入失败；任务保持 hold，未继续调度');
+              }
+            }
           } else {
             message.warning('原账号视频额度已清零；暂无替代账号，任务保留排队等待次日 00:00 刷新');
           }
@@ -1964,7 +1974,14 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       if (restartTask) {
         pendingRestartTasksRef.current.delete(taskId);
         const updated = await updateTask(taskId, restartTask);
-        if (updated) message.success('提示词已更新，任务已重新加入队列');
+        if (updated) {
+          const armResult = await armTasks([taskId]);
+          if (armResult.armed === 1 && armResult.failed === 0) {
+            message.success('提示词已更新，任务已显式授权执行');
+          } else {
+            message.error(armResult.error || '提示词已更新，但执行授权写入失败；任务保持 hold');
+          }
+        }
       }
     } finally {
       initializationLease?.release();

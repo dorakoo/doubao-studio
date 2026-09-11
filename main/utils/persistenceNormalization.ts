@@ -612,6 +612,8 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   task.prompt = asString(raw.prompt, '');
   task.assignedAccountId = asNonEmptyString(raw.assignedAccountId) ?? null;
   task.mode = oneOf(raw.mode, VALID_GENERATION_MODES, 'chat');
+  // 执行意图：历史 queued 缺失字段默认 hold；只有显式 armed 才允许调度。
+  task.executionIntent = raw.executionIntent === 'armed' ? 'armed' : 'hold';
   task.result = raw.result === null ? null : (typeof raw.result === 'string' ? raw.result : null);
   task.source = oneOf(raw.source, VALID_TASK_SOURCES, 'manual') as Task['source'];
   task.createdAt = asISODate(raw.createdAt, now);

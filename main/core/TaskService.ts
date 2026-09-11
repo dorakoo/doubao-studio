@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type {
   GenerationMode,
+  TaskExecutionIntent,
   VideoModel,
   VideoDuration,
   VideoAspectRatio,
@@ -182,7 +183,8 @@ export class TaskService {
   }
 
   /** 将任务重置为排队状态，清除运行结果、产物列表、错误信息和锁 */
-  private resetTaskForQueue(task: Task, timestamp: string): void {
+  private resetTaskForQueue(task: Task, timestamp: string, executionIntent?: TaskExecutionIntent): void {
+    if (executionIntent) task.executionIntent = executionIntent;
     task.status = 'queued';
     task.result = null;
     task.outputs = [];
@@ -211,6 +213,7 @@ export class TaskService {
       const timestamp = this.now();
       return {
         id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
+        executionIntent: params.executionIntent || 'hold',
         videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
         runHistory: [], source: 'manual', dependsOnTaskIds: [],
@@ -223,16 +226,17 @@ export class TaskService {
     return { success: true, data: created };
   }
 
-  assign(params: TaskAssignParams): TaskServiceResult {
+  assign(params: TaskAssignParams): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
     if (ACTIVE.has(task.status)) return { success: false, error: '任务正在自动化执行中，无法重新指派' };
     task.assignedAccountId = params.accountId;
-    this.resetTaskForQueue(task, this.now());
+    // 指派本身永远不是执行授权；需要执行时必须显式 armTasks。
+    this.resetTaskForQueue(task, this.now(), 'hold');
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
-    return { success: true };
+    return { success: true, data: task };
   }
 
   update(params: { taskId: string; updates: TaskUpdateInput }): TaskServiceResult<Task> {
@@ -246,7 +250,7 @@ export class TaskService {
     task.videoConfig = params.updates.videoConfig;
     task.attachments = params.updates.attachments?.length ? params.updates.attachments : undefined;
     task.audioAttachment = params.updates.audioAttachment || undefined;
-    this.resetTaskForQueue(task, this.now());
+    this.resetTaskForQueue(task, this.now(), 'hold');
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
   }
@@ -321,7 +325,8 @@ export class TaskService {
     if (task.status === 'executing' || task.status === 'generating') {
       return { success: false, error: '任务正在执行中，无法重试' };
     }
-    this.resetTaskForQueue(task, this.now());
+    // 重试是明确的重新执行动作，必须显式 armed 后才能被调度器启动。
+    this.resetTaskForQueue(task, this.now(), 'armed');
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
   }
@@ -453,6 +458,7 @@ export class TaskService {
 
     const timestamp = this.now();
 
+    if (params.executionIntent) task.executionIntent = params.executionIntent;
     if (params.status) task.status = params.status;
     if (params.result !== undefined) task.result = params.result;
     if (params.errorInfo === null) task.errorInfo = undefined;
@@ -692,6 +698,7 @@ export class TaskService {
       assignedAccountId: partial.assignedAccountId,
       status: 'queued',
       mode: partial.mode,
+      executionIntent: 'hold',
       videoConfig: partial.videoConfig,
       attachments: partial.attachments,
       audioAttachment: partial.audioAttachment,

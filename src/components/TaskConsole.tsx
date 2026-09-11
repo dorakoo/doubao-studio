@@ -117,6 +117,31 @@ const ModeSelector: React.FC<{
   );
 };
 
+type ArmTasksFn = (taskIds: string[]) => Promise<{ armed: number; failed: number; error?: string }>;
+
+function autoExecuteTooltip(enabled: boolean): string {
+  return enabled ? '导入后执行：开启' : '导入后执行：关闭';
+}
+
+function importedExecutionSuffix(armed: number): string {
+  return armed > 0 ? `，已显式授权执行 ${armed} 条` : '';
+}
+
+async function armImportedTasksAfterAssignment(importedTasks: Task[], autoExecute: boolean, armTasks: ArmTasksFn): Promise<number> {
+  if (!autoExecute || importedTasks.length === 0) return 0;
+  const importedIds = new Set(importedTasks.map((task) => task.id));
+  const assignedIds = useTaskStore.getState().tasks
+    .filter((task) => importedIds.has(task.id) && task.assignedAccountId)
+    .map((task) => task.id);
+  if (assignedIds.length === 0) {
+    message.info('已导入任务，但没有已指派账号；任务保持 hold，需指派后手动启动');
+    return 0;
+  }
+  const armResult = await armTasks(assignedIds);
+  if (armResult.failed > 0) message.warning(armResult.error || `${armResult.failed} 条任务执行意图写入失败，已保持 hold`);
+  return armResult.armed;
+}
+
 // ==================== 组件 ====================
 
 const TaskConsole: React.FC = () => {
@@ -125,6 +150,7 @@ const TaskConsole: React.FC = () => {
     addTasks,
     importCsv,
     assignTask,
+    armTasks,
     deleteTask,
     batchPause,
     getCompletedOutputs,
@@ -133,7 +159,6 @@ const TaskConsole: React.FC = () => {
     clearError,
     error,
     updateTask,
-    processQueue,
   } = useTaskStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProject = useProjectStore((state) => state.projects.find((project) => project.id === state.activeProjectId));
@@ -153,6 +178,7 @@ const TaskConsole: React.FC = () => {
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [autoAssign, setAutoAssign] = useState(false);
+  const [autoExecute, setAutoExecute] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingPrompt, setEditingPrompt] = useState('');
   const [editingVideoConfig, setEditingVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
@@ -171,6 +197,7 @@ const TaskConsole: React.FC = () => {
     void window.electronAPI.settings.get().then((settings) => {
       setTemplates(Array.isArray(settings.taskTemplates) ? settings.taskTemplates : []);
       setAutoAssign(settings.autoAssignEnabled === true);
+      setAutoExecute(settings.autoExecuteEnabled === true);
     });
   }, []);
 
@@ -265,17 +292,19 @@ const TaskConsole: React.FC = () => {
       const assignment = autoAssign && result.tasks.length > 0
         ? await autoAssignTasks(result.tasks)
         : { assigned: 0, unassigned: 0 };
+      const armed = await armImportedTasksAfterAssignment(result.tasks, autoExecute, armTasks);
+      const suffix = importedExecutionSuffix(armed);
       if (result.errors.length > 0) {
-        message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
+        message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}${suffix}`);
       } else if (assignment.unassigned > 0) {
-        message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派`);
+        message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派${suffix}`);
       } else {
-        message.success(`已导入 ${result.imported} 条任务`);
+        message.success(`已导入 ${result.imported} 条任务${suffix}`);
       }
     } finally {
       setIsCsvImporting(false);
     }
-  }, [autoAssign, autoAssignTasks, importCsv, isCsvImporting]);
+  }, [autoAssign, autoAssignTasks, autoExecute, armTasks, importCsv, isCsvImporting]);
 
   const handleCsvDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -306,6 +335,16 @@ const TaskConsole: React.FC = () => {
       message.error(error instanceof Error ? error.message : '无法导入拖入的 CSV 文件');
     }
   }, [handleImportCsv]);
+
+  const handleAutoExecuteChange = useCallback(async (enabled: boolean) => {
+    setAutoExecute(enabled);
+    const settings = await window.electronAPI.settings.get();
+    const result = await window.electronAPI.settings.save({ ...settings, autoExecuteEnabled: enabled });
+    if (!result.success) {
+      setAutoExecute(!enabled);
+      message.error(result.error || '导入后执行设置保存失败');
+    }
+  }, []);
 
   const handleAutoAssignChange = useCallback(async (enabled: boolean) => {
     setAutoAssign(enabled);
@@ -427,8 +466,12 @@ const TaskConsole: React.FC = () => {
         message.error(useTaskStore.getState().error || '编辑任务失败');
         return;
       }
-      processQueue();
-      message.success('提示词已更新，任务已重新加入队列');
+      const armResult = await armTasks([editingTask.id]);
+      if (armResult.armed === 1 && armResult.failed === 0) {
+        message.success('提示词已更新，任务已显式授权执行');
+      } else {
+        message.error(armResult.error || '提示词已更新，但执行授权写入失败；任务保持 hold');
+      }
     }
 
     resetEditingTask();
@@ -660,7 +703,7 @@ const TaskConsole: React.FC = () => {
         <div className="csv-drop-overlay" role="status" aria-live="polite">
           <FileExcelOutlined />
           <strong>松开导入 CSV</strong>
-          <span>导入当前项目；未指派任务不会自动开始</span>
+          <span>导入当前项目；未明确启动的任务不会自动执行</span>
         </div>
       )}
       {/* 顶部操作栏 */}
@@ -687,6 +730,16 @@ const TaskConsole: React.FC = () => {
                 onChange={(enabled) => void handleAutoAssignChange(enabled)}
               />
               <span style={{ color: '#9898b8', fontSize: 12 }}>自动指派</span>
+            </div>
+          </Tooltip>
+          <Tooltip title={autoExecuteTooltip(autoExecute)}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginRight: 8 }}>
+              <Switch
+                size="small"
+                checked={autoExecute}
+                onChange={(enabled) => void handleAutoExecuteChange(enabled)}
+              />
+              <span style={{ color: '#9898b8', fontSize: 12 }}>导入后执行</span>
             </div>
           </Tooltip>
           <Button

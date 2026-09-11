@@ -18,6 +18,7 @@ import type {
   TaskRunSnapshot,
   TaskStage,
   TaskArtifact,
+  TaskExecutionIntent,
 } from '../types';
 import { getAssignedAccountBlockReason } from '../utils/queueAccountDecision';
 import { evaluateDependencies } from '../utils/dependencyEval';
@@ -64,6 +65,8 @@ interface TaskState {
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
   importCsv: (filePath?: string) => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
+  /** 将指定任务显式置为 armed；用于 CSV 明确执行和批量启动。 */
+  armTasks: (taskIds: string[]) => Promise<{ armed: number; failed: number; error?: string }>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<boolean>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<boolean>;
@@ -80,6 +83,7 @@ interface TaskState {
     status?: TaskStatus;
     runtime?: Partial<TaskRunSnapshot>;
     errorInfo?: TaskErrorInfo | null;
+    executionIntent?: TaskExecutionIntent;
     result?: string;
   }) => Promise<boolean>;
   completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
@@ -214,25 +218,42 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     set({ error: null });
     try {
       const result = await window.electronAPI.tasks.assign(taskId, accountId);
-      if (result.success) {
-        const tasks = get().tasks.map((t) =>
-          t.id === taskId
-            ? { ...t, assignedAccountId: accountId, updatedAt: new Date().toISOString() }
-            : t
-        );
-        set({ tasks });
-
-        // 指派后由统一队列调度器启动，避免在这里和定时调度同时抢占账号。
-        setTimeout(() => get().processQueue(), 0);
+      const assignedTask = result.task;
+      if (result.success && assignedTask) {
+        set({ tasks: get().tasks.map((task) => task.id === taskId ? assignedTask : task) });
+        // 指派只改变账号绑定，不得触发队列、页面导航、提示词注入或平台请求。
         return true;
-      } else {
-        set({ error: result.error || '指派失败' });
-        return false;
       }
+      set({ error: result.error || '指派失败' });
+      return false;
     } catch (err: any) {
       set({ error: err.message });
       return false;
     }
+  },
+
+  /** 显式执行授权：只持久化 executionIntent=armed，随后交给统一队列门禁。 */
+  armTasks: async (taskIds: string[]) => {
+    const ids = [...new Set(taskIds.filter(Boolean))];
+    if (ids.length === 0) return { armed: 0, failed: 0 };
+    const updated = new Map<string, Task>();
+    const failures: string[] = [];
+    for (const taskId of ids) {
+      const result = await window.electronAPI.tasks.updateRuntime(taskId, { executionIntent: 'armed' });
+      if (result.success && result.task) updated.set(taskId, result.task);
+      else failures.push(result.error || taskId);
+    }
+    if (updated.size > 0) {
+      set({ tasks: get().tasks.map((task) => updated.get(task.id) || task) });
+      setTimeout(() => get().processQueue(), 0);
+    }
+    if (failures.length > 0) {
+      set({ error: `部分任务启动授权失败：${failures.slice(0, 2).join('；')}` });
+    }
+    const failedReason = failures.length > 0 ? failures.slice(0, 2).join('；') : undefined;
+    return failedReason
+      ? { armed: updated.size, failed: failures.length, error: failedReason }
+      : { armed: updated.size, failed: failures.length };
   },
 
   updateTaskStatus: async (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => {
@@ -264,7 +285,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return null;
     }
     set({ tasks: [...get().tasks, ...result.tasks] });
-    setTimeout(() => get().processQueue(), 0);
+    // CSV 导入只创建 hold 任务；只有 UI 明确勾选导入后执行时才调用 armTasks。
     return { tasks: result.tasks, imported: result.imported || result.tasks.length, skipped: result.skipped || 0, errors: result.errors || [] };
   },
 
@@ -403,7 +424,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: '另一账号正在配置或提交，请等待其进入生成阶段' });
       return false;
     }
-    const task = get().tasks.find((t) => t.id === taskId);
+    let task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
       set({ error: task ? '任务尚未指派账号' : '任务不存在' });
@@ -411,6 +432,23 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     }
     if (task.status !== 'queued') {
       set({ error: '只有排队中的任务可以启动' });
+      return false;
+    }
+
+    // 显式启动必须先持久化 armed，写失败则绝不进入账号与页面动作。
+    if (task.executionIntent !== 'armed') {
+      const armResult = await window.electronAPI.tasks.updateRuntime(taskId, { executionIntent: 'armed' });
+      if (!armResult.success || !armResult.task) {
+        set({ error: armResult.error || '执行意图写入失败' });
+        return false;
+      }
+      const armedTask = armResult.task;
+      task = armedTask;
+      set({ tasks: get().tasks.map((item) => item.id === taskId ? armedTask : item) });
+    }
+
+    if (!task.assignedAccountId) {
+      set({ error: '任务尚未指派账号' });
       return false;
     }
 
@@ -802,9 +840,9 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const state = get();
       if (state.schedulerPaused) return;
       if (findInteractiveAccountId(state.accountAutomationState)) return;
-    // 找出所有已指派但还在 queued 状态的任务
+    // 只处理已指派、queued 且被显式 armed 的任务；hold 永不进入调度。
       const queuedTasks = state.tasks.filter(
-        (t) => t.status === 'queued' && t.assignedAccountId
+        (t) => t.status === 'queued' && t.assignedAccountId && t.executionIntent === 'armed'
       );
 
     // 按创建时间排序
@@ -888,7 +926,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   getNextTaskForAccount: (accountId: string) => {
     const tasks = get().tasks;
     return tasks.find(
-      (t) => t.status === 'queued' && t.assignedAccountId === accountId
+        (t) => t.status === 'queued' && t.assignedAccountId === accountId && t.executionIntent === 'armed'
     ) || null;
   },
 }));

@@ -16,6 +16,7 @@ export type {
   VideoDuration,
   VideoAspectRatio,
   DependencyPolicy,
+  TaskExecutionIntent,
 } from './enums';
 
 export type {
