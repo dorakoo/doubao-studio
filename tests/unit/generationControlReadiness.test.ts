@@ -156,8 +156,9 @@ describe('源码安全边界', () => {
     const start = panel.indexOf('const handleSubmissionReconcile');
     const end = panel.indexOf("window.addEventListener('reconcile-task-submission'", start);
     const body = panel.slice(start, end);
-    expect(body).toContain('storedConversationUrl');
-    expect(body).toContain('const conversationUrl = storedConversationUrl');
+    expect(body).toContain('resolveTaskConversationTarget(task)');
+    expect(body).toContain('openTaskConversation(webview, conversationTarget.url');
+    expect(body).toContain('const conversationUrl = conversationTarget.url');
     expect(body).not.toContain('currentIsConcreteChat');
     expect(body).not.toContain('injectPrompt(');
     expect(body).not.toContain('submitPromptWithNativeClick(');

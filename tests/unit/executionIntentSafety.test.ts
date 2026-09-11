@@ -63,6 +63,8 @@ function observingTask(id: string, accountId: string): Task {
     runtime: {
       runId: 'run-observing', attempt: 1, stage: 'waiting_generation_confirmation', message: 'waiting',
       startedAt: NOW, stageStartedAt: NOW, lastHeartbeatAt: NOW,
+      // B 要求 runtime.conversationUrl 与 acceptanceObservation.conversationUrl 同步为具体会话
+      conversationUrl: 'https://www.doubao.com/chat/1',
       acceptanceObservation: {
         schemaVersion: 1, accountId, runId: 'run-observing', conversationUrl: 'https://www.doubao.com/chat/1',
         acceptedAt: NOW, evidence: { kind: 'generation_started' }, cursor: { messageCount: 1, pollCount: 0 },

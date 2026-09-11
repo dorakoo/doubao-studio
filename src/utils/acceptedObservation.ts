@@ -1,5 +1,6 @@
 import type { GenerationMode, Task, TaskRunSnapshot } from '../types';
 import type { SubmissionReadback } from './realSendStateMachine';
+import { isSameDoubaoConversation, normalizeDoubaoConversationUrl } from './taskConversationLocator';
 
 export type AcceptanceObservation = NonNullable<TaskRunSnapshot['acceptanceObservation']>;
 
@@ -17,6 +18,8 @@ export function createAcceptedObservationBinding(input: {
   materialAuthorizationConfirmed?: boolean;
   leaseMs?: number;
 }): AcceptanceObservation {
+  const conversationUrl = normalizeDoubaoConversationUrl(input.conversationUrl);
+  if (!conversationUrl) throw new Error('接受观察绑定需要具体的豆包会话 URL');
   const acceptedMs = new Date(input.acceptedAt).getTime();
   const leaseMs = Math.max(15_000, input.leaseMs ?? DEFAULT_LEASE_MS);
   const kind = input.materialAuthorizationConfirmed
@@ -28,7 +31,7 @@ export function createAcceptedObservationBinding(input: {
     schemaVersion: 1,
     accountId: input.accountId,
     runId: input.runId,
-    conversationUrl: input.conversationUrl,
+    conversationUrl,
     acceptedAt: input.acceptedAt,
     evidence: {
       kind,
@@ -61,13 +64,17 @@ export function createAcceptedObservationBinding(input: {
 export function hasPlatformAcceptance(task: Pick<Task, 'status' | 'runtime'>): boolean {
   if (task.status === 'done') return true;
   const binding = task.runtime?.acceptanceObservation;
+  const runtimeConversationUrl = normalizeDoubaoConversationUrl(task.runtime?.conversationUrl);
+  const bindingConversationUrl = normalizeDoubaoConversationUrl(binding?.conversationUrl);
   return Boolean(
     binding &&
     binding.schemaVersion === 1 &&
     binding.outcome === 'observing' &&
     binding.runId === task.runtime?.runId &&
     binding.accountId &&
-    binding.conversationUrl,
+    runtimeConversationUrl &&
+    bindingConversationUrl &&
+    isSameDoubaoConversation(runtimeConversationUrl, bindingConversationUrl),
   );
 }
 

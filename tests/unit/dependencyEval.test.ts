@@ -102,6 +102,7 @@ describe('evaluateDependencies', () => {
     ['明确受理并观察中', makeTask({ id: 'd1', status: 'generating', runtime: {
       runId: 'run-1', attempt: 1, stage: 'generating', message: '观察中', startedAt: '2025-01-01T00:00:00.000Z',
       stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+      conversationUrl: 'https://www.doubao.com/chat/one',
       acceptanceObservation: {
         schemaVersion: 1, accountId: 'a1', runId: 'run-1', conversationUrl: 'https://www.doubao.com/chat/one',
         acceptedAt: '2025-01-01T00:00:00.000Z', evidence: { kind: 'generation_started' },
@@ -125,6 +126,7 @@ describe('evaluateDependencies', () => {
     const dependency = makeTask({ id: 'd1', status: 'fail', runtime: {
       runId: 'run-accepted', attempt: 1, stage: 'failed', message: '产物观察失败', startedAt: '2025-01-01T00:00:00.000Z',
       stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+      conversationUrl: 'https://www.doubao.com/chat/accepted',
       acceptanceObservation: {
         schemaVersion: 1, accountId: 'a1', runId: 'run-accepted', conversationUrl: 'https://www.doubao.com/chat/accepted',
         acceptedAt: '2025-01-01T00:00:00.000Z', evidence: { kind: 'prompt_published' }, cursor: { messageCount: 1, pollCount: 0 },
@@ -135,6 +137,23 @@ describe('evaluateDependencies', () => {
     } });
     const task = makeTask({ id: 't1', dependsOnTaskIds: ['d1'], dependencyPolicy: 'all_accepted' });
     expect(evaluateDependencies(task, [dependency, task]).state).toBe('ready');
+  });
+
+  it('all_accepted: observation 与 runtime 会话不一致时保持 waiting', () => {
+    const dependency = makeTask({ id: 'd1', status: 'generating', runtime: {
+      runId: 'run-1', attempt: 1, stage: 'generating', message: '观察中', startedAt: '2025-01-01T00:00:00.000Z',
+      stageStartedAt: '2025-01-01T00:00:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z',
+      conversationUrl: 'https://www.doubao.com/chat/runtime',
+      acceptanceObservation: {
+        schemaVersion: 1, accountId: 'a1', runId: 'run-1', conversationUrl: 'https://www.doubao.com/chat/binding',
+        acceptedAt: '2025-01-01T00:00:00.000Z', evidence: { kind: 'generation_started' },
+        cursor: { messageCount: 1, pollCount: 0 }, expectedArtifact: { kind: 'video', runId: 'run-1' },
+        lease: { ownerId: 'o1', acquiredAt: '2025-01-01T00:00:00.000Z', expiresAt: '2025-01-01T00:01:00.000Z', lastHeartbeatAt: '2025-01-01T00:00:00.000Z' },
+        outcome: 'observing',
+      }, input: { prompt: 'x', mode: 'video', attachments: [] },
+    } });
+    const task = makeTask({ id: 't1', dependsOnTaskIds: ['d1'], dependencyPolicy: 'all_accepted' });
+    expect(evaluateDependencies(task, [dependency, task]).state).toBe('waiting');
   });
 
   // ---- 缺失依赖 ----

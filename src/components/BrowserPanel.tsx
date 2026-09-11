@@ -72,6 +72,15 @@ import type { VideoControlReadinessResult, VideoPageReadinessStage } from '../ut
 import { initializationGate } from '../utils/initializationGate';
 import type { InitializationLease } from '../utils/initializationGate';
 import {
+  isSameDoubaoConversation,
+  normalizeDoubaoConversationUrl,
+  openTaskConversation,
+  resolveTaskConversationTarget,
+  supportsDoubaoConversationLocator,
+  waitForConcreteConversationUrl,
+  waitForConversationNavigator,
+} from '../utils/taskConversationLocator';
+import {
   applyWebviewActivationStyle,
   forceWebviewLayoutRepaint,
   getSupersededLoadingAccountIds,
@@ -361,8 +370,10 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const currentWebview = registryRef.current.get(task.assignedAccountId);
       const suppliedUrl = detail.conversationUrl?.trim();
       const userConfirmedCurrentUrl = detail.useCurrentPage ? currentWebview?.getURL() : undefined;
-      const conversationUrl = suppliedUrl || userConfirmedCurrentUrl || task.runtime?.conversationUrl;
-      if (!conversationUrl || !/^https:\/\/www\.doubao\.com\/chat\/[^/?#]+(?:[?#].*)?$/i.test(conversationUrl)) {
+      const conversationUrl = normalizeDoubaoConversationUrl(
+        suppliedUrl || userConfirmedCurrentUrl || task.runtime?.conversationUrl,
+      );
+      if (!conversationUrl) {
         message.error('缺少可验证的豆包具体会话 URL；任务保持原状态，未猜测当前页面');
         return;
       }
@@ -421,18 +432,41 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
         return;
       }
       const accountId = task?.assignedAccountId;
-      const webview = accountId ? registryRef.current.get(accountId) : undefined;
-      const storedConversationUrl = task?.runtime?.conversationUrl;
-      if (!task || !accountId || !webview || !storedConversationUrl) {
+      const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
+      const conversationTarget = resolveTaskConversationTarget(task);
+      if (!task || !accountId || !account || !supportsDoubaoConversationLocator(account.platform) || !conversationTarget.ok) {
         message.error('缺少原账号页面或原对话地址，已保持暂停且未重新发送');
+        return;
+      }
+
+      submissionReconcileRef.current.add(taskId);
+      useAccountStore.getState().selectAccount(accountId);
+      const webview = await waitForConversationNavigator(
+        () => registryRef.current.get(accountId),
+        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false },
+      );
+      if (!webview) {
+        submissionReconcileRef.current.delete(taskId);
+        message.error('账号页面未能在限定时间内就绪；任务保持原状态，未刷新、未重新发送');
+        return;
+      }
+      const navigation = await openTaskConversation(webview, conversationTarget.url, { refreshIfAlreadyOpen: true });
+      if (!navigation.ok) {
+        submissionReconcileRef.current.delete(taskId);
+        message.error('无法安全打开任务绑定的原会话；任务保持原状态，未跳转到新会话');
+        return;
+      }
+      try {
+        await waitForWebviewReady(webview, 20_000);
+      } catch {
+        submissionReconcileRef.current.delete(taskId);
+        message.error('原会话页面未能在限定时间内就绪；任务保持原状态，未重新发送');
         return;
       }
 
       const isManualObservation = task.status === 'manual_submission_observing';
       const observationController = isManualObservation ? new AbortController() : undefined;
       if (observationController) abortControllersRef.current.set(taskId, observationController);
-      submissionReconcileRef.current.add(taskId);
-      useAccountStore.getState().selectAccount(accountId);
       useTaskStore.getState().setAccountAutomationState(accountId, 'generating', '正在核对平台结果（不会重新发送）...');
       try {
         if (task.runtime?.acceptanceObservation?.outcome === 'observing') {
@@ -443,18 +477,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           });
           if (!renewedOk) throw new Error('观察租约续期失败');
         }
-        const currentUrl = webview.getURL();
-        // 只允许回到台账在原提交链中保存的会话 URL。即使同账号 WebView 当前停在
-        // 另一个具体会话，也不得把它猜作目标会话，避免错绑产物或间接放开重发。
-        const conversationUrl = storedConversationUrl;
-        if (currentUrl !== conversationUrl) {
-          webview.loadURL(conversationUrl);
-        }
-        // loadURL 是异步导航；旧实现立即读取会误读上一页并判失败。轮询只读取
-        // URL/会话文本，不触发任何点击、键盘或表单动作。
+        // 导航预检完成后只读取原会话；不注入、不点击发送、不创建新对话。
+        const conversationUrl = conversationTarget.url;
         let conversationMatched = false;
         for (let attempt = 0; attempt < 40; attempt++) {
-          if (webview.getURL() === conversationUrl) {
+          if (isSameDoubaoConversation(webview.getURL(), conversationUrl)) {
             const conversationText = await getConversationText(webview);
             if (matchesSubmissionConversation(task.prompt, conversationText)) {
               conversationMatched = true;
@@ -1077,15 +1104,24 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
     const handleOpenConversation = async (event: Event) => {
       const task = (event as CustomEvent<{ task: Task }>).detail?.task;
       const accountId = task?.assignedAccountId;
-      const conversationUrl = task?.runtime?.conversationUrl || task?.artifacts?.find((artifact) => artifact.conversationUrl)?.conversationUrl;
-      const webview = accountId ? registryRef.current.get(accountId) : null;
-      if (!accountId || !conversationUrl || !webview) {
-        message.warning('该产物没有可用的原对话地址');
+      const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
+      const conversationTarget = resolveTaskConversationTarget(task);
+      if (!accountId || !account || !supportsDoubaoConversationLocator(account.platform) || !conversationTarget.ok) {
+        message.warning('该任务没有可验证的原会话地址');
         return;
       }
       useAccountStore.getState().selectAccount(accountId);
-      webview.loadURL(conversationUrl);
-      message.info('正在打开产物对应的豆包对话');
+      const webview = await waitForConversationNavigator(
+        () => registryRef.current.get(accountId),
+        { timeoutMs: 20_000, isReady: () => loadingMapRef.current.get(accountId) === false },
+      );
+      if (!webview) {
+        message.warning('账号页面未能及时就绪，未跳转到其它会话');
+        return;
+      }
+      const navigation = await openTaskConversation(webview, conversationTarget.url);
+      if (navigation.ok) message.success('已打开任务对应的原会话');
+      else message.warning('无法安全打开任务对应的原会话，未跳转到新会话');
     };
     window.addEventListener('open-task-conversation', handleOpenConversation);
     return () => window.removeEventListener('open-task-conversation', handleOpenConversation);
@@ -1285,8 +1321,8 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       }
       await waitForWebviewReady(webview, 15000);
       await clearKnownPromotion();
+      // 仅作为本次素材授权页面一致性校验使用；/chat/ 根页绝不写入任务定位字段。
       taskConversationUrl = webview.getURL();
-      await updateTaskRuntime(taskId, { runtime: { conversationUrl: taskConversationUrl } });
       await persistVideoReadiness('new_conversation');
       // 根据任务模式切换到对应页面
       if (mode && mode !== 'chat') {
@@ -1687,10 +1723,11 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       const acceptedAt = new Date().toISOString();
       const acceptedTask = useTaskStore.getState().tasks.find((item) => item.id === taskId);
       const acceptedRunId = acceptedTask?.runtime?.runId;
-      const conversationUrl = webview.getURL();
+      const conversationUrl = await waitForConcreteConversationUrl(webview, { timeoutMs: 15_000 });
       if (!confirmedEvidence || !acceptedRunId || !conversationUrl) {
-        throw new SubmissionSafetyPauseError('平台已受理，但无法建立完整观察绑定；系统不会自动重发');
+        throw new SubmissionSafetyPauseError('平台已受理，但未取得具体原会话地址；已安全暂停且不会自动重发');
       }
+      taskConversationUrl = conversationUrl;
       const generationStartedAt = await getGenerationStartTime(webview);
       const acceptanceObservation = createAcceptedObservationBinding({
         accountId,
@@ -1716,8 +1753,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
           acceptanceObservation,
         },
       });
-      const persistedObservation = useTaskStore.getState().tasks.find((item) => item.id === taskId)?.runtime?.acceptanceObservation;
-      if (!observationPersisted || persistedObservation?.runId !== acceptedRunId || persistedObservation.outcome !== 'observing') {
+      const persistedTask = useTaskStore.getState().tasks.find((item) => item.id === taskId);
+      const persistedObservation = persistedTask?.runtime?.acceptanceObservation;
+      const persistedTarget = resolveTaskConversationTarget(persistedTask);
+      if (!observationPersisted || persistedObservation?.runId !== acceptedRunId ||
+        persistedObservation.accountId !== accountId || persistedObservation.outcome !== 'observing' ||
+        !persistedTarget.ok || !isSameDoubaoConversation(persistedTarget.url, conversationUrl)) {
         throw new SubmissionSafetyPauseError('平台已受理，但观察绑定写入或回读不一致；系统不会自动重发');
       }
       // 只有持久化与回读成功后才触发队列；all_accepted 依赖此时才可放行其他账号。

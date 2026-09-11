@@ -26,7 +26,8 @@ function task(status: Task['status'], acceptanceObservation = binding()): Task {
     result: null, outputs: [], createdAt: acceptedAt, updatedAt: acceptedAt,
     runtime: {
       runId: 'run-1', attempt: 1, stage: 'generating', message: 'observing', startedAt: acceptedAt,
-      stageStartedAt: acceptedAt, lastHeartbeatAt: acceptedAt, acceptanceObservation,
+      stageStartedAt: acceptedAt, lastHeartbeatAt: acceptedAt,
+      conversationUrl: acceptanceObservation?.conversationUrl, acceptanceObservation,
       input: { prompt: 'secret prompt', mode: 'video', attachments: ['D:/secret/image.png'] },
     },
   };
@@ -65,6 +66,19 @@ describe('accepted observation', () => {
     expect(hasPlatformAcceptance(task('generating', mismatch))).toBe(false);
     const completed = binding(); completed.outcome = 'completed';
     expect(hasPlatformAcceptance(task('generating', completed))).toBe(false);
+  });
+
+  it('acceptance binding 必须使用具体会话且与 runtime 会话同步', () => {
+    const value = task('generating');
+    value.runtime!.conversationUrl = 'https://www.doubao.com/chat/other';
+    expect(hasPlatformAcceptance(value)).toBe(false);
+    value.runtime!.conversationUrl = 'https://www.doubao.com/chat/one';
+    value.runtime!.acceptanceObservation!.conversationUrl = 'https://www.doubao.com/chat/';
+    expect(hasPlatformAcceptance(value)).toBe(false);
+    expect(() => createAcceptedObservationBinding({
+      accountId: 'a', runId: 'r', conversationUrl: 'https://www.doubao.com/chat/', acceptedAt,
+      ownerId: 'o', mode: 'video', evidence: { generationStarted: true, inputCleared: true, messageCount: 1, promptPublished: true },
+    })).toThrow('具体的豆包会话 URL');
   });
 
   it('仅 generating + 有效受理绑定需要在重启后恢复观察', () => {

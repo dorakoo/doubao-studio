@@ -11,6 +11,7 @@ import {
   isUploadSnapshotReady,
 } from '../../src/utils/uploadReadiness';
 import { confirmMaterialAuthorizationIfAllowed } from '../../src/utils/doubaoBridge';
+import { normalizeDoubaoConversationUrl } from '../../src/utils/taskConversationLocator';
 
 describe('P0-1 素材授权精确白名单', () => {
   it.each([
@@ -90,7 +91,9 @@ describe('P0-3 人工提交只读观察边界', () => {
     expect(panel).toContain("status: 'manual_submission_observing'");
     expect(panel).toContain("stage: 'manual_submission_observing'");
     expect(panel).toContain('userConfirmedCurrentUrl');
-    expect(panel).toContain('www\\.doubao\\.com\\/chat\\/');
+    expect(normalizeDoubaoConversationUrl('https://www.doubao.com/chat/verified?from=manual'))
+      .toBe('https://www.doubao.com/chat/verified');
+    expect(normalizeDoubaoConversationUrl('https://www.doubao.com/chat/')).toBeNull();
   });
 
   it('只读核对函数不包含注入、发送或新建对话调用', () => {

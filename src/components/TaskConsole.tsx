@@ -596,6 +596,7 @@ const TaskConsole: React.FC = () => {
           className={`task-item ${isActive ? 'task-item-active' : ''}`}
           style={{ cursor: 'pointer' }}
           onClick={() => handleTaskClick(task)}
+          onDoubleClick={() => window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }))}
         >
           <div className="task-item-top">
             {renderStatusTag(task.status)}
