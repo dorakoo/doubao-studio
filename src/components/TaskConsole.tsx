@@ -10,7 +10,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message, Switch } from 'antd';
-import type { MenuProps, SegmentedProps } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -31,7 +31,7 @@ import {
   StopOutlined,
   FileExcelOutlined,
 } from '@ant-design/icons';
-import { useTaskStore } from '../store/useTaskStore';
+import { useTaskStore, isDependencyBlockedTask, describeDependencyBlock } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
 import TaskDetailModal from './TaskDetailModal';
@@ -42,7 +42,6 @@ import {
   VIDEO_MODEL_LABELS,
   VIDEO_MODEL_COST,
   DEFAULT_VIDEO_CONFIG,
-  type TaskStatus,
   type GenerationMode,
   type VideoModel,
   type VideoDuration,
@@ -153,7 +152,6 @@ const TaskConsole: React.FC = () => {
     armTasks,
     deleteTask,
     batchPause,
-    getCompletedOutputs,
     startAutomation,
     accountBusy,
     clearError,
@@ -482,7 +480,7 @@ const TaskConsole: React.FC = () => {
   const getContextMenu = (taskId: string): MenuProps['items'] => {
     const task = tasks.find((t) => t.id === taskId);
     const mustReconcile = requiresSubmissionReconciliation(task);
-    const canRetry = task && !mustReconcile && (
+    const canRetry = task && !mustReconcile && !isDependencyBlockedTask(task) && (
       task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
       task.status === 'cancelled' || task.status === 'waiting_verification'
     );
@@ -550,7 +548,19 @@ const TaskConsole: React.FC = () => {
 
   // ---- 渲染状态标签 ----
 
-  const renderStatusTag = (status: TaskStatus) => {
+  const renderStatusTag = (task: (typeof tasks)[0]) => {
+    const status = task.status;
+    // 依赖阻断任务保持 queued（可被调度器重新评估），因此用独立标签区分，不能只显示“排队”。
+    if (isDependencyBlockedTask(task)) {
+      return (
+        <Tooltip title={describeDependencyBlock(task)}>
+          <span className="task-status-tag" style={{ borderColor: '#fbbf24', color: '#fbbf24' }}>
+            <StopOutlined style={{ marginRight: 4 }} />
+            依赖阻断
+          </span>
+        </Tooltip>
+      );
+    }
     const cfg = TASK_STATUS_CONFIG[status];
     return (
       <span className={`task-status-tag ${cfg.className}`} style={{ borderColor: cfg.color, color: cfg.color }}>
@@ -599,7 +609,7 @@ const TaskConsole: React.FC = () => {
           onDoubleClick={() => window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }))}
         >
           <div className="task-item-top">
-            {renderStatusTag(task.status)}
+            {renderStatusTag(task)}
             {renderModeTag(taskMode)}
             <span className="task-item-time">
               {new Date(task.createdAt).toLocaleTimeString('zh-CN', {
@@ -690,7 +700,9 @@ const TaskConsole: React.FC = () => {
     (t) => t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification' || t.status === 'waiting_generation_confirmation' || t.status === 'manual_submission_observing'
   ).length;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
-  const failCount = tasks.filter((t) => t.status === 'fail').length;
+  // 依赖阻断是调度阻断（任务仍保持 queued），与普通平台失败分开显示，避免被误读为生成失败。
+  const failCount = tasks.filter((t) => t.status === 'fail' && !isDependencyBlockedTask(t)).length;
+  const dependencyBlockedCount = tasks.filter((t) => isDependencyBlockedTask(t)).length;
 
   return (
     <div
@@ -718,8 +730,15 @@ const TaskConsole: React.FC = () => {
           <span className="stat-badge done"><CheckCircleOutlined /> 完成 {doneCount}</span>
           {failCount > 0 && (
             <span className="stat-badge fail">
-              <CloseCircleOutlined /> {failCount}
+              <CloseCircleOutlined /> 失败 {failCount}
             </span>
+          )}
+          {dependencyBlockedCount > 0 && (
+            <Tooltip title="依赖阻断：调度阻断，任务仍在队列中等待重新评估；不计入平台生成失败率，也不会自动重试">
+              <span className="stat-badge fail">
+                <StopOutlined /> 依赖阻断 {dependencyBlockedCount}
+              </span>
+            </Tooltip>
           )}
         </div>
         <div className="task-console-actions">
@@ -774,15 +793,9 @@ const TaskConsole: React.FC = () => {
             <Button
               size="small"
               icon={<DownloadOutlined />}
-              onClick={async () => {
-                const outputs = await getCompletedOutputs();
-                console.log('[TaskConsole] 已完成产物:', outputs);
-                if (outputs.length === 0) {
-                  message.info('暂无已完成产物');
-                  return;
-                }
-                // 通过自定义事件通知 Toolbar 打开预览
-                window.dispatchEvent(new CustomEvent('batch-download-outputs', { detail: outputs }));
+              onClick={() => {
+                // 打开批次选择器；下载范围固定为当前项目和用户选择的单个批次。
+                window.dispatchEvent(new CustomEvent('open-batch-manager'));
               }}
             >
               批量下载

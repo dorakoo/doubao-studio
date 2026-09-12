@@ -9,7 +9,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Modal, Button, Input, Tag, Descriptions, Space, Divider, List, message } from 'antd';
+import { Modal, Button, Checkbox, Input, Tag, Descriptions, Space, Divider, List, message } from 'antd';
 import {
   ReloadOutlined,
   DeleteOutlined,
@@ -28,14 +28,14 @@ import {
   EditOutlined,
   StopOutlined,
 } from '@ant-design/icons';
-import type { Task } from '../types';
+import type { Task, QualityRejectionTag } from '../types';
 import {
   TASK_STATUS_CONFIG,
   TASK_STAGE_LABELS,
   GENERATION_MODE_CONFIG,
   VIDEO_MODEL_LABELS,
 } from '../types';
-import { useTaskStore } from '../store/useTaskStore';
+import { useTaskStore, describeDependencyBlock, isDependencyBlockedTask } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { requiresSubmissionReconciliation } from '../utils/realSendStateMachine';
 
@@ -48,12 +48,23 @@ interface TaskDetailModalProps {
   onEditAndRerun: (task: Task) => void;
 }
 
+const QUALITY_REJECTION_LABELS: Record<QualityRejectionTag, string> = {
+  product_structure: '商品结构',
+  material: '材质',
+  aspect_ratio: '比例',
+  character_consistency: '人物一致性',
+  audio: '声音',
+  bgm: 'BGM',
+};
+
 const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, onEditAndRerun }) => {
-  const { retryTask, deleteTask, assignTask, startAutomation, accountBusy } = useTaskStore();
+  const { retryTask, deleteTask, assignTask, startAutomation, setQualityVerdict, accountBusy } = useTaskStore();
   const accounts = useAccountStore((s) => s.accounts);
 
   const [imageBase64s, setImageBase64s] = useState<Record<string, string>>({});
   const [manualConversationUrl, setManualConversationUrl] = useState('');
+  const [qualityTags, setQualityTags] = useState<QualityRejectionTag[]>([]);
+  const [qualitySaving, setQualitySaving] = useState(false);
 
   // 加载参考图片缩略图
   useEffect(() => {
@@ -80,7 +91,8 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
 
   useEffect(() => {
     setManualConversationUrl(task?.runtime?.conversationUrl || '');
-  }, [task?.id, task?.runtime?.conversationUrl]);
+    setQualityTags(task?.qualityVerdict?.rejectionTags || []);
+  }, [task?.id, task?.runtime?.conversationUrl, task?.qualityVerdict]);
 
   if (!task) return null;
 
@@ -89,8 +101,10 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
   const assignedAccount = accounts.find((a) => a.id === task.assignedAccountId);
 
   const mustReconcile = requiresSubmissionReconciliation(task);
-  const canRetry = !mustReconcile && (task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
-    task.status === 'cancelled' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation');
+  const dependencyBlocked = isDependencyBlockedTask(task);
+  const canRetry = !mustReconcile && !dependencyBlocked &&
+    (task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
+      task.status === 'cancelled' || task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation');
   const canStart = task.status === 'queued' && task.assignedAccountId && !accountBusy[task.assignedAccountId];
   const canAssign = task.status === 'queued' && !task.assignedAccountId;
   const canObserveManualSubmission = task.mode === 'video' && !!task.assignedAccountId &&
@@ -136,6 +150,21 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
   const handleAssign = async (accountId: string) => {
     await assignTask(task.id, accountId);
     message.success('已指派账号');
+  };
+
+  const saveQualityVerdict = async (status: 'accepted' | 'rejected') => {
+    if (status === 'rejected' && qualityTags.length === 0) {
+      message.warning('拒收必须至少选择一个原因标签');
+      return;
+    }
+    setQualitySaving(true);
+    try {
+      const ok = await setQualityVerdict(task.id, status, status === 'rejected' ? qualityTags : undefined);
+      if (ok) message.success(status === 'accepted' ? '已标记为人工质量合格' : '已记录人工质量拒收');
+      else message.error(useTaskStore.getState().error || '人工质量裁决写入失败');
+    } finally {
+      setQualitySaving(false);
+    }
   };
 
   // ---- 状态图标 ----
@@ -281,6 +310,30 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
           </div>
         </div>
 
+        {/* 依赖阻断：结构化调度阻断，不是平台生成失败 */}
+        {dependencyBlocked && (
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ color: '#fbbf24', fontSize: 12, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 4 }}>
+              <CloseCircleOutlined /> 依赖阻断
+            </div>
+            <div
+              style={{
+                background: 'rgba(251,191,36,0.08)',
+                border: '1px solid rgba(251,191,36,0.28)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                fontSize: 13,
+                color: '#fcd34d',
+              }}
+            >
+              <div>{describeDependencyBlock(task)}</div>
+              <div style={{ marginTop: 4, color: '#9898b8', fontSize: 12 }}>
+                该错误不计入平台生成失败率与账号健康冷却，也不会自动重试；任务仍在调度队列中等待重新评估，依赖恢复后会自动继续。
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* 失败原因 */}
         {(task.status === 'fail' || task.status === 'paused' || task.status === 'cancelled') && task.result && (
           <div style={{ marginBottom: 16 }}>
@@ -323,6 +376,31 @@ const TaskDetailModal: React.FC<TaskDetailModalProps> = ({ open, task, onClose, 
             />
           </div>
         )}
+
+        {/* 人工质量裁决 */}
+        <Divider style={{ margin: '8px 0 14px' }}>人工质量裁决</Divider>
+        <div style={{ marginBottom: 16 }}>
+          {task.qualityVerdict && (
+            <div style={{ marginBottom: 8, fontSize: 12, color: task.qualityVerdict.status === 'accepted' ? '#34d399' : '#fb7185' }}>
+              当前：{task.qualityVerdict.status === 'accepted' ? '合格' : `拒收（${(task.qualityVerdict.rejectionTags || []).map((tag) => QUALITY_REJECTION_LABELS[tag]).join('、')}）`}
+              {' · '}{new Date(task.qualityVerdict.decidedAt).toLocaleString('zh-CN')}
+            </div>
+          )}
+          <Checkbox.Group
+            value={qualityTags}
+            onChange={(values) => setQualityTags(values as QualityRejectionTag[])}
+            options={(Object.keys(QUALITY_REJECTION_LABELS) as QualityRejectionTag[]).map((tag) => ({ label: QUALITY_REJECTION_LABELS[tag], value: tag }))}
+            disabled={qualitySaving}
+          />
+          <Space style={{ marginTop: 10 }}>
+            <Button type="primary" loading={qualitySaving} onClick={() => void saveQualityVerdict('accepted')}>
+              标记合格
+            </Button>
+            <Button danger loading={qualitySaving} onClick={() => void saveQualityVerdict('rejected')}>
+              标记拒收
+            </Button>
+          </Space>
+        </div>
 
         {/* 配置信息 */}
         <Descriptions

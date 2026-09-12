@@ -79,9 +79,12 @@ const electronAPI = {
       status?: string;
       runtime?: Record<string, any>;
       errorInfo?: Record<string, any> | null;
+      blockedByTaskIds?: string[];
       result?: string;
     }): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:updateRuntime', { taskId, ...patch }),
+    setQualityVerdict: (taskId: string, status: 'accepted' | 'rejected', rejectionTags?: string[]): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:setQualityVerdict', { taskId, status, rejectionTags }),
     acquireLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:acquireLock', { taskId, ownerId }),
     renewLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>

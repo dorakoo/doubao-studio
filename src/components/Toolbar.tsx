@@ -27,7 +27,7 @@ import type { MenuProps } from 'antd';
 import { useTaskStore } from '../store/useTaskStore';
 import { SettingsModal } from './SettingsModal';
 import { OutputPreviewModal } from './OutputPreviewModal';
-import type { OutputItem } from './OutputPreviewModal';
+import type { OutputItem, OutputScopeSummary } from './OutputPreviewModal';
 import { DownloadQueueModal } from './DownloadQueueModal';
 import type { AdapterSelfCheckReport, DownloadJob } from '../types';
 import { useAccountStore } from '../store/useAccountStore';
@@ -37,6 +37,8 @@ import { installAdapterBundle, rollbackAdapterBundle } from '../automation/douba
 import { ProjectSwitcher } from './ProjectSwitcher';
 import { LogCenterModal } from './LogCenterModal';
 import { ProjectOverviewModal } from './ProjectOverviewModal';
+import { useProjectStore } from '../store/useProjectStore';
+import { calculatePlatformSuccessRate, getPlatformTaskStats } from '../utils/taskStats';
 
 interface ToolbarProps {
   sidebarCollapsed: boolean;
@@ -44,11 +46,13 @@ interface ToolbarProps {
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSidebar }) => {
-  const { tasks, schedulerPaused, batchPause, resumeAll, getCompletedOutputs } = useTaskStore();
+  const { tasks, schedulerPaused, batchPause, resumeAll } = useTaskStore();
+  const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const accounts = useAccountStore((state) => state.accounts);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
   const [completedOutputs, setCompletedOutputs] = React.useState<OutputItem[]>([]);
+  const [previewScope, setPreviewScope] = React.useState<OutputScopeSummary | undefined>(undefined);
   const [downloadQueueOpen, setDownloadQueueOpen] = React.useState(false);
   const [downloadJobs, setDownloadJobs] = React.useState<DownloadJob[]>([]);
   const [downloadJobsLoading, setDownloadJobsLoading] = React.useState(false);
@@ -80,15 +84,35 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     }
   }, []);
 
-  // 监听 TaskConsole 发来的批量下载事件
+  // 监听任务控制台打开批次选择器
+  React.useEffect(() => {
+    const handleOpenBatchManager = () => setBatchManagerOpen(true);
+    window.addEventListener('open-batch-manager', handleOpenBatchManager);
+    return () => window.removeEventListener('open-batch-manager', handleOpenBatchManager);
+  }, []);
+
+  // 只接受带真实范围摘要的批次预览事件；旧的无归属裸数组事件一律 fail-closed。
   React.useEffect(() => {
     const handleBatchDownloadOutputs = (e: Event) => {
-      const customEvent = e as CustomEvent;
-      const outputs = customEvent.detail;
-      if (outputs && outputs.length > 0) {
-        setCompletedOutputs(outputs);
-        setPreviewOpen(true);
+      const detail = (e as CustomEvent<{ outputs?: OutputItem[]; scopeSummary?: OutputScopeSummary } | OutputItem[]>).detail;
+      if (Array.isArray(detail)) {
+        // 旧集成格式没有项目/批次归属：拒绝打开预览，避免生成无归属下载范围。
+        if (detail.length > 0) message.error('下载事件缺少项目或批次归属，已拒绝打开预览');
+        return;
       }
+      const outputs = detail?.outputs;
+      const scope = detail?.scopeSummary;
+      const hasScope = !!scope
+        && typeof scope.projectName === 'string' && scope.projectName.trim().length > 0
+        && typeof scope.batchId === 'string' && scope.batchId.trim().length > 0;
+      if (!outputs || outputs.length === 0) return;
+      if (!hasScope) {
+        message.error('下载范围缺少项目或批次归属，已拒绝打开预览');
+        return;
+      }
+      setCompletedOutputs(outputs);
+      setPreviewScope(scope);
+      setPreviewOpen(true);
     };
     window.addEventListener('batch-download-outputs', handleBatchDownloadOutputs);
     return () => window.removeEventListener('batch-download-outputs', handleBatchDownloadOutputs);
@@ -100,14 +124,12 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
   ).length;
   // 排队中的任务数
   const queuedCount = tasks.filter((t) => t.status === 'queued').length;
-  // 已完成且有产物的任务数
+  // 当前项目内已完成且有产物的任务数
   const completedWithOutputs = tasks.filter(
-    (t) => t.status === 'done' && t.outputs.length > 0
+    (t) => (t.projectId || 'default-project') === activeProjectId && t.status === 'done' && t.outputs.length > 0
   ).length;
-  const terminalTasks = tasks.filter((task) => task.status === 'done' || task.status === 'fail');
-  const successRate = terminalTasks.length > 0
-    ? Math.round((tasks.filter((task) => task.status === 'done').length / terminalTasks.length) * 100)
-    : 0;
+  const successRate = calculatePlatformSuccessRate(tasks);
+  const platformStats = getPlatformTaskStats(tasks);
   const completedDurations = tasks
     .filter((task) => task.status === 'done' && task.runtime?.startedAt)
     .map((task) => new Date(task.updatedAt).getTime() - new Date(task.runtime!.startedAt).getTime())
@@ -131,14 +153,18 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     }
   };
 
-  // 批量下载产物 — 打开预览 Modal
-  const handleBatchDownload = async () => {
-    const outputs = await getCompletedOutputs();
-    if (outputs.length === 0) {
-      message.info('暂无已完成产物');
+  // 批量下载统一先选择当前项目的具体批次，禁止默认全历史。
+  const handleBatchDownload = () => {
+    if (completedWithOutputs === 0) {
+      message.info('当前项目暂无已完成产物');
       return;
     }
+    setBatchManagerOpen(true);
+  };
+
+  const handleDownloadBatch = (outputs: OutputItem[], scope: OutputScopeSummary) => {
     setCompletedOutputs(outputs);
+    setPreviewScope(scope);
     setPreviewOpen(true);
   };
 
@@ -348,14 +374,15 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
           </button>
         </Tooltip>
 
-        {/* 批量下载 */}
-        <Tooltip title={`下载已完成产物 (${completedWithOutputs})`}>
+        {/* 批量下载：先选择当前项目的具体批次，禁止默认全历史 */}
+        <Tooltip title={completedWithOutputs > 0 ? `按批次下载：当前项目有 ${completedWithOutputs} 个含产物任务，选择批次后确认实际范围` : '当前项目暂无已完成产物'}>
           <button
-            className={`btn-ghost ${completedWithOutputs === 0 ? 'opacity-40 cursor-not-allowed' : ''}`}
+            className={`btn-ghost flex items-center gap-1 ${completedWithOutputs === 0 ? 'opacity-40 cursor-not-allowed' : ''}`}
             onClick={handleBatchDownload}
             disabled={completedWithOutputs === 0}
           >
             <DownloadOutlined />
+            <span className="text-2xs">批量下载 · 已完成 {completedWithOutputs}</span>
           </button>
         </Tooltip>
 
@@ -409,6 +436,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
     <OutputPreviewModal
       open={previewOpen}
       outputs={completedOutputs}
+      scopeSummary={previewScope}
       onClose={() => setPreviewOpen(false)}
       onDownload={handleDoDownload}
     />
@@ -421,11 +449,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
       onRetry={handleRetryDownload}
     />
     <ArtifactCenterModal open={artifactCenterOpen} onClose={() => setArtifactCenterOpen(false)} />
-    <BatchManagerModal open={batchManagerOpen} onClose={() => setBatchManagerOpen(false)} />
+    <BatchManagerModal open={batchManagerOpen} onClose={() => setBatchManagerOpen(false)} onDownloadBatch={handleDownloadBatch} />
     <LogCenterModal open={logsOpen} onClose={() => setLogsOpen(false)} />
     <ProjectOverviewModal open={projectOverviewOpen} onClose={() => setProjectOverviewOpen(false)} />
     <Modal title="运行统计" open={metricsOpen} onCancel={() => setMetricsOpen(false)} footer={null} width={560}>
       <Progress percent={successRate} status={successRate >= 80 ? 'success' : 'normal'} />
+      <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
+        平台成功率只统计平台生成结果；依赖阻断（dependency_failed / dependency_missing / dependency_cycle）不计入分子或分母。
+      </div>
       <Descriptions column={2} size="small" style={{ marginTop: 18 }}>
         <Descriptions.Item label="任务总数">{tasks.length}</Descriptions.Item>
         <Descriptions.Item label="成功率">{successRate}%</Descriptions.Item>
@@ -433,7 +464,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({ sidebarCollapsed, onToggleSide
         <Descriptions.Item label="等待人工处理">
           {tasks.filter((task) => task.status === 'waiting_verification' || task.status === 'waiting_generation_confirmation' || task.status === 'manual_submission_observing' || task.status === 'paused').length}
         </Descriptions.Item>
-        <Descriptions.Item label="失败任务">{tasks.filter((task) => task.status === 'fail').length}</Descriptions.Item>
+        <Descriptions.Item label="失败任务">{platformStats.platformFailed}</Descriptions.Item>
+        <Descriptions.Item label="依赖阻断">{platformStats.dependencyBlocked}</Descriptions.Item>
         <Descriptions.Item label="下载失败">{downloadJobs.filter((job) => job.status === 'failed').length}</Descriptions.Item>
         <Descriptions.Item label="可用账号">
           {accounts.filter((account) => !account.seedanceQuota?.exhausted && !account.health?.verificationRequired && account.health?.loginState !== 'expired').length}

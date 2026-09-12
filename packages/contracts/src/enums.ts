@@ -66,6 +66,9 @@ export type TaskErrorCode =
   | 'page_changed'
   | 'submission_failed'
   | 'generation_failed'
+  | 'dependency_failed'
+  | 'dependency_missing'
+  | 'dependency_cycle'
   | 'output_missing'
   | 'submission_uncertain'
   | 'generation_confirmation_required'
@@ -103,3 +106,22 @@ export type DependencyPolicy = 'all_done' | 'all_accepted' | 'all_finished';
  * 历史 queued 任务缺省迁移为 hold，active/observing 恢复不受影响。
  */
 export type TaskExecutionIntent = 'hold' | 'armed';
+
+/** 人工质量裁决状态 */
+export type QualityVerdictStatus = 'accepted' | 'rejected';
+
+/** 人工质量拒收标签的稳定机器值 */
+export type QualityRejectionTag =
+  | 'product_structure'
+  | 'material'
+  | 'aspect_ratio'
+  | 'character_consistency'
+  | 'audio'
+  | 'bgm';
+
+/** 人工质量裁决记录 */
+export interface QualityVerdict {
+  status: QualityVerdictStatus;
+  rejectionTags?: QualityRejectionTag[];
+  decidedAt: string;
+}

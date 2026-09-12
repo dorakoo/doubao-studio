@@ -28,7 +28,7 @@ import type {
   TaskAddParams,
   TaskAssignParams,
   TaskUpdateStatusParams,
-  TaskUpdateRuntimeParams,
+  TaskUpdateRuntimeParams,  TaskSetQualityVerdictParams,
   TaskAcquireLockParams,
   TaskRenewLockParams,
   TaskReleaseLockParams,
@@ -362,7 +362,7 @@ export async function downloadArtifactForLocalControl(
 
 const TASK_IPC_CHANNELS = [
   'tasks:list', 'tasks:add', 'tasks:assign', 'tasks:updateStatus', 'tasks:update',
-  'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime',
+  'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime', 'tasks:setQualityVerdict',
   'tasks:acquireLock', 'tasks:renewLock', 'tasks:importCsv', 'tasks:releaseLock',
   'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
   'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:downloadPublicShareMedia', 'tasks:listDownloads',
@@ -525,6 +525,16 @@ export function registerTaskIPC(): () => void {
     'tasks:updateRuntime',
     async (_event, params: TaskUpdateRuntimeParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const result = taskService.updateRuntime(params);
+      if (result.success) return { success: true, task: result.data };
+      // 并发冲突时服务端返回权威回读任务：如实透传，禁止伪造“已回滚”。
+      return result.task ? { success: false, error: result.error, task: result.task } : { success: false, error: result.error };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:setQualityVerdict',
+    async (_event, params: TaskSetQualityVerdictParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const result = taskService.setQualityVerdict(params);
       return result.success ? { success: true, task: result.data } : result;
     }
   );

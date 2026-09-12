@@ -117,7 +117,7 @@ describe('execution intent safety behavior', () => {
   it('assignTask only persists assignment and never triggers queue or automation', async () => {
     const assignedTask = queuedTask('task-1', 'acc-1', 'hold', NOW);
     globalMocks.window.electronAPI.tasks.assign.mockResolvedValue({ success: true, task: assignedTask });
-    const processQueue = vi.fn<() => void>();
+    const processQueue = vi.fn(async () => {});
     const startAutomation = stopAfterFirstStart();
     useTaskStore.setState({ tasks: [queuedTask('task-1', null, 'hold', NOW)], processQueue, startAutomation });
 
@@ -133,7 +133,7 @@ describe('execution intent safety behavior', () => {
     const task = queuedTask('task-1', 'acc-1', 'hold', NOW);
     const armed = { ...task, executionIntent: 'armed' as const };
     globalMocks.window.electronAPI.tasks.updateRuntime.mockResolvedValue({ success: true, task: armed });
-    const processQueue = vi.fn<() => void>();
+    const processQueue = vi.fn(async () => {});
     useTaskStore.setState({ tasks: [task], processQueue });
 
     await expect(useTaskStore.getState().armTasks(['task-1'])).resolves.toEqual({ armed: 1, failed: 0 });

@@ -6,18 +6,25 @@ import React, { useEffect, useState } from 'react';
 import { Modal, Checkbox, Button, message, Empty } from 'antd';
 import { DownloadOutlined, VideoCameraOutlined } from '@ant-design/icons';
 import type { GenerationMode } from '../types';
+import { buildBatchDownloadRequest, createDownloadIntent, createInitialOutputSelection, readDownloadSelection } from '../utils/downloadSelection';
+import type { BatchDownloadOutput } from '../utils/downloadSelection';
 
-export interface OutputItem {
-  taskId: string;
-  prompt: string;
-  outputs: string[];
-  accountId: string | null;
-  mode: GenerationMode;
+/**
+ * 预览条目即下载条目：项目与批次归属必填，归属不明不允许进入下载范围。
+ */
+export type OutputItem = BatchDownloadOutput;
+
+export interface OutputScopeSummary {
+  projectName: string;
+  batchId: string;
+  taskCount: number;
+  artifactCount: number;
 }
 
 interface OutputPreviewModalProps {
   open: boolean;
   outputs: OutputItem[];
+  scopeSummary?: OutputScopeSummary;
   onClose: () => void;
   onDownload: (selectedOutputs: OutputItem[]) => Promise<void>;
 }
@@ -25,6 +32,7 @@ interface OutputPreviewModalProps {
 export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
   open,
   outputs,
+  scopeSummary,
   onClose,
   onDownload,
 }) => {
@@ -34,8 +42,7 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
 
   useEffect(() => {
     if (open) {
-      const allIds = new Set(outputs.map((o) => o.taskId));
-      setSelectedIds(allIds);
+      setSelectedIds(createInitialOutputSelection());
     }
   }, [open, outputs]);
 
@@ -59,18 +66,33 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
     }
   };
 
-  const handleDownload = async () => {
-    const selected = outputs.filter((o) => selectedIds.has(o.taskId));
-    if (selected.length === 0) {
-      message.warning('请至少选择一个产物');
-      return;
-    }
+  const runDownload = async (selected: OutputItem[]) => {
     setDownloading(true);
     try {
       await onDownload(selected);
     } finally {
       setDownloading(false);
     }
+  };
+
+  const selectedOutputs = outputs.filter((o) => selectedIds.has(o.taskId));
+  // 摘要与下载按钮读数必须随当前选择实时变化，不允许显示整个批次的静态总数。
+  const selection = readDownloadSelection(selectedOutputs);
+  const crossBatchSelected = selectedOutputs.length > 0
+    && selection.invalidCount === 0
+    && !buildBatchDownloadRequest(selectedOutputs).ok;
+
+  const handleDownload = async () => {
+    // 点击下载即“确认”决策，经过唯一 fail-closed 入口；
+    // 空选择、归属缺失、零产物或非法跨批次一律零下载调用。
+    const intent = createDownloadIntent(selectedOutputs, 'confirm');
+    if (!intent) {
+      const rejected = buildBatchDownloadRequest(selectedOutputs);
+      if (selectedOutputs.length === 0) message.warning(rejected.error || '请至少选择一个产物');
+      else message.error(rejected.error || '当前选择不满足下载范围要求');
+      return;
+    }
+    await runDownload(intent.outputs);
   };
 
   const allSelected = selectedIds.size === outputs.length;
@@ -88,7 +110,14 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
           <Checkbox checked={allSelected} onChange={toggleSelectAll}>
             全选
           </Checkbox>
-          <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            {scopeSummary && (
+              <span style={{ fontSize: 12, color: '#666' }} data-testid="download-scope-summary">
+                批次范围：{scopeSummary.projectName} / {scopeSummary.batchId}
+                {' · '}
+                已选：{selection.projectCount} 项目 / {selection.batchCount} 批次 / {selection.taskCount} 任务 / {selection.artifactCount} 产物
+              </span>
+            )}
             <Button style={{ marginRight: 8 }} onClick={onClose}>
               取消
             </Button>
@@ -97,9 +126,10 @@ export const OutputPreviewModal: React.FC<OutputPreviewModalProps> = ({
               icon={<DownloadOutlined />}
               onClick={handleDownload}
               loading={downloading}
-              disabled={selectedIds.size === 0}
+              disabled={!selection.downloadEnabled}
+              danger={crossBatchSelected}
             >
-              下载选中 ({selectedIds.size})
+              下载选中（{selection.artifactCount} 产物 / {selection.taskCount} 任务）
             </Button>
           </div>
         </div>,

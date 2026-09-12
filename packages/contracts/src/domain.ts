@@ -20,6 +20,7 @@ import type {
   VideoAspectRatio,
   TaskExecutionIntent,
   DependencyPolicy,
+  QualityVerdict,
 } from './enums';
 
 // ==================== 账号相关 ====================
@@ -322,6 +323,10 @@ export interface Task {
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
   dependencyPolicy?: DependencyPolicy;
+  /** 依赖阻断时持久化的原因任务 ID；去重、稳定排序，不包含提示词或页面信息 */
+  blockedByTaskIds?: string[];
+  /** 人工质量裁决；只记录人工判断，不自动重试或平台写入 */
+  qualityVerdict?: QualityVerdict;
   projectId?: string;
   createdAt: string;
   updatedAt: string;

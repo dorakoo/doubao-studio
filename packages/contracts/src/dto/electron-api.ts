@@ -23,6 +23,8 @@ import type {
   GenerationMode,
   AccountPlatform,
   TaskStatus,
+  QualityVerdictStatus,
+  QualityRejectionTag,
 } from '../enums';
 
 import type {
@@ -143,8 +145,10 @@ export interface ElectronAPI {
       runtime?: Partial<TaskRunSnapshot>;
       errorInfo?: TaskErrorInfo | null;
       executionIntent?: TaskExecutionIntent;
+      blockedByTaskIds?: string[];
       result?: string;
     }) => Promise<TaskResult>;
+    setQualityVerdict: (taskId: string, status: QualityVerdictStatus, rejectionTags?: QualityRejectionTag[]) => Promise<TaskResult>;
     acquireLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     renewLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     releaseLock: (taskId: string, ownerId: string) => Promise<TaskOperationResult>;

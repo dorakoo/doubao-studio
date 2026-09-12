@@ -120,7 +120,8 @@ describe('accepted observation pipeline 接线契约', () => {
   });
 
   it('同账号 observing 时主动跳过，Renderer reload 仅恢复观察', () => {
-    expect(store).toContain('const accountHasObservation = state.tasks.some');
+    // 队列改为按任务逐个读取最新 store 快照后，同账号观察跳过检查使用 get().tasks。
+    expect(store).toContain('const accountHasObservation = get().tasks.some');
     expect(store).toContain('if (accountHasObservation) continue;');
     expect(store).toContain('const resumableObservations = tasks.filter(shouldResumeAcceptedObservation)');
     expect(store).toContain('!shouldResumeAcceptedObservation(task)');
