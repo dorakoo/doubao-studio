@@ -32,7 +32,7 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 6. **默认本地安全**：外部接口默认仅监听 localhost，使用访问令牌、能力授权和审计日志。
 7. **可恢复和幂等**：每条写命令携带 `requestId`，重复请求不创建重复任务；进程重启后可恢复状态。
 
-## 截至 2026-09-07 的实施状态
+## 截至 2026-09-12 的实施状态
 
 路线图描述目标架构，不代表所有条目已经交付。当前真实状态如下：
 
@@ -41,7 +41,7 @@ Desktop UI / CLI / MCP Server / HTTP API / Third-party Agent
 | 2.0.x 稳定性基线 | 已完成 | IPC/生命周期、任务锁、恢复、统一验证和核心回归 | 继续以回归维护为主 |
 | 2.1 Core 分层 | 部分完成 | 共享 Contracts、TaskRepository、TaskEventStream、TaskService、任务 IPC 薄适配、CSV/运行时/恢复/查询/产物校验收敛 | Account/Scheduler/Artifact 等领域仍需逐包收敛；JSON 仍是主存储 |
 | 2.2 Automation SDK 与适配器 | 部分完成 | 页面自检、dry-run、规则包、上传/控件稳定门禁、结构化错误与真实页面能力回读 | `doubaoBridge.ts` 仍偏大；正式 ProviderAdapter 拆分和更多页面 Fixture 未完成 |
-| 2.3 Agent 接入层 | 2.3.4 已发布，继续增量收敛 | Capability Schema v1、只读 CLI/MCP、MCP Client、受控 `import-csv`；正式实例已有仅本机、带令牌、按项目/批次/任务定位的 `start/pause/cancel/retry` 控制面 | 无写入型 MCP 生成工具；事件订阅、资产导入 API 和完整 Agent 生成闭环未开放 |
+| 2.3 Agent 接入层 | **2.3.8 已发布**，继续增量收敛 | Capability Schema v1、只读 CLI/MCP、MCP Client、受控 `import-csv`；正式实例本机控制面已覆盖脱敏账号/产物查询、只指派（hold）、`start/pause/cancel/retry`、按稳定 artifact ID 单产物下载；执行意图与指派分离、原会话定位、依赖阻断可恢复、精确批量下载范围 | 无写入型 MCP 生成工具；事件订阅、资产导入 API 和完整 Agent 生成闭环未开放；Dola/签名/自定义图标仍为独立技术债 |
 | 2.4 工作流与融合 | 未开始 | CSV 依赖批次提供基础 DAG 语义 | 正式 Workflow Manifest、Webhook、连接器和插件权限模型 |
 | 3.0 平台化 | 未开始 | 无 | SQLite、Controller/Worker、团队权限与远程 API |
 

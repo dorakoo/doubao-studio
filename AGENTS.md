@@ -110,5 +110,15 @@ Dola 当前只有账号平台字段、Session/URL 边界和 CSV 账号消歧接�
 - 使用 Tailwind 工具类优先，必要时补充自定义 CSS
 - Ant Design 组件通过 ConfigProvider 统一深色主题
 
+## 发布与更新说明
+
+任何新的版本 Release（创建 `v*` Tag / GitHub Release）**必须**在 Release 包中注明完成了什么更新：
+
+1. 先在 `CHANGELOG.md` 新增对应版本章节（如 `## 2.3.9 (YYYY-MM-DD)`），用行为级条目写清用户可观察到的能力变化、操作方式变化和明确未做项。
+2. 版本号与 `package.json` 的 `version` 保持一致；未创建 Tag/Release 前不得表述为“已发布”。
+3. CI 的 Windows Release 工作流会从 `CHANGELOG.md` 提取该版本章节作为 GitHub Release 正文；章节缺失时发布失败，禁止用空说明或仅 `--generate-notes` 冒充更新说明。
+4. 安装包资产仍按工作流上传；Release 正文与 CHANGELOG 是同一权威更新说明，不得互相矛盾。
+5. Dola、签名、图标等未验证项必须继续如实写“未完成/未验证”，不得因版本发布而改写为已交付。
+
 ## 设计规范
 参见 [DESIGN.md](./DESIGN.md) - 深色创作者工具风格，紫色强调色系。
