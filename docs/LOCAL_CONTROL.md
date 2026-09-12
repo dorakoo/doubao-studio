@@ -4,7 +4,7 @@
 
 | 入口 | 用途 | 是否可用于正式任务 | 生命周期 |
 | --- | --- | --- | --- |
-| `--local-control` | 项目、批次和任务的查询与 `start/pause/cancel/retry` | 是；必须 Bearer 鉴权并先确认 `ready=true` | 随正式实例运行，最长受 8 小时令牌期限约束 |
+| `--local-control` | 项目、批次、任务、账号与产物的脱敏查询，以及指派、执行控制和单产物下载 | 是；必须 Bearer 鉴权并先确认 `ready=true` | 随正式实例运行，最长受 8 小时令牌期限约束 |
 | `--local-cdp` | Webview 加载、partition 与合成问题的开发诊断 | 否；不提供稳定业务语义 | 有人值守短时开启，用后退出应用并确认端口关闭 |
 | Computer Use / 截图坐标 | 临时人工辅助 | 否 | 不得长时间持有控制宿主 |
 
@@ -40,24 +40,40 @@
 只读端点：
 
 - `GET /v1/health`
+- `GET /v1/accounts`
 - `GET /v1/projects`
 - `GET /v1/projects/{projectId}`
 - `GET /v1/projects/{projectId}/batches`
 - `GET /v1/projects/{projectId}/batches/{batchId}/tasks`
 - `GET /v1/projects/{projectId}/batches/{batchId}/tasks/{taskId}`
+- `GET /v1/projects/{projectId}/batches/{batchId}/tasks/{taskId}/artifacts`
 
 无批次任务使用稳定批次标识 `_unbatched`。写端点：
 
 - `POST .../tasks/{taskId}/start`
+- `POST .../tasks/{taskId}/assign`
 - `POST .../tasks/{taskId}/pause`
 - `POST .../tasks/{taskId}/cancel`
 - `POST .../tasks/{taskId}/retry`
+- `POST .../tasks/{taskId}/artifacts/{artifactId}/download`
 
-请求体仅为：
+执行控制和产物下载的请求体仅为：
 
 ```json
 {"requestId":"调用方生成的唯一 UUID"}
 ```
+
+指派请求额外包含稳定账号 ID：
+
+```json
+{"requestId":"调用方生成的唯一 UUID","accountId":"account UUID"}
+```
+
+指派只保存账号，不会 arm、启动或触发网页动作；执行仍须使用新的 `requestId` 单独调用 `start`。下载只接受 URL 路径中的稳定 `artifactId`，远程 URL 与保存目录均从应用台账和设置读取。请求体传入 `url`、`saveDir` 或 `directory` 会被拒绝。下载响应只返回结果码、下载任务 ID 和字节数，不返回远程 URL或本地绝对路径。
+
+`GET /v1/accounts` 只返回账号稳定 ID、显示名、平台、脱敏健康/可用性、预测剩余额度、忙碌状态及是否需要人工操作；不会返回 partition、Cookie、Token、Session、头像地址、页面 URL或网页诊断文本。Dola 尚未完成真实端到端验收；控制面可显示其平台身份，但指派和下载均 fail-closed 返回 `PLATFORM_NOT_VERIFIED`。
+
+`GET .../artifacts` 只返回稳定产物 ID、类型、发现时间、验证状态和是否可下载，不返回远程地址、会话地址或本地路径。
 
 写命令会在主进程和 Renderer 各自重新校验项目、批次、任务归属，然后调用应用现有的依赖、账号健康、额度、任务锁和防重复调度链。控制面不会直接写 `tasks.json`。
 
@@ -67,10 +83,12 @@
 
 1. 启动唯一一个带 `--local-control` 的正式实例，等待账号顺序预热；不要并行启动第二个桌面实例。
 2. 读取发现文件与令牌文件，调用健康端点；只有 `ready=true` 且 `rendererReady=true` 才继续。
-3. 依次列出项目、批次和任务，用返回的稳定 ID 构造完整路径；不得用显示名称代替 ID。
-4. 每个写动作生成新的 UUID `requestId`；网络结果不确定时用同一 `requestId` 重试查询，不得换新 ID 盲目重发。
-5. 遇到账号登录、人机验证、额度、会员、未知弹窗或提交状态不确定，保留任务状态并交由人工处理；不得通过 CDP 或坐标脚本绕过。
-6. 工作结束后关闭客户端；若曾开启 CDP，退出整个应用并确认调试端口不再监听。
+3. 先查询账号，再依次列出项目、批次和任务，用返回的稳定 ID 构造完整路径；不得用显示名称代替 ID。
+4. 指派和启动必须是两个独立写请求：先 `assign`，确认成功后由操作者明确决定是否 `start`；不得把指派成功解释为执行授权。
+5. 每个写动作生成新的 UUID `requestId`；网络结果不确定时用同一 `requestId` 重试，不得换新 ID 盲目重发。同一 ID 跨命令复用会返回 `REQUEST_ID_CONFLICT`。
+6. 查询任务产物并选定单一稳定 `artifactId` 后才能下载；客户端不得传入网页媒体 URL 或文件目录。
+7. 遇到账号登录、人机验证、额度、会员、未知弹窗或提交状态不确定，保留任务状态并交由人工处理；不得通过 CDP 或坐标脚本绕过。
+8. 工作结束后关闭客户端；若曾开启 CDP，退出整个应用并确认调试端口不再监听。
 
 启动后若健康端点仍为 `ready=false`，客户端应在有限时间内继续只读轮询，不得下发写命令。2.3.5 的 Renderer 会在命令监听注册后的 5 秒启动窗口内幂等重申就绪；超过该窗口仍未就绪应视为运行故障并停止，而不是改用截图坐标绕过。
 

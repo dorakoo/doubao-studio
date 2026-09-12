@@ -269,7 +269,7 @@ CSV 模板见 [`examples/tasks-template.csv`](examples/tasks-template.csv)。
 
 - 默认关闭；使用 `豆包工作室.exe --local-control` 显式开启，或附加 `--local-control-port=<端口>` 固定端口。
 - 只监听 `127.0.0.1`，每次启动生成短期 Bearer 令牌；发现信息与令牌分文件存放，退出即删除，令牌不进入日志。
-- Agent 通过项目 ID、批次 ID、任务 ID 调用 `start / pause / cancel / retry`，主进程和 Renderer 双重校验归属后复用正式调度链。
+- Agent 可查询脱敏账号与任务产物，并通过项目 ID、批次 ID、任务 ID 调用只指派的 `assign`、`start / pause / cancel / retry`，或按稳定 artifact ID 下载单一产物。指派不会隐式启动；下载不接受调用方提供的 URL 或目录。
 - 响应不包含完整提示词、素材绝对路径、产物/会话 URL、Cookie、Token 或账号 Session，也不提供 DOM/CDP 和任意脚本执行。
 - 端点、发现文件和调用示例见 [`docs/LOCAL_CONTROL.md`](docs/LOCAL_CONTROL.md)。现有离线 CLI/MCP 后续可迁移为该控制面的客户端。
 
