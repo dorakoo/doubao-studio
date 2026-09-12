@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type {
   GenerationMode,
+  TaskExecutionIntent,
   VideoModel,
   VideoDuration,
   VideoAspectRatio,
@@ -11,6 +12,7 @@ import type {
   TaskUpdateStatusParams,
   TaskUpdateInput,
   TaskUpdateRuntimeParams,
+  TaskSetQualityVerdictParams,
   TaskAcquireLockParams,
   TaskRenewLockParams,
   TaskReleaseLockParams,
@@ -19,6 +21,7 @@ import type {
   TaskValidateArtifactParams,
   CompletedOutput,
   AccountPlatform,
+  QualityRejectionTag,
 } from '@doubao-studio/contracts';
 import { acquireTaskLease, renewTaskLease, canReleaseTaskLease } from '../utils/taskLease';
 import { parseCsv } from '../utils/csv';
@@ -40,9 +43,18 @@ export interface TaskServiceDependencies {
   basename?: (value: string) => string;
 }
 
+export interface TaskServiceFailure { success: false; error: string; task?: Task }
+
 export type TaskServiceResult<T = undefined> =
   | ({ success: true } & (T extends undefined ? object : { data: T }))
-  | { success: false; error: string };
+  // 失败分支允许附带权威回读任务：写盘已发生但不满足调用方期望（并发冲突）时，
+  // 服务端必须如实返回落盘事实，不得宣称已回滚。
+  | TaskServiceFailure;
+
+/** 判断结果是否为失败分支；回读漂移时可能同时携带权威任务 */
+export function isTaskServiceFailure<T>(result: TaskServiceResult<T>): result is TaskServiceFailure {
+  return result.success === false;
+}
 
 export interface TaskRecoverySummary {
   recoveredTasks: number;
@@ -50,6 +62,31 @@ export interface TaskRecoverySummary {
 }
 
 const LEGACY_UNCERTAIN_SUBMISSION = /发送按钮不可用|点击结果不确定|发送动作结果不确定|发送状态不确定|人工核对豆包会话/;
+
+const DEPENDENCY_ERROR_CODES = new Set(['dependency_failed', 'dependency_missing', 'dependency_cycle']);
+
+/** 依赖阻断不是平台生成失败，不允许直接重试，也不计入账号失败与额度消耗 */
+function isDependencyBlockedTask(task: Task): boolean {
+  return !!task.errorInfo?.code && DEPENDENCY_ERROR_CODES.has(task.errorInfo.code);
+}
+
+const VALID_QUALITY_REJECTION_TAGS: readonly QualityRejectionTag[] = [
+  'product_structure', 'material', 'aspect_ratio', 'character_consistency', 'audio', 'bgm',
+];
+
+function normalizeBlockedByTaskIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') continue;
+    const id = item.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result.sort();
+}
 
 function requiresSubmissionReconciliation(task: Task): boolean {
   if (task.runtime?.acceptanceObservation?.outcome === 'observing') return true;
@@ -181,8 +218,46 @@ export class TaskService {
     }
   }
 
+  /**
+   * 回读已持久化数据，按字段分别校验，严格区分“未请求校验”与“请求清空”。
+   *
+   * @param taskId 目标任务
+   * @param expected 每个字段独立判定：`undefined` = 未请求校验该字段，`null` = 期望该字段已清除
+   */
+  private readBackMatches(
+    taskId: string,
+    expected: { status?: Task['status']; blockedByTaskIds?: string[] | null; errorInfoCode?: string | null },
+  ): boolean {
+    const stored = this.readTasks();
+    if (!stored) return false;
+    const task = stored.find((item) => item.id === taskId);
+    if (!task) return false;
+    if (expected.status !== undefined && task.status !== expected.status) return false;
+    if (expected.blockedByTaskIds !== undefined) {
+      const actual = task.blockedByTaskIds && task.blockedByTaskIds.length > 0 ? task.blockedByTaskIds : null;
+      if (actual === null || expected.blockedByTaskIds === null) {
+        if (actual !== expected.blockedByTaskIds) return false;
+      } else if (actual.length !== expected.blockedByTaskIds.length
+        || actual.some((id, index) => id !== expected.blockedByTaskIds![index])) {
+        return false;
+      }
+    }
+    if (expected.errorInfoCode !== undefined) {
+      const actualCode = task.errorInfo?.code ?? null;
+      if (actualCode !== expected.errorInfoCode) return false;
+    }
+    return true;
+  }
+
+  /** 回读当前落盘任务；读取失败或任务不存在时返回 undefined */
+  private readPersistedTask(taskId: string): Task | undefined {
+    const stored = this.readTasks();
+    return stored?.find((item) => item.id === taskId);
+  }
+
   /** 将任务重置为排队状态，清除运行结果、产物列表、错误信息和锁 */
-  private resetTaskForQueue(task: Task, timestamp: string): void {
+  private resetTaskForQueue(task: Task, timestamp: string, executionIntent?: TaskExecutionIntent): void {
+    if (executionIntent) task.executionIntent = executionIntent;
     task.status = 'queued';
     task.result = null;
     task.outputs = [];
@@ -211,6 +286,7 @@ export class TaskService {
       const timestamp = this.now();
       return {
         id: this.id(), prompt, assignedAccountId: null, status: 'queued', mode,
+        executionIntent: params.executionIntent || 'hold',
         videoConfig: params.videoConfig, attachments: params.attachments,
         audioAttachment: params.audioAttachment, result: null, outputs: [], artifacts: [],
         runHistory: [], source: 'manual', dependsOnTaskIds: [],
@@ -223,16 +299,17 @@ export class TaskService {
     return { success: true, data: created };
   }
 
-  assign(params: TaskAssignParams): TaskServiceResult {
+  assign(params: TaskAssignParams): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
     const task = tasks.find((item) => item.id === params.taskId);
     if (!task) return { success: false, error: '任务不存在' };
     if (ACTIVE.has(task.status)) return { success: false, error: '任务正在自动化执行中，无法重新指派' };
     task.assignedAccountId = params.accountId;
-    this.resetTaskForQueue(task, this.now());
+    // 指派本身永远不是执行授权；需要执行时必须显式 armTasks。
+    this.resetTaskForQueue(task, this.now(), 'hold');
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
-    return { success: true };
+    return { success: true, data: task };
   }
 
   update(params: { taskId: string; updates: TaskUpdateInput }): TaskServiceResult<Task> {
@@ -246,7 +323,7 @@ export class TaskService {
     task.videoConfig = params.updates.videoConfig;
     task.attachments = params.updates.attachments?.length ? params.updates.attachments : undefined;
     task.audioAttachment = params.updates.audioAttachment || undefined;
-    this.resetTaskForQueue(task, this.now());
+    this.resetTaskForQueue(task, this.now(), 'hold');
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
   }
@@ -321,7 +398,13 @@ export class TaskService {
     if (task.status === 'executing' || task.status === 'generating') {
       return { success: false, error: '任务正在执行中，无法重试' };
     }
-    this.resetTaskForQueue(task, this.now());
+    if (isDependencyBlockedTask(task)) {
+      return { success: false, error: '依赖阻断错误不能直接重试，请先修复依赖关系' };
+    }
+    // 重试是明确的重新执行动作，必须显式 armed 后才能被调度器启动。
+    this.resetTaskForQueue(task, this.now(), 'armed');
+    // 依赖已恢复并允许重新入队时，必须同时清除历史阻断证据，避免恢复后仍显示旧阻断。
+    task.blockedByTaskIds = undefined;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
   }
@@ -445,6 +528,32 @@ export class TaskService {
     return { success: true, data: { recoveredTasks, clearedLocks } };
   }
 
+  /**
+   * 按请求构造回读校验条件：只有显式请求的字段才参与比较，
+   * 未请求的字段保持缺省（= 不校验），明确请求清空时才要求回读为空。
+   */
+  private buildRuntimeVerification(params: TaskUpdateRuntimeParams): {
+    status?: Task['status'];
+    blockedByTaskIds?: string[] | null;
+    errorInfoCode?: string | null;
+  } {
+    const verification: {
+      status?: Task['status'];
+      blockedByTaskIds?: string[] | null;
+      errorInfoCode?: string | null;
+    } = {};
+    if (params.status !== undefined) verification.status = params.status;
+    if (params.blockedByTaskIds !== undefined) {
+      const normalized = normalizeBlockedByTaskIds(params.blockedByTaskIds);
+      // 空数组表示“清除阻断”，归一化为 null 才能与落盘的 undefined 正确比较。
+      verification.blockedByTaskIds = normalized && normalized.length > 0 ? normalized : null;
+    }
+    if (params.errorInfo !== undefined) {
+      verification.errorInfoCode = params.errorInfo === null ? null : params.errorInfo.code;
+    }
+    return verification;
+  }
+
   updateRuntime(params: TaskUpdateRuntimeParams): TaskServiceResult<Task> {
     const tasks = this.readTasks();
     if (!tasks) return { success: false, error: WRITE_ERROR };
@@ -453,7 +562,12 @@ export class TaskService {
 
     const timestamp = this.now();
 
+    if (params.executionIntent) task.executionIntent = params.executionIntent;
     if (params.status) task.status = params.status;
+    if (params.blockedByTaskIds !== undefined) {
+      const blocked = normalizeBlockedByTaskIds(params.blockedByTaskIds);
+      task.blockedByTaskIds = blocked && blocked.length > 0 ? blocked : undefined;
+    }
     if (params.result !== undefined) task.result = params.result;
     if (params.errorInfo === null) task.errorInfo = undefined;
     else if (params.errorInfo) task.errorInfo = params.errorInfo;
@@ -488,6 +602,36 @@ export class TaskService {
       }
     }
 
+    task.updatedAt = timestamp;
+    if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
+    // 写入后回读确认：写盘已发生，服务端无法回滚，漂移时必须如实返回权威回读状态。
+    if (!this.readBackMatches(params.taskId, this.buildRuntimeVerification(params))) {
+      const authoritative = this.readPersistedTask(params.taskId);
+      if (!authoritative) return { success: false, error: '任务状态写入后回读失败，无法确认落盘结果' };
+      return { success: false, error: '任务状态已被并发修改，已返回权威回读状态', task: authoritative };
+    }
+    return { success: true, data: task };
+  }
+
+
+  setQualityVerdict(params: TaskSetQualityVerdictParams): TaskServiceResult<Task> {
+    const tasks = this.readTasks();
+    if (!tasks) return { success: false, error: WRITE_ERROR };
+    const task = tasks.find((item) => item.id === params.taskId);
+    if (!task) return { success: false, error: '任务不存在' };
+    if (params.status !== 'accepted' && params.status !== 'rejected') {
+      return { success: false, error: '质量裁决状态无效' };
+    }
+    let rejectionTags: QualityRejectionTag[] | undefined;
+    if (params.status === 'rejected') {
+      const requested = params.rejectionTags || [];
+      if (requested.length === 0) return { success: false, error: '拒收裁决必须至少选择一个有效标签' };
+      const hasInvalid = requested.some((tag) => !VALID_QUALITY_REJECTION_TAGS.includes(tag));
+      if (hasInvalid) return { success: false, error: '拒收标签包含非法值，写入已拒绝' };
+      rejectionTags = [...new Set(requested)].sort() as QualityRejectionTag[];
+    }
+    const timestamp = this.now();
+    task.qualityVerdict = { status: params.status, rejectionTags, decidedAt: timestamp };
     task.updatedAt = timestamp;
     if (!this.persist(tasks)) return { success: false, error: WRITE_ERROR };
     return { success: true, data: task };
@@ -692,6 +836,7 @@ export class TaskService {
       assignedAccountId: partial.assignedAccountId,
       status: 'queued',
       mode: partial.mode,
+      executionIntent: 'hold',
       videoConfig: partial.videoConfig,
       attachments: partial.attachments,
       audioAttachment: partial.audioAttachment,

@@ -22,6 +22,7 @@ describe('TaskService 核心用例', () => {
     const { service, stored } = fixture();
     const result = service.create({ prompts: [' A ', ' ', 'B'], mode: 'video' });
     expect(result.success && result.data.map((task) => task.prompt)).toEqual(['A', 'B']);
+    expect(result.success && result.data.map((task) => task.executionIntent)).toEqual(['hold', 'hold']);
     expect(stored().map((task) => [task.id, task.projectId, task.status])).toEqual([['id-1', 'default', 'queued'], ['id-2', 'default', 'queued']]);
   });
 
@@ -73,6 +74,7 @@ describe('TaskService 核心用例', () => {
     const { service, stored } = fixture([item]);
     expect(service.retry('t1').success).toBe(true);
     expect(stored()[0]).toMatchObject({ status: 'queued', result: null, outputs: [], updatedAt: 'now', runtime: { stage: 'queued', message: '等待执行' } });
+    expect(stored()[0].executionIntent).toBe('armed');
     expect(stored()[0].lock).toBeUndefined(); expect(stored()[0].errorInfo).toBeUndefined();
   });
 
@@ -86,6 +88,7 @@ describe('TaskService 核心用例', () => {
     expect(waitingFixture.stored()[0]).toMatchObject({
       status: 'queued', errorInfo: undefined, runtime: { stage: 'queued', message: '等待执行' },
     });
+    expect(waitingFixture.stored()[0].executionIntent).toBe('armed');
 
     for (const status of ['executing', 'generating'] as const) {
       expect(fixture([base(status, status)]).service.retry(status)).toEqual({
@@ -141,9 +144,12 @@ describe('TaskService assign', () => {
     item.errorInfo = { code: 'timeout', message: 'x', recoverable: true, detectedAt: 'old' };
     item.lock = { ownerId: 'o', acquiredAt: 'old', expiresAt: 'old' };
     const { service, stored } = fixture([item]);
-    expect(service.assign({ taskId: 't1', accountId: 'acc-1' })).toEqual({ success: true });
+    const assigned = service.assign({ taskId: 't1', accountId: 'acc-1' });
+    expect(assigned.success).toBe(true);
+    if (assigned.success) expect(assigned.data.executionIntent).toBe('hold');
     const task = stored()[0];
     expect(task.assignedAccountId).toBe('acc-1');
+    expect(task.executionIntent).toBe('hold');
     expect(task.status).toBe('queued');
     expect(task.result).toBeNull();
     expect(task.outputs).toEqual([]);
@@ -193,10 +199,12 @@ describe('TaskService update', () => {
       expect(result.data.videoConfig).toEqual({ model: 'seedance-2.0', duration: '10s', aspectRatio: '16:9' });
       expect(result.data.attachments).toEqual(['a.jpg']);
       expect(result.data.audioAttachment).toBe('b.mp3');
+      expect(result.data.executionIntent).toBe('hold');
     }
     const task = stored()[0];
     expect(task.prompt).toBe('new');
     expect(task.status).toBe('queued');
+    expect(task.executionIntent).toBe('hold');
     expect(task.runtime?.stage).toBe('queued');
     expect(task.updatedAt).toBe('now');
   });
@@ -1824,5 +1832,20 @@ describe('IPC 接线源码契约检查：只读查询', () => {
     expect(exBody).not.toMatch(/\bloadTasks\b/);
     expect(exBody).not.toMatch(/已脱敏，长度/);
     expect(exBody).not.toMatch(/\[产物地址/);
+  });
+});
+
+describe('TaskService execution intent contract', () => {
+  it('assign 永远只落为 hold', () => {
+    const held = fixture([base('t1', 'fail')]);
+    const result = held.service.assign({ taskId: 't1', accountId: 'acc' });
+    expect(result.success).toBe(true);
+    expect(held.stored()[0].executionIntent).toBe('hold');
+  });
+  it('CSV 导入默认 hold', () => {
+    const { service, stored } = fixture();
+    const result = service.importCsv(csv('prompt\nHello'));
+    expect(result.success).toBe(true);
+    expect(stored()[0].executionIntent).toBe('hold');
   });
 });

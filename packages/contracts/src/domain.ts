@@ -18,7 +18,9 @@ import type {
   VideoModel,
   VideoDuration,
   VideoAspectRatio,
+  TaskExecutionIntent,
   DependencyPolicy,
+  QualityVerdict,
 } from './enums';
 
 // ==================== 账号相关 ====================
@@ -289,6 +291,8 @@ export interface Task {
   prompt: string;
   /** 分配的目标账号 ID */
   assignedAccountId: string | null;
+  /** 执行意图：hold 不得调度，armed 才允许进入队列调度 */
+  executionIntent?: TaskExecutionIntent;
   /** 任务状态 */
   status: TaskStatus;
   /** 生成模式 */
@@ -319,6 +323,10 @@ export interface Task {
   source?: 'manual' | 'csv' | 'workflow';
   dependsOnTaskIds?: string[];
   dependencyPolicy?: DependencyPolicy;
+  /** 依赖阻断时持久化的原因任务 ID；去重、稳定排序，不包含提示词或页面信息 */
+  blockedByTaskIds?: string[];
+  /** 人工质量裁决；只记录人工判断，不自动重试或平台写入 */
+  qualityVerdict?: QualityVerdict;
   projectId?: string;
   createdAt: string;
   updatedAt: string;

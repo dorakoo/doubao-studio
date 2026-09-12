@@ -19,9 +19,12 @@ import type {
   AccountScheduling,
 } from '../domain';
 import type {
+  TaskExecutionIntent,
   GenerationMode,
   AccountPlatform,
   TaskStatus,
+  QualityVerdictStatus,
+  QualityRejectionTag,
 } from '../enums';
 
 import type {
@@ -130,7 +133,7 @@ export interface ElectronAPI {
       audioAttachment?: string,
       projectId?: string
     ) => Promise<TaskAddResult>;
-    assign: (taskId: string, accountId: string) => Promise<TaskOperationResult>;
+    assign: (taskId: string, accountId: string) => Promise<TaskResult>;
     updateStatus: (
       taskId: string,
       status: string,
@@ -141,8 +144,11 @@ export interface ElectronAPI {
       status?: TaskStatus;
       runtime?: Partial<TaskRunSnapshot>;
       errorInfo?: TaskErrorInfo | null;
+      executionIntent?: TaskExecutionIntent;
+      blockedByTaskIds?: string[];
       result?: string;
     }) => Promise<TaskResult>;
+    setQualityVerdict: (taskId: string, status: QualityVerdictStatus, rejectionTags?: QualityRejectionTag[]) => Promise<TaskResult>;
     acquireLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     renewLock: (taskId: string, ownerId: string) => Promise<TaskResult>;
     releaseLock: (taskId: string, ownerId: string) => Promise<TaskOperationResult>;

@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'http';
 import type { AddressInfo } from 'net';
-import type { Project, Task } from '@doubao-studio/contracts';
+import type { Account, Project, Task, TaskArtifact } from '@doubao-studio/contracts';
 import type { ControlCommandResult, ControlTaskAction } from './controlTypes';
 
 const API_VERSION = 'v1';
@@ -14,6 +14,7 @@ export interface LocalControlDependencies {
   expiresAtMs: number;
   listProjects: () => Project[];
   listTasks: () => Task[];
+  listAccounts: () => Account[];
   isRendererReady: () => boolean;
   dispatch: (command: {
     requestId: string;
@@ -22,6 +23,18 @@ export interface LocalControlDependencies {
     batchId: string;
     taskId: string;
   }) => Promise<ControlCommandResult>;
+  assign: (command: {
+    projectId: string;
+    batchId: string;
+    taskId: string;
+    accountId: string;
+  }) => Promise<{ success: boolean; code: string }>;
+  downloadArtifact: (command: {
+    projectId: string;
+    batchId: string;
+    taskId: string;
+    artifactId: string;
+  }) => Promise<{ success: boolean; code: string; jobId?: string; bytes?: number }>;
   now?: () => string;
   nowMs?: () => number;
 }
@@ -85,6 +98,45 @@ function sanitizeTask(task: Task): Record<string, unknown> {
   };
 }
 
+function sanitizeAccount(account: Account, tasks: Task[]): Record<string, unknown> {
+  const quota = account.seedanceQuota;
+  const remainingUnits = quota ? Math.max(0, quota.estimatedTotalUnits - quota.usedUnits) : null;
+  const availability = account.health?.availability?.state || 'unknown';
+  return {
+    id: account.id,
+    displayName: account.name,
+    platform: account.platform || 'doubao',
+    health: account.health?.loginState || 'unknown',
+    availability,
+    predictedQuota: quota ? { date: quota.date, remainingUnits, exhausted: quota.exhausted, updatedAt: quota.updatedAt } : null,
+    busy: account.status === 'busy' || tasks.some((task) => task.assignedAccountId === account.id && ['executing', 'generating'].includes(task.status)),
+    actionRequired: availability === 'action_required'
+      || availability === 'login_required'
+      || account.health?.verificationRequired === true
+      || account.health?.loginState === 'expired',
+  };
+}
+
+function artifactDownloadAvailable(artifact: TaskArtifact): boolean {
+  if (artifact.validation?.state === 'expired' || artifact.validation?.state === 'invalid') return false;
+  try {
+    return ['http:', 'https:'].includes(new URL(artifact.url).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeArtifact(artifact: TaskArtifact, task: Task, accounts: Account[]): Record<string, unknown> {
+  const account = accounts.find((item) => item.id === task.assignedAccountId);
+  return {
+    id: artifact.id,
+    type: artifact.kind,
+    discoveredAt: artifact.discoveredAt,
+    validationState: artifact.validation?.state || 'unknown',
+    downloadAvailable: artifactDownloadAvailable(artifact) && !!account && (account.platform || 'doubao') === 'doubao',
+  };
+}
+
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -142,6 +194,40 @@ export class LocalControlServer {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 
+  private async executeIdempotent(
+    requestId: string,
+    fingerprint: string,
+    operation: () => Promise<CachedResponse>,
+  ): Promise<CachedResponse> {
+    const prior = this.replay.get(requestId);
+    if (prior) {
+      return prior.fingerprint === fingerprint
+        ? prior
+        : { fingerprint, status: 409, body: { ok: false, code: 'REQUEST_ID_CONFLICT', requestId } };
+    }
+    const pending = this.inFlight.get(requestId);
+    if (pending) {
+      return pending.fingerprint === fingerprint
+        ? pending.response
+        : { fingerprint, status: 409, body: { ok: false, code: 'REQUEST_ID_CONFLICT', requestId } };
+    }
+    const responsePromise = Promise.resolve()
+      .then(operation)
+      .catch(() => ({
+        fingerprint,
+        status: 503,
+        body: { ok: false, code: 'CONTROL_OPERATION_FAILED', requestId },
+      }));
+    this.inFlight.set(requestId, { fingerprint, response: responsePromise });
+    const completed = await responsePromise.finally(() => this.inFlight.delete(requestId));
+    this.replay.set(requestId, completed);
+    if (this.replay.size > 1000) {
+      const oldest = this.replay.keys().next().value;
+      if (oldest) this.replay.delete(oldest);
+    }
+    return completed;
+  }
+
   // 单一封闭路由表刻意集中安全门禁，便于审计每条路径均经过 Host/Origin/Auth 校验。
   // eslint-disable-next-line complexity
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -175,6 +261,10 @@ export class LocalControlServer {
       const tasks = this.deps.listTasks();
       if (req.method === 'GET' && parts[1] === 'projects' && parts.length === 2) {
         send(res, 200, { ok: true, projects: projects.map((project) => sanitizeProject(project, tasks)) });
+        return;
+      }
+      if (req.method === 'GET' && parts[1] === 'accounts' && parts.length === 2) {
+        send(res, 200, { ok: true, accounts: this.deps.listAccounts().map((account) => sanitizeAccount(account, tasks)) });
         return;
       }
       const projectId = parts[2];
@@ -229,6 +319,74 @@ export class LocalControlServer {
         send(res, 200, { ok: true, task: sanitizeTask(task) });
         return;
       }
+      if (req.method === 'GET' && parts[7] === 'artifacts' && parts.length === 8) {
+        const accounts = this.deps.listAccounts();
+        send(res, 200, { ok: true, artifacts: (task.artifacts || []).map((artifact) => sanitizeArtifact(artifact, task, accounts)) });
+        return;
+      }
+
+      if (req.method === 'POST' && parts[7] === 'artifacts' && parts[9] === 'download' && parts.length === 10) {
+        const artifactId = parts[8];
+        if (!SAFE_ID.test(artifactId || '')) {
+          send(res, 404, { ok: false, code: 'NOT_FOUND' });
+          return;
+        }
+        const artifact = task.artifacts?.find((item) => item.id === artifactId);
+        if (!artifact) {
+          send(res, 404, { ok: false, code: 'ARTIFACT_NOT_FOUND' });
+          return;
+        }
+        const body = await readJson(req);
+        const requestId = typeof body.requestId === 'string' ? body.requestId : '';
+        if (!SAFE_ID.test(requestId) || requestId.length < 8) {
+          send(res, 400, { ok: false, code: 'INVALID_REQUEST_ID' });
+          return;
+        }
+        if ('url' in body || 'saveDir' in body || 'directory' in body) {
+          send(res, 400, { ok: false, code: 'UNSUPPORTED_DOWNLOAD_INPUT' });
+          return;
+        }
+        const fingerprint = createHash('sha256').update(`download\n${projectId}\n${batchId}\n${taskId}\n${artifactId}`).digest('hex');
+        const completed = await this.executeIdempotent(requestId, fingerprint, async () => {
+          const result = await this.deps.downloadArtifact({ projectId, batchId, taskId, artifactId });
+          return {
+            fingerprint,
+            status: result.success ? 200 : result.code === 'ARTIFACT_NOT_FOUND' ? 404 : 409,
+            body: { ok: result.success, code: result.code, requestId, jobId: result.jobId, bytes: result.bytes },
+          };
+        });
+        send(res, completed.status, completed.body);
+        return;
+      }
+
+      if (req.method === 'POST' && parts[7] === 'assign' && parts.length === 8) {
+        const body = await readJson(req);
+        const requestId = typeof body.requestId === 'string' ? body.requestId : '';
+        const accountId = typeof body.accountId === 'string' ? body.accountId : '';
+        if (!SAFE_ID.test(requestId) || requestId.length < 8) {
+          send(res, 400, { ok: false, code: 'INVALID_REQUEST_ID' });
+          return;
+        }
+        if (!SAFE_ID.test(accountId)) {
+          send(res, 400, { ok: false, code: 'INVALID_ACCOUNT_ID' });
+          return;
+        }
+        if (!this.deps.listAccounts().some((account) => account.id === accountId)) {
+          send(res, 404, { ok: false, code: 'ACCOUNT_NOT_FOUND' });
+          return;
+        }
+        const fingerprint = createHash('sha256').update(`assign\n${projectId}\n${batchId}\n${taskId}\n${accountId}`).digest('hex');
+        const completed = await this.executeIdempotent(requestId, fingerprint, async () => {
+          const result = await this.deps.assign({ projectId, batchId, taskId, accountId });
+          return {
+            fingerprint,
+            status: result.success ? 200 : result.code === 'ACCOUNT_NOT_FOUND' ? 404 : 409,
+            body: { ok: result.success, code: result.code, requestId, assignedAccountId: result.success ? accountId : undefined },
+          };
+        });
+        send(res, completed.status, completed.body);
+        return;
+      }
       const action = parts[7] as ControlTaskAction;
       if (req.method !== 'POST' || parts.length !== 8 || !['start', 'pause', 'cancel', 'retry'].includes(action)) {
         send(res, 404, { ok: false, code: 'NOT_FOUND' });
@@ -241,23 +399,7 @@ export class LocalControlServer {
         return;
       }
       const fingerprint = createHash('sha256').update(`${action}\n${projectId}\n${batchId}\n${taskId}`).digest('hex');
-      const prior = this.replay.get(requestId);
-      if (prior) {
-        if (prior.fingerprint !== fingerprint) send(res, 409, { ok: false, code: 'REQUEST_ID_CONFLICT' });
-        else send(res, prior.status, prior.body);
-        return;
-      }
-      const pending = this.inFlight.get(requestId);
-      if (pending) {
-        if (pending.fingerprint !== fingerprint) {
-          send(res, 409, { ok: false, code: 'REQUEST_ID_CONFLICT' });
-          return;
-        }
-        const replayed = await pending.response;
-        send(res, replayed.status, replayed.body);
-        return;
-      }
-      const responsePromise = this.deps.dispatch({ requestId, action, projectId, batchId, taskId }).then((result) => {
+      const completed = await this.executeIdempotent(requestId, fingerprint, () => this.deps.dispatch({ requestId, action, projectId, batchId, taskId }).then((result) => {
         const unavailable = result.code === 'RENDERER_UNAVAILABLE' || result.code === 'RENDERER_NOT_READY';
         const status = result.ok ? 202 : unavailable ? 503 : 409;
         return {
@@ -265,14 +407,7 @@ export class LocalControlServer {
           status,
           body: { ok: result.ok, code: result.code, accepted: result.accepted === true, requestId },
         };
-      });
-      this.inFlight.set(requestId, { fingerprint, response: responsePromise });
-      const completed = await responsePromise.finally(() => this.inFlight.delete(requestId));
-      this.replay.set(requestId, completed);
-      if (this.replay.size > 1000) {
-        const oldest = this.replay.keys().next().value;
-        if (oldest) this.replay.delete(oldest);
-      }
+      }));
       send(res, completed.status, completed.body);
     } catch (error) {
       const code = error instanceof Error && error.message === 'BODY_TOO_LARGE'

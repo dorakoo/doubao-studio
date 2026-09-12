@@ -10,7 +10,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Button, Select, Input, Modal, Dropdown, Space, Segmented, Tooltip, message, Switch } from 'antd';
-import type { MenuProps, SegmentedProps } from 'antd';
+import type { MenuProps } from 'antd';
 import {
   PlusOutlined,
   DeleteOutlined,
@@ -31,7 +31,7 @@ import {
   StopOutlined,
   FileExcelOutlined,
 } from '@ant-design/icons';
-import { useTaskStore } from '../store/useTaskStore';
+import { useTaskStore, isDependencyBlockedTask, describeDependencyBlock } from '../store/useTaskStore';
 import { useAccountStore } from '../store/useAccountStore';
 import { useProjectStore } from '../store/useProjectStore';
 import TaskDetailModal from './TaskDetailModal';
@@ -42,7 +42,6 @@ import {
   VIDEO_MODEL_LABELS,
   VIDEO_MODEL_COST,
   DEFAULT_VIDEO_CONFIG,
-  type TaskStatus,
   type GenerationMode,
   type VideoModel,
   type VideoDuration,
@@ -117,6 +116,31 @@ const ModeSelector: React.FC<{
   );
 };
 
+type ArmTasksFn = (taskIds: string[]) => Promise<{ armed: number; failed: number; error?: string }>;
+
+function autoExecuteTooltip(enabled: boolean): string {
+  return enabled ? '导入后执行：开启' : '导入后执行：关闭';
+}
+
+function importedExecutionSuffix(armed: number): string {
+  return armed > 0 ? `，已显式授权执行 ${armed} 条` : '';
+}
+
+async function armImportedTasksAfterAssignment(importedTasks: Task[], autoExecute: boolean, armTasks: ArmTasksFn): Promise<number> {
+  if (!autoExecute || importedTasks.length === 0) return 0;
+  const importedIds = new Set(importedTasks.map((task) => task.id));
+  const assignedIds = useTaskStore.getState().tasks
+    .filter((task) => importedIds.has(task.id) && task.assignedAccountId)
+    .map((task) => task.id);
+  if (assignedIds.length === 0) {
+    message.info('已导入任务，但没有已指派账号；任务保持 hold，需指派后手动启动');
+    return 0;
+  }
+  const armResult = await armTasks(assignedIds);
+  if (armResult.failed > 0) message.warning(armResult.error || `${armResult.failed} 条任务执行意图写入失败，已保持 hold`);
+  return armResult.armed;
+}
+
 // ==================== 组件 ====================
 
 const TaskConsole: React.FC = () => {
@@ -125,15 +149,14 @@ const TaskConsole: React.FC = () => {
     addTasks,
     importCsv,
     assignTask,
+    armTasks,
     deleteTask,
     batchPause,
-    getCompletedOutputs,
     startAutomation,
     accountBusy,
     clearError,
     error,
     updateTask,
-    processQueue,
   } = useTaskStore();
   const activeProjectId = useProjectStore((state) => state.activeProjectId);
   const activeProject = useProjectStore((state) => state.projects.find((project) => project.id === state.activeProjectId));
@@ -153,6 +176,7 @@ const TaskConsole: React.FC = () => {
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [autoAssign, setAutoAssign] = useState(false);
+  const [autoExecute, setAutoExecute] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingPrompt, setEditingPrompt] = useState('');
   const [editingVideoConfig, setEditingVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
@@ -171,6 +195,7 @@ const TaskConsole: React.FC = () => {
     void window.electronAPI.settings.get().then((settings) => {
       setTemplates(Array.isArray(settings.taskTemplates) ? settings.taskTemplates : []);
       setAutoAssign(settings.autoAssignEnabled === true);
+      setAutoExecute(settings.autoExecuteEnabled === true);
     });
   }, []);
 
@@ -265,17 +290,19 @@ const TaskConsole: React.FC = () => {
       const assignment = autoAssign && result.tasks.length > 0
         ? await autoAssignTasks(result.tasks)
         : { assigned: 0, unassigned: 0 };
+      const armed = await armImportedTasksAfterAssignment(result.tasks, autoExecute, armTasks);
+      const suffix = importedExecutionSuffix(armed);
       if (result.errors.length > 0) {
-        message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}`);
+        message.warning(`已导入 ${result.imported} 条，跳过 ${result.skipped} 条；${result.errors[0]}${suffix}`);
       } else if (assignment.unassigned > 0) {
-        message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派`);
+        message.warning(`已导入 ${result.imported} 条；${assignment.unassigned} 条无可用账号，保留为未指派${suffix}`);
       } else {
-        message.success(`已导入 ${result.imported} 条任务`);
+        message.success(`已导入 ${result.imported} 条任务${suffix}`);
       }
     } finally {
       setIsCsvImporting(false);
     }
-  }, [autoAssign, autoAssignTasks, importCsv, isCsvImporting]);
+  }, [autoAssign, autoAssignTasks, autoExecute, armTasks, importCsv, isCsvImporting]);
 
   const handleCsvDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -306,6 +333,16 @@ const TaskConsole: React.FC = () => {
       message.error(error instanceof Error ? error.message : '无法导入拖入的 CSV 文件');
     }
   }, [handleImportCsv]);
+
+  const handleAutoExecuteChange = useCallback(async (enabled: boolean) => {
+    setAutoExecute(enabled);
+    const settings = await window.electronAPI.settings.get();
+    const result = await window.electronAPI.settings.save({ ...settings, autoExecuteEnabled: enabled });
+    if (!result.success) {
+      setAutoExecute(!enabled);
+      message.error(result.error || '导入后执行设置保存失败');
+    }
+  }, []);
 
   const handleAutoAssignChange = useCallback(async (enabled: boolean) => {
     setAutoAssign(enabled);
@@ -427,8 +464,12 @@ const TaskConsole: React.FC = () => {
         message.error(useTaskStore.getState().error || '编辑任务失败');
         return;
       }
-      processQueue();
-      message.success('提示词已更新，任务已重新加入队列');
+      const armResult = await armTasks([editingTask.id]);
+      if (armResult.armed === 1 && armResult.failed === 0) {
+        message.success('提示词已更新，任务已显式授权执行');
+      } else {
+        message.error(armResult.error || '提示词已更新，但执行授权写入失败；任务保持 hold');
+      }
     }
 
     resetEditingTask();
@@ -439,7 +480,7 @@ const TaskConsole: React.FC = () => {
   const getContextMenu = (taskId: string): MenuProps['items'] => {
     const task = tasks.find((t) => t.id === taskId);
     const mustReconcile = requiresSubmissionReconciliation(task);
-    const canRetry = task && !mustReconcile && (
+    const canRetry = task && !mustReconcile && !isDependencyBlockedTask(task) && (
       task.status === 'fail' || task.status === 'done' || task.status === 'paused' ||
       task.status === 'cancelled' || task.status === 'waiting_verification'
     );
@@ -507,7 +548,19 @@ const TaskConsole: React.FC = () => {
 
   // ---- 渲染状态标签 ----
 
-  const renderStatusTag = (status: TaskStatus) => {
+  const renderStatusTag = (task: (typeof tasks)[0]) => {
+    const status = task.status;
+    // 依赖阻断任务保持 queued（可被调度器重新评估），因此用独立标签区分，不能只显示“排队”。
+    if (isDependencyBlockedTask(task)) {
+      return (
+        <Tooltip title={describeDependencyBlock(task)}>
+          <span className="task-status-tag" style={{ borderColor: '#fbbf24', color: '#fbbf24' }}>
+            <StopOutlined style={{ marginRight: 4 }} />
+            依赖阻断
+          </span>
+        </Tooltip>
+      );
+    }
     const cfg = TASK_STATUS_CONFIG[status];
     return (
       <span className={`task-status-tag ${cfg.className}`} style={{ borderColor: cfg.color, color: cfg.color }}>
@@ -553,9 +606,10 @@ const TaskConsole: React.FC = () => {
           className={`task-item ${isActive ? 'task-item-active' : ''}`}
           style={{ cursor: 'pointer' }}
           onClick={() => handleTaskClick(task)}
+          onDoubleClick={() => window.dispatchEvent(new CustomEvent('open-task-conversation', { detail: { task } }))}
         >
           <div className="task-item-top">
-            {renderStatusTag(task.status)}
+            {renderStatusTag(task)}
             {renderModeTag(taskMode)}
             <span className="task-item-time">
               {new Date(task.createdAt).toLocaleTimeString('zh-CN', {
@@ -646,7 +700,9 @@ const TaskConsole: React.FC = () => {
     (t) => t.status === 'executing' || t.status === 'generating' || t.status === 'waiting_verification' || t.status === 'waiting_generation_confirmation' || t.status === 'manual_submission_observing'
   ).length;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
-  const failCount = tasks.filter((t) => t.status === 'fail').length;
+  // 依赖阻断是调度阻断（任务仍保持 queued），与普通平台失败分开显示，避免被误读为生成失败。
+  const failCount = tasks.filter((t) => t.status === 'fail' && !isDependencyBlockedTask(t)).length;
+  const dependencyBlockedCount = tasks.filter((t) => isDependencyBlockedTask(t)).length;
 
   return (
     <div
@@ -660,7 +716,7 @@ const TaskConsole: React.FC = () => {
         <div className="csv-drop-overlay" role="status" aria-live="polite">
           <FileExcelOutlined />
           <strong>松开导入 CSV</strong>
-          <span>导入当前项目；未指派任务不会自动开始</span>
+          <span>导入当前项目；未明确启动的任务不会自动执行</span>
         </div>
       )}
       {/* 顶部操作栏 */}
@@ -674,8 +730,15 @@ const TaskConsole: React.FC = () => {
           <span className="stat-badge done"><CheckCircleOutlined /> 完成 {doneCount}</span>
           {failCount > 0 && (
             <span className="stat-badge fail">
-              <CloseCircleOutlined /> {failCount}
+              <CloseCircleOutlined /> 失败 {failCount}
             </span>
+          )}
+          {dependencyBlockedCount > 0 && (
+            <Tooltip title="依赖阻断：调度阻断，任务仍在队列中等待重新评估；不计入平台生成失败率，也不会自动重试">
+              <span className="stat-badge fail">
+                <StopOutlined /> 依赖阻断 {dependencyBlockedCount}
+              </span>
+            </Tooltip>
           )}
         </div>
         <div className="task-console-actions">
@@ -687,6 +750,16 @@ const TaskConsole: React.FC = () => {
                 onChange={(enabled) => void handleAutoAssignChange(enabled)}
               />
               <span style={{ color: '#9898b8', fontSize: 12 }}>自动指派</span>
+            </div>
+          </Tooltip>
+          <Tooltip title={autoExecuteTooltip(autoExecute)}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginRight: 8 }}>
+              <Switch
+                size="small"
+                checked={autoExecute}
+                onChange={(enabled) => void handleAutoExecuteChange(enabled)}
+              />
+              <span style={{ color: '#9898b8', fontSize: 12 }}>导入后执行</span>
             </div>
           </Tooltip>
           <Button
@@ -720,15 +793,9 @@ const TaskConsole: React.FC = () => {
             <Button
               size="small"
               icon={<DownloadOutlined />}
-              onClick={async () => {
-                const outputs = await getCompletedOutputs();
-                console.log('[TaskConsole] 已完成产物:', outputs);
-                if (outputs.length === 0) {
-                  message.info('暂无已完成产物');
-                  return;
-                }
-                // 通过自定义事件通知 Toolbar 打开预览
-                window.dispatchEvent(new CustomEvent('batch-download-outputs', { detail: outputs }));
+              onClick={() => {
+                // 打开批次选择器；下载范围固定为当前项目和用户选择的单个批次。
+                window.dispatchEvent(new CustomEvent('open-batch-manager'));
               }}
             >
               批量下载

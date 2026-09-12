@@ -12,8 +12,11 @@ import type {
   TaskArtifact,
 } from '../domain';
 import type {
+  TaskExecutionIntent,
   GenerationMode,
   TaskStatus,
+  QualityVerdictStatus,
+  QualityRejectionTag,
 } from '../enums';
 
 // ==================== 通用返回值 ====================
@@ -46,6 +49,8 @@ export interface TaskAddParams {
   videoConfig?: Task['videoConfig'];
   attachments?: string[];
   audioAttachment?: string;
+  /** 创建时的执行意图；默认 hold，只有显式导入执行才允许 armed */
+  executionIntent?: TaskExecutionIntent;
   projectId?: string;
 }
 
@@ -66,7 +71,18 @@ export interface TaskUpdateRuntimeParams {
   status?: TaskStatus;
   runtime?: Partial<TaskRunSnapshot>;
   errorInfo?: TaskErrorInfo | null;
+  /** 执行意图变更（可选）；用于显式启动持久化 */
+  executionIntent?: TaskExecutionIntent;
+  /** 依赖阻断原因任务 ID；空数组表示清除历史阻断 */
+  blockedByTaskIds?: string[];
   result?: string;
+}
+
+/** 人工质量裁决写入参数 */
+export interface TaskSetQualityVerdictParams {
+  taskId: string;
+  status: QualityVerdictStatus;
+  rejectionTags?: QualityRejectionTag[];
 }
 
 export interface TaskAcquireLockParams {

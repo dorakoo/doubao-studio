@@ -5,7 +5,7 @@
  */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, GenerationMode } from '@doubao-studio/contracts';
+import type { ElectronAPI, Account, AccountAvailability, AccountPlatform, Task, GenerationMode, TaskExecutionIntent } from '@doubao-studio/contracts';
 
 // ==================== 暴露 API ====================
 
@@ -65,7 +65,7 @@ const electronAPI = {
     list: (): Promise<Task[]> => ipcRenderer.invoke('tasks:list'),
     add: (prompts: string[], mode?: GenerationMode, videoConfig?: any, attachments?: string[], audioAttachment?: string, projectId?: string): Promise<{ success: boolean; tasks?: Task[]; error?: string }> =>
       ipcRenderer.invoke('tasks:add', { prompts, mode, videoConfig, attachments, audioAttachment, projectId }),
-    assign: (taskId: string, accountId: string): Promise<{ success: boolean; error?: string }> =>
+    assign: (taskId: string, accountId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:assign', { taskId, accountId }),
     updateStatus: (
       taskId: string,
@@ -75,12 +75,16 @@ const electronAPI = {
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('tasks:updateStatus', { taskId, status, result, outputs }),
     updateRuntime: (taskId: string, patch: {
+      executionIntent?: TaskExecutionIntent;
       status?: string;
       runtime?: Record<string, any>;
       errorInfo?: Record<string, any> | null;
+      blockedByTaskIds?: string[];
       result?: string;
     }): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:updateRuntime', { taskId, ...patch }),
+    setQualityVerdict: (taskId: string, status: 'accepted' | 'rejected', rejectionTags?: string[]): Promise<{ success: boolean; task?: Task; error?: string }> =>
+      ipcRenderer.invoke('tasks:setQualityVerdict', { taskId, status, rejectionTags }),
     acquireLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>
       ipcRenderer.invoke('tasks:acquireLock', { taskId, ownerId }),
     renewLock: (taskId: string, ownerId: string): Promise<{ success: boolean; task?: Task; error?: string }> =>

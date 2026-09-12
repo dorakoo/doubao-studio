@@ -603,6 +603,35 @@ function normalizeLock(raw: unknown, _now: string): TaskLock | undefined {
  * 在深拷贝的对象上执行任务字段归一化（直接修改传入对象）。
  * 输入必须是 isObject 通过的对象。
  */
+const VALID_QUALITY_REJECTION_TAGS = ['product_structure', 'material', 'aspect_ratio', 'character_consistency', 'audio', 'bgm'] as const;
+
+function normalizeBlockedByTaskIds(value: unknown): string[] | undefined {
+  const ids = asStringArray(value)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const unique = [...new Set(ids)].sort();
+  return unique.length > 0 ? unique : undefined;
+}
+
+function normalizeQualityVerdict(
+  value: unknown,
+): NonNullable<Task['qualityVerdict']> | undefined {
+  if (!isObject(value)) return undefined;
+  const status = value.status;
+  if (status !== 'accepted' && status !== 'rejected') return undefined;
+  // 裁决时间必须来自真实记录：缺失或非法时整体丢弃该裁决，
+  // 绝不回退为当前时间，否则会伪造一次并不存在的人工裁决。
+  if (!isValidISODate(value.decidedAt)) return undefined;
+  const decidedAt = value.decidedAt;
+  if (status === 'accepted') return { status: 'accepted', decidedAt };
+  const rejectedTags = Array.isArray(value.rejectionTags)
+    ? [...new Set(value.rejectionTags.filter((tag): tag is typeof VALID_QUALITY_REJECTION_TAGS[number] =>
+        typeof tag === 'string' && (VALID_QUALITY_REJECTION_TAGS as readonly string[]).includes(tag)))].sort()
+    : [];
+  if (rejectedTags.length === 0) return undefined;
+  return { status: 'rejected', rejectionTags: rejectedTags, decidedAt };
+}
+
 function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: string, now: string): Task {
   const task = raw as unknown as Task;
 
@@ -612,6 +641,8 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   task.prompt = asString(raw.prompt, '');
   task.assignedAccountId = asNonEmptyString(raw.assignedAccountId) ?? null;
   task.mode = oneOf(raw.mode, VALID_GENERATION_MODES, 'chat');
+  // 执行意图：历史 queued 缺失字段默认 hold；只有显式 armed 才允许调度。
+  task.executionIntent = raw.executionIntent === 'armed' ? 'armed' : 'hold';
   task.result = raw.result === null ? null : (typeof raw.result === 'string' ? raw.result : null);
   task.source = oneOf(raw.source, VALID_TASK_SOURCES, 'manual') as Task['source'];
   task.createdAt = asISODate(raw.createdAt, now);
@@ -643,6 +674,8 @@ function normalizeTaskObject(raw: Record<string, unknown>, defaultProjectId: str
   // 依赖
   task.dependsOnTaskIds = asStringArray(raw.dependsOnTaskIds);
   task.dependencyPolicy = optionalOneOf(raw.dependencyPolicy, VALID_DEPENDENCY_POLICIES) as DependencyPolicy | undefined;
+  task.blockedByTaskIds = normalizeBlockedByTaskIds(raw.blockedByTaskIds);
+  task.qualityVerdict = normalizeQualityVerdict(raw.qualityVerdict);
 
   // 项目 ID
   task.projectId = asNonEmptyString(raw.projectId) ?? defaultProjectId;

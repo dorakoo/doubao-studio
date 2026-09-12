@@ -28,7 +28,7 @@ import type {
   TaskAddParams,
   TaskAssignParams,
   TaskUpdateStatusParams,
-  TaskUpdateRuntimeParams,
+  TaskUpdateRuntimeParams,  TaskSetQualityVerdictParams,
   TaskAcquireLockParams,
   TaskRenewLockParams,
   TaskReleaseLockParams,
@@ -82,6 +82,44 @@ export function listTasksForLocalControl(): Task[] {
   const result = taskService.getTasks();
   if (!result.success) throw new Error(result.error);
   return result.data;
+}
+
+export interface LocalControlTaskLocator {
+  projectId: string;
+  batchId: string;
+  taskId: string;
+}
+
+function locateTaskForLocalControl(locator: LocalControlTaskLocator): Task | null {
+  const tasks = listTasksForLocalControl();
+  return tasks.find((task) =>
+    task.id === locator.taskId
+    && (task.projectId || 'default-project') === locator.projectId
+    && (task.batchId || '_unbatched') === locator.batchId
+  ) || null;
+}
+
+/** 本机控制面指派出口：重新核对账号与任务归属，并只调用正式 TaskService.assign。 */
+export function assignTaskForLocalControl(
+  locator: LocalControlTaskLocator & { accountId: string },
+): { success: boolean; code: string } {
+  const accounts = readJSON<Array<{ id?: unknown; platform?: unknown }>>('accounts.json', []);
+  const account = accounts.find((item) => item.id === locator.accountId);
+  if (!account) {
+    return { success: false, code: 'ACCOUNT_NOT_FOUND' };
+  }
+  if (account.platform === 'dola') return { success: false, code: 'PLATFORM_NOT_VERIFIED' };
+  if (!locateTaskForLocalControl(locator)) return { success: false, code: 'TASK_SCOPE_MISMATCH' };
+  const result = taskService.assign({ taskId: locator.taskId, accountId: locator.accountId });
+  if (!result.success) {
+    const code = result.error.includes('执行中') ? 'TASK_ACTIVE' : result.error.includes('不存在') ? 'TASK_NOT_FOUND' : 'TASK_WRITE_FAILED';
+    return { success: false, code };
+  }
+  const updated = locateTaskForLocalControl(locator);
+  if (!updated || updated.assignedAccountId !== locator.accountId) {
+    return { success: false, code: 'ASSIGN_READBACK_FAILED' };
+  }
+  return { success: true, code: 'ASSIGNED' };
 }
 
 type CsvImportResponse = {
@@ -189,11 +227,142 @@ function getAvailableDownloadPath(fs: typeof import('fs'), path: typeof import('
   return candidate;
 }
 
+export interface LocalControlArtifactDownloadResult {
+  success: boolean;
+  code: string;
+  jobId?: string;
+  bytes?: number;
+}
+
+function parseDownloadUrl(value: string): URL | null {
+  try {
+    const parsed = new URL(value);
+    return ['http:', 'https:'].includes(parsed.protocol) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveLocalControlSaveDir(
+  fs: typeof import('fs'),
+  path: typeof import('path'),
+  app: Electron.App,
+): string | null {
+  const settingsPath = path.join(app.getPath('userData'), 'settings.json');
+  let configuredDir: string | null = null;
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const value = JSON.parse(fs.readFileSync(settingsPath, 'utf8')) as unknown;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const downloadDir = (value as Record<string, unknown>).downloadDir;
+        if (typeof downloadDir === 'string' && downloadDir.trim()) configuredDir = downloadDir.trim();
+      }
+    }
+  } catch {}
+  const saveDir = configuredDir || path.join(app.getPath('downloads'), '豆包工作室产物');
+  try {
+    if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+    return saveDir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 本机控制面单产物下载出口。调用方只能提供稳定 artifact ID；远程 URL 与保存目录
+ * 均从受信任的应用台账/设置读取，结果不返回绝对路径。
+ */
+export async function downloadArtifactForLocalControl(
+  locator: LocalControlTaskLocator & { artifactId: string },
+): Promise<LocalControlArtifactDownloadResult> {
+  const task = locateTaskForLocalControl(locator);
+  const artifact = task?.artifacts?.find((item) => item.id === locator.artifactId);
+  if (!task || !artifact) return { success: false, code: 'ARTIFACT_NOT_FOUND' };
+  if (artifact.validation?.state === 'expired' || artifact.validation?.state === 'invalid') {
+    return { success: false, code: 'ARTIFACT_NOT_DOWNLOADABLE' };
+  }
+
+  const parsedUrl = parseDownloadUrl(artifact.url);
+  if (!parsedUrl) return { success: false, code: 'ARTIFACT_NOT_DOWNLOADABLE' };
+
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  const { app } = require('electron') as typeof import('electron');
+  const saveDir = resolveLocalControlSaveDir(fs, path, app);
+  if (!saveDir) return { success: false, code: 'DOWNLOAD_DIRECTORY_UNAVAILABLE' };
+
+  const accounts = readJSON<Array<{ id: string; partition: string; platform?: 'doubao' | 'dola' }>>('accounts.json', []);
+  const account = accounts.find((item) => item.id === task.assignedAccountId);
+  if (!task.assignedAccountId || !account) return { success: false, code: 'ACCOUNT_NOT_FOUND' };
+  if (account.platform === 'dola') return { success: false, code: 'PLATFORM_NOT_VERIFIED' };
+  const accountSession = session.fromPartition(`persist:doubao_${account.partition}`);
+  const now = new Date().toISOString();
+  const job: DownloadJob = {
+    id: uuidv4(),
+    taskId: task.id,
+    accountId: task.assignedAccountId,
+    mode: task.mode,
+    url: artifact.url,
+    status: 'downloading',
+    attempts: 1,
+    saveDir,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const jobs = loadDownloadJobs();
+  jobs.push(job);
+  if (!saveDownloadJobs(jobs)) return { success: false, code: 'DOWNLOAD_LEDGER_WRITE_FAILED' };
+
+  let temporaryPath: string | undefined;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 60_000);
+    const response = await accountSession.fetch(artifact.url, {
+      headers: {
+        Referer: 'https://www.doubao.com/',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+      },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeout));
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get('content-type') || '';
+    const validation = validateDownloadResponse(response.status, contentType, buffer.length, task.mode);
+    if (!validation.valid) throw new Error(validation.message || 'DOWNLOAD_VALIDATION_FAILED');
+
+    let ext = path.extname(parsedUrl.pathname).toLowerCase();
+    if (!ext || ext.length > 6) {
+      if (contentType.includes('video/mp4') || task.mode === 'video') ext = '.mp4';
+      else if (contentType.includes('webp')) ext = '.webp';
+      else if (contentType.includes('jpeg')) ext = '.jpg';
+      else ext = '.png';
+    }
+    const filePath = getAvailableDownloadPath(fs, path, saveDir, `${task.id.substring(0, 8)}_${artifact.id.substring(0, 8)}${ext}`);
+    temporaryPath = `${filePath}.${job.id}.part`;
+    fs.writeFileSync(temporaryPath, buffer);
+    fs.renameSync(temporaryPath, filePath);
+    job.status = 'done';
+    job.filePath = filePath;
+    job.bytes = buffer.length;
+    job.updatedAt = new Date().toISOString();
+    if (!saveDownloadJobs(jobs)) return { success: false, code: 'DOWNLOAD_LEDGER_WRITE_FAILED' };
+    return { success: true, code: 'DOWNLOADED', jobId: job.id, bytes: buffer.length };
+  } catch (error) {
+    try { removeExactDownloadPart(fs, path, saveDir, temporaryPath, job.id); } catch {}
+    const normalizedError = error instanceof Error ? error : new Error(String(error));
+    const classified = classifyDownloadException(normalizedError);
+    job.status = 'failed';
+    job.error = classified.message;
+    job.updatedAt = new Date().toISOString();
+    saveDownloadJobs(jobs);
+    return { success: false, code: 'DOWNLOAD_FAILED', jobId: job.id };
+  }
+}
+
 // ==================== IPC 处理器注册 ====================
 
 const TASK_IPC_CHANNELS = [
   'tasks:list', 'tasks:add', 'tasks:assign', 'tasks:updateStatus', 'tasks:update',
-  'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime',
+  'tasks:delete', 'tasks:retry', 'tasks:batchPause', 'tasks:updateRuntime', 'tasks:setQualityVerdict',
   'tasks:acquireLock', 'tasks:renewLock', 'tasks:importCsv', 'tasks:releaseLock',
   'tasks:getCompletedOutputs', 'tasks:selectImages', 'tasks:selectAudio',
   'tasks:readFileAsBase64', 'tasks:downloadOutputs', 'tasks:downloadPublicShareMedia', 'tasks:listDownloads',
@@ -294,7 +463,7 @@ export function registerTaskIPC(): () => void {
   // ---- 指派任务给账号 ----
   ipcMain.handle(
     'tasks:assign',
-    async (_event, params: TaskAssignParams): Promise<{ success: boolean; error?: string }> => {
+    async (_event, params: TaskAssignParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       return taskService.assign(params);
     }
   );
@@ -356,6 +525,16 @@ export function registerTaskIPC(): () => void {
     'tasks:updateRuntime',
     async (_event, params: TaskUpdateRuntimeParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
       const result = taskService.updateRuntime(params);
+      if (result.success) return { success: true, task: result.data };
+      // 并发冲突时服务端返回权威回读任务：如实透传，禁止伪造“已回滚”。
+      return result.task ? { success: false, error: result.error, task: result.task } : { success: false, error: result.error };
+    }
+  );
+
+  ipcMain.handle(
+    'tasks:setQualityVerdict',
+    async (_event, params: TaskSetQualityVerdictParams): Promise<{ success: boolean; task?: Task; error?: string }> => {
+      const result = taskService.setQualityVerdict(params);
       return result.success ? { success: true, task: result.data } : result;
     }
   );

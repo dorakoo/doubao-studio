@@ -18,9 +18,11 @@ import type {
   TaskRunSnapshot,
   TaskStage,
   TaskArtifact,
+  TaskExecutionIntent,
+  QualityRejectionTag,
 } from '../types';
 import { getAssignedAccountBlockReason } from '../utils/queueAccountDecision';
-import { evaluateDependencies } from '../utils/dependencyEval';
+import { evaluateDependencies, isDependencyErrorCode } from '../utils/dependencyEval';
 import { useAccountStore } from './useAccountStore';
 import { automationEngine } from '../automation/AutomationEngine';
 import { useProjectStore } from './useProjectStore';
@@ -31,6 +33,25 @@ import { completeAcceptedObservation, renewObservationLease, shouldResumeAccepte
 // 只对已满足依赖的 queued 任务做有界退避复检，ready 后由现有调度继续。
 const availabilityRetryAttempts = new Map<string, number>();
 const availabilityRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// 依赖阻断任务保持在 queued，因此仍会被队列扫描到。这里只保证在“没有其他调度触发”
+// 的情况下也有一个有界的幂等重新评估机会，且同一时刻只排一个定时器。
+/** 依赖前置可能在外部（其它窗口、CLI 或时间流逝）恢复，这里做固定周期复检。 */
+export const dependencyRecheckDelayMs = 3_000;
+let dependencyRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+let dependencyRecheckScheduled = false;
+
+function scheduleDependencyRecheck(): void {
+  if (dependencyRecheckScheduled) return;
+  dependencyRecheckScheduled = true;
+  dependencyRecheckTimer = setTimeout(() => {
+    dependencyRecheckScheduled = false;
+    dependencyRecheckTimer = null;
+    void useTaskStore.getState().processQueue();
+  }, dependencyRecheckDelayMs);
+  const timer = dependencyRecheckTimer as unknown as { unref?: () => void };
+  if (typeof timer.unref === 'function') timer.unref();
+}
 
 
 // ==================== 类型 ====================
@@ -64,8 +85,11 @@ interface TaskState {
   addTasks: (text: string, mode?: GenerationMode, videoConfig?: Task['videoConfig'], attachments?: string[], audioAttachment?: string) => Promise<Task[] | null>;
   importCsv: (filePath?: string) => Promise<{ tasks: Task[]; imported: number; skipped: number; errors: string[] } | null>;
   assignTask: (taskId: string, accountId: string) => Promise<boolean>;
+  /** 将指定任务显式置为 armed；用于 CSV 明确执行和批量启动。 */
+  armTasks: (taskIds: string[]) => Promise<{ armed: number; failed: number; error?: string }>;
   updateTaskStatus: (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => Promise<boolean>;
   updateTask: (taskId: string, updates: TaskUpdateInput) => Promise<boolean>;
+  setQualityVerdict: (taskId: string, status: 'accepted' | 'rejected', rejectionTags?: QualityRejectionTag[]) => Promise<boolean>;
   deleteTask: (taskId: string) => Promise<boolean>;
   retryTask: (taskId: string) => Promise<boolean>;
   batchPause: () => Promise<boolean>;
@@ -80,9 +104,18 @@ interface TaskState {
     status?: TaskStatus;
     runtime?: Partial<TaskRunSnapshot>;
     errorInfo?: TaskErrorInfo | null;
+    executionIntent?: TaskExecutionIntent;
+    blockedByTaskIds?: string[];
     result?: string;
   }) => Promise<boolean>;
   completeAutomation: (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => Promise<void>;
+  /** 持久化依赖阻断：写盘成功并回读一致后才更新界面，失败保持原状态 */
+  markDependencyBlock: (
+    taskId: string,
+    block: { code: string; message: string; blockedByTaskIds: string[] },
+  ) => Promise<boolean>;
+  /** 依赖恢复后通过 Core/Repository 清除历史阻断；写失败返回 false 且保持原状态 */
+  clearDependencyBlock: (taskId: string) => Promise<boolean>;
   pauseAutomation: (
     taskId: string,
     accountId: string,
@@ -96,13 +129,55 @@ interface TaskState {
   failAutomation: (taskId: string, accountId: string, errorMsg: string, errorInfo?: TaskErrorInfo) => Promise<void>;
 
   /** 处理队列：检查待执行任务，分配到空闲账号 */
-  processQueue: () => void;
+  processQueue: () => Promise<void>;
   /** 获取指定账号的下一个排队任务 */
   getNextTaskForAccount: (accountId: string) => Task | null;
 }
 
 const runtimePersistState = new Map<string, { stage?: TaskStage; savedAt: number }>();
 let queueProcessing = false;
+
+/** 判断任务是否处于依赖阻断态；只用于展示与重试门禁，不改变任务状态 */
+export function isDependencyBlockedTask(task: Task | null | undefined): boolean {
+  return isDependencyErrorCode(task?.errorInfo?.code);
+}
+
+/** 依赖阻断任务的统一用户可见文案 */
+export function describeDependencyBlock(task: Task | null | undefined): string {
+  const count = task?.blockedByTaskIds?.length || 0;
+  const detail = count > 0 ? `（涉及 ${count} 个前置任务）` : '';
+  switch (task?.errorInfo?.code) {
+    case 'dependency_missing':
+      return `依赖阻断：前置任务不存在，请检查工作流或 CSV${detail}`;
+    case 'dependency_cycle':
+      return `依赖阻断：存在自依赖或循环依赖${detail}`;
+    default:
+      return `依赖阻断：前置任务未成功，依赖恢复并重新评估后才会继续${detail}`;
+  }
+}
+
+/** 依赖状态快照，用于序列化写入并检测并发漂移 */
+interface DependencyStateSnapshot {
+  status: TaskStatus;
+  errorInfoCode: string | null | undefined;
+  blockedByTaskIds: string[];
+}
+
+function dependencySnapshot(task: Task): DependencyStateSnapshot {
+  return {
+    status: task.status,
+    errorInfoCode: task.errorInfo?.code,
+    blockedByTaskIds: task.blockedByTaskIds || [],
+  };
+}
+
+function dependenciesMatch(task: Task, expected: DependencyStateSnapshot): boolean {
+  const actual = dependencySnapshot(task);
+  if (actual.status !== expected.status) return false;
+  if (actual.errorInfoCode !== expected.errorInfoCode) return false;
+  if (actual.blockedByTaskIds.length !== expected.blockedByTaskIds.length) return false;
+  return actual.blockedByTaskIds.every((id, index) => id === expected.blockedByTaskIds[index]);
+}
 
 function artifactId(url: string): string {
   let hash = 5381;
@@ -214,25 +289,42 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     set({ error: null });
     try {
       const result = await window.electronAPI.tasks.assign(taskId, accountId);
-      if (result.success) {
-        const tasks = get().tasks.map((t) =>
-          t.id === taskId
-            ? { ...t, assignedAccountId: accountId, updatedAt: new Date().toISOString() }
-            : t
-        );
-        set({ tasks });
-
-        // 指派后由统一队列调度器启动，避免在这里和定时调度同时抢占账号。
-        setTimeout(() => get().processQueue(), 0);
+      const assignedTask = result.task;
+      if (result.success && assignedTask) {
+        set({ tasks: get().tasks.map((task) => task.id === taskId ? assignedTask : task) });
+        // 指派只改变账号绑定，不得触发队列、页面导航、提示词注入或平台请求。
         return true;
-      } else {
-        set({ error: result.error || '指派失败' });
-        return false;
       }
+      set({ error: result.error || '指派失败' });
+      return false;
     } catch (err: any) {
       set({ error: err.message });
       return false;
     }
+  },
+
+  /** 显式执行授权：只持久化 executionIntent=armed，随后交给统一队列门禁。 */
+  armTasks: async (taskIds: string[]) => {
+    const ids = [...new Set(taskIds.filter(Boolean))];
+    if (ids.length === 0) return { armed: 0, failed: 0 };
+    const updated = new Map<string, Task>();
+    const failures: string[] = [];
+    for (const taskId of ids) {
+      const result = await window.electronAPI.tasks.updateRuntime(taskId, { executionIntent: 'armed' });
+      if (result.success && result.task) updated.set(taskId, result.task);
+      else failures.push(result.error || taskId);
+    }
+    if (updated.size > 0) {
+      set({ tasks: get().tasks.map((task) => updated.get(task.id) || task) });
+      setTimeout(() => get().processQueue(), 0);
+    }
+    if (failures.length > 0) {
+      set({ error: `部分任务启动授权失败：${failures.slice(0, 2).join('；')}` });
+    }
+    const failedReason = failures.length > 0 ? failures.slice(0, 2).join('；') : undefined;
+    return failedReason
+      ? { armed: updated.size, failed: failures.length, error: failedReason }
+      : { armed: updated.size, failed: failures.length };
   },
 
   updateTaskStatus: async (taskId: string, status: TaskStatus, result?: string, outputs?: string[]) => {
@@ -264,7 +356,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return null;
     }
     set({ tasks: [...get().tasks, ...result.tasks] });
-    setTimeout(() => get().processQueue(), 0);
+    // CSV 导入只创建 hold 任务；只有 UI 明确勾选导入后执行时才调用 armTasks。
     return { tasks: result.tasks, imported: result.imported || result.tasks.length, skipped: result.skipped || 0, errors: result.errors || [] };
   },
 
@@ -280,6 +372,23 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         tasks: get().tasks.map((task) => task.id === taskId ? result.task! : task),
       });
       return true;
+    } catch (err: any) {
+      set({ error: err.message });
+      return false;
+    }
+  },
+
+  setQualityVerdict: async (taskId: string, status: 'accepted' | 'rejected', rejectionTags?: QualityRejectionTag[]) => {
+    set({ error: null });
+    try {
+      const result = await window.electronAPI.tasks.setQualityVerdict(taskId, status, rejectionTags);
+      const updatedTask = result.task;
+      if (result.success && updatedTask) {
+        set({ tasks: get().tasks.map((task) => task.id === taskId ? updatedTask : task) });
+        return true;
+      }
+      set({ error: result.error || '人工质量裁决写入失败' });
+      return false;
     } catch (err: any) {
       set({ error: err.message });
       return false;
@@ -403,7 +512,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       set({ error: '另一账号正在配置或提交，请等待其进入生成阶段' });
       return false;
     }
-    const task = get().tasks.find((t) => t.id === taskId);
+    let task = get().tasks.find((t) => t.id === taskId);
     if (!task || !task.assignedAccountId) {
       console.warn('[TaskStore] startAutomation: 任务未指派账号', taskId);
       set({ error: task ? '任务尚未指派账号' : '任务不存在' });
@@ -414,10 +523,48 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       return false;
     }
 
+    // 显式启动必须先持久化 armed，写失败则绝不进入账号与页面动作。
+    if (task.executionIntent !== 'armed') {
+      const armResult = await window.electronAPI.tasks.updateRuntime(taskId, { executionIntent: 'armed' });
+      if (!armResult.success || !armResult.task) {
+        set({ error: armResult.error || '执行意图写入失败' });
+        return false;
+      }
+      const armedTask = armResult.task;
+      task = armedTask;
+      set({ tasks: get().tasks.map((item) => item.id === taskId ? armedTask : item) });
+    }
+
+    if (!task.assignedAccountId) {
+      set({ error: '任务尚未指派账号' });
+      return false;
+    }
+
     const dependency = evaluateDependencies(task, get().tasks);
     if (dependency.state !== 'ready') {
       set({ error: dependency.message || '任务依赖尚未就绪' });
       setTimeout(() => get().processQueue(), 0);
+      return false;
+    }
+
+    // 依赖恢复后必须通过 Core/Repository 清空历史阻断；清理写入成功并回读一致才允许启动。
+    if (task.blockedByTaskIds?.length) {
+      const cleared = await get().clearDependencyBlock(taskId);
+      if (!cleared) {
+        // 清理失败或并发漂移：保持原状态与原错误，绝不启动，也不并发发起启动写入。
+        set({ error: useTaskStore.getState().error || '依赖阻断清理失败，任务保持原状态' });
+        return false;
+      }
+    }
+    const refreshed = get().tasks.find((item) => item.id === taskId);
+    if (!refreshed || refreshed.status !== 'queued') {
+      set({ error: '任务状态在依赖清理后发生变化，已停止启动' });
+      return false;
+    }
+    task = refreshed;
+
+    if (!task.assignedAccountId) {
+      set({ error: '任务尚未指派账号' });
       return false;
     }
 
@@ -459,6 +606,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       status: 'executing',
       result: null,
       errorInfo: undefined,
+      blockedByTaskIds: undefined,
       runtime: {
         runId,
         attempt: (task.runtime?.attempt || 0) + 1,
@@ -478,23 +626,25 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       updatedAt: now,
     };
 
-    const persisted = await window.electronAPI.tasks.updateRuntime(taskId, {
+    // 启动写入必须持久化成功并回读一致；失败时释放预留、保持排队状态且不更新界面。
+    const startWritten = await get().updateTaskRuntime(taskId, {
       status: 'executing',
       runtime: startedTask.runtime,
       errorInfo: null,
+      blockedByTaskIds: [],
       result: '',
     });
-    if (!persisted.success) {
+    if (!startWritten) {
       await automationEngine.release(taskId);
-      set({ error: persisted.error || '任务运行状态写入失败' });
       return false;
     }
+    const runningTask = get().tasks.find((item) => item.id === taskId) || startedTask;
 
     console.log('[TaskStore] 启动任务', taskId, '在账号', accountId);
     void window.electronAPI.logs.append({ level: 'info', scope: 'automation', message: '任务开始执行', taskId, accountId });
 
     set({
-      tasks: get().tasks.map((item) => item.id === taskId ? (persisted.task || startedTask) : item),
+      tasks: get().tasks.map((item) => item.id === taskId ? runningTask : item),
       executingTasks: { ...get().executingTasks, [accountId]: taskId },
       accountBusy: { ...get().accountBusy, [accountId]: true },
       accountAutomationState: { ...get().accountAutomationState, [accountId]: 'injecting' },
@@ -505,6 +655,46 @@ export const useTaskStore = create<TaskState>((set, get) => ({
     });
 
     return true;
+  },
+
+  markDependencyBlock: async (taskId, block) => {
+    const blockedByTaskIds = [...new Set(block.blockedByTaskIds.filter(Boolean))].sort();
+    const now = new Date().toISOString();
+    const current = get().tasks.find((task) => task.id === taskId);
+    if (!current || current.status !== 'queued') {
+      set({ error: '只有排队中的任务可以写入依赖阻断' });
+      return false;
+    }
+    // 幂等：已经处于相同依赖阻断态时不再重复写盘。
+    // 依赖阻断保持 queued（不写 fail），否则调度器与重试入口都会永久跳过它。
+    if (current.errorInfo?.code === block.code
+      && current.errorInfo?.message === block.message
+      && dependenciesMatch(current, {
+        status: 'queued',
+        errorInfoCode: block.code,
+        blockedByTaskIds,
+      })) {
+      return true;
+    }
+    return get().updateTaskRuntime(taskId, {
+      status: 'queued',
+      result: block.message,
+      errorInfo: { code: block.code, message: block.message, recoverable: false, detectedAt: now },
+      blockedByTaskIds,
+    });
+  },
+
+  clearDependencyBlock: async (taskId) => {
+    const current = get().tasks.find((task) => task.id === taskId);
+    // 幂等：没有历史阻断时无需写入。
+    if (!current?.blockedByTaskIds?.length) return true;
+    // 阻断恢复必须在一次写入里原子转回可调度的 queued 并清除阻断证据。
+    return get().updateTaskRuntime(taskId, {
+      status: 'queued',
+      result: '',
+      errorInfo: null,
+      blockedByTaskIds: [],
+    });
   },
 
   setAccountAutomationState: (accountId: string, state: AutomationState, message?: string, stage?: TaskStage) => {
@@ -568,13 +758,65 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   updateTaskRuntime: async (taskId, patch) => {
-    const result = await window.electronAPI.tasks.updateRuntime(taskId, patch);
-    if (result.success && result.task) {
-      set({ tasks: get().tasks.map((task) => task.id === taskId ? result.task! : task) });
-      return true;
+    const previous = get().tasks.find((task) => task.id === taskId);
+    if (!previous) {
+      set({ error: '任务不存在' });
+      return false;
     }
-    set({ error: result.error || '任务运行状态写入失败' });
-    return false;
+    let result: { success: boolean; task?: Task; error?: string };
+    try {
+      result = await window.electronAPI.tasks.updateRuntime(taskId, patch);
+    } catch (err: any) {
+      set({ error: err?.message || '任务运行状态写入失败' });
+      return false;
+    }
+    const written = result.task;
+    // 写盘确实失败且主进程没有回读结果：界面保持写入前的原状态。
+    if (!written) {
+      set({ error: result.error || '任务运行状态写入失败' });
+      return false;
+    }
+    // 并发冲突：写盘已发生，主进程如实返回权威回读状态。
+    // 此时必须让界面与落盘事实一致，并显示冲突错误——不得宣称“已保持原状态”。
+    if (!result.success) {
+      set({
+        tasks: get().tasks.map((task) => task.id === taskId ? written : task),
+        error: result.error || '任务状态已被并发修改，已同步落盘状态',
+      });
+      return false;
+    }
+    // 只校验本次显式请求的字段（与 TaskService.readBackMatches 同一口径）：
+    // 未请求的字段不参与比较，明确请求清空的字段才要求回读为空。
+    if (patch.status !== undefined && written.status !== patch.status) {
+      set({
+        tasks: get().tasks.map((task) => task.id === taskId ? written : task),
+        error: '任务状态与请求不一致，已同步落盘状态',
+      });
+      return false;
+    }
+    if (patch.errorInfo !== undefined) {
+      const expectedCode = patch.errorInfo === null ? null : patch.errorInfo.code;
+      if ((written.errorInfo?.code ?? null) !== expectedCode) {
+        set({
+          tasks: get().tasks.map((task) => task.id === taskId ? written : task),
+          error: '任务错误信息与请求不一致，已同步落盘状态',
+        });
+        return false;
+      }
+    }
+    if (patch.blockedByTaskIds !== undefined) {
+      const expectedIds = [...new Set(patch.blockedByTaskIds.filter(Boolean))].sort();
+      const actualIds = written.blockedByTaskIds || [];
+      if (actualIds.length !== expectedIds.length || actualIds.some((id, index) => id !== expectedIds[index])) {
+        set({
+          tasks: get().tasks.map((task) => task.id === taskId ? written : task),
+          error: '任务依赖阻断记录与请求不一致，已同步落盘状态',
+        });
+        return false;
+      }
+    }
+    set({ tasks: get().tasks.map((task) => task.id === taskId ? written : task) });
+    return true;
   },
 
   completeAutomation: async (taskId: string, accountId: string, resultUrl: string, outputs?: string[]) => {
@@ -656,6 +898,8 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       });
       // 处理队列：检查是否有排队任务可以启动
       get().processQueue();
+      // 前序进入终态后，被其阻断的后继必须获得一次重新评估机会。
+      scheduleDependencyRecheck();
     }, 2000);
   },
 
@@ -789,58 +1033,75 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         accountAutoMessage: cleanMsg,
       });
       get().processQueue();
+      // 前序进入终态后，被其阻断的后继必须获得一次重新评估机会。
+      scheduleDependencyRecheck();
     }, 3000);
   },
 
   // ---- 队列调度 ----
 
-  processQueue: () => {
+  processQueue: async () => {
     if (queueProcessing) return;
     queueProcessing = true;
-    let handedOff = false;
     try {
-      const state = get();
-      if (state.schedulerPaused) return;
-      if (findInteractiveAccountId(state.accountAutomationState)) return;
-    // 找出所有已指派但还在 queued 状态的任务
-      const queuedTasks = state.tasks.filter(
-        (t) => t.status === 'queued' && t.assignedAccountId
-      );
+      const initialState = get();
+      if (initialState.schedulerPaused) return;
+      if (findInteractiveAccountId(initialState.accountAutomationState)) return;
 
-    // 按创建时间排序
-      queuedTasks.sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+      // A：只处理已指派、queued 且显式 armed 的任务；hold/历史缺失意图 fail-closed。
+      const queuedIds = initialState.tasks
+        .filter((t) => t.status === 'queued' && t.assignedAccountId && t.executionIntent === 'armed')
+        .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
+        .map((task) => task.id);
 
-      for (const task of queuedTasks) {
-        const dependency = evaluateDependencies(task, state.tasks);
-        if (dependency.state === 'missing' || dependency.state === 'failed' || dependency.state === 'invalid') {
-          const message = dependency.message!;
-          const now = new Date().toISOString();
-          set((current) => ({
-            tasks: current.tasks.map((item) => item.id === task.id ? {
-              ...item,
-              status: 'fail' as TaskStatus,
-              result: message,
-              errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
-              updatedAt: now,
-            } : item),
-          }));
-          void window.electronAPI.tasks.updateRuntime(task.id, {
-            status: 'fail',
-            result: message,
-            errorInfo: { code: 'generation_failed', message, recoverable: true, detectedAt: now },
-          });
+      for (const taskId of queuedIds) {
+        const task = get().tasks.find((item) => item.id === taskId);
+        if (!task || task.status !== 'queued' || !task.assignedAccountId || task.executionIntent !== 'armed') continue;
+
+        const dependency = evaluateDependencies(task, get().tasks);
+
+        if (dependency.state === 'ready') {
+          if (task.blockedByTaskIds?.length) {
+            // 恢复：用一次写入原子转回可调度的 queued 并清除阻断证据。
+            // 清理与启动严格串行：清理写入成功并回读一致后才继续，失败保持原状态。
+            const cleared = await get().clearDependencyBlock(taskId);
+            if (!cleared) {
+              scheduleDependencyRecheck();
+              continue;
+            }
+          }
+        } else if (dependency.state === 'waiting') {
+          // 合法等待：不写失败也不写阻断。旧阻断已不成立时清除陈旧证据后继续本轮判断。
+          if (task.blockedByTaskIds?.length) {
+            if (!(await get().clearDependencyBlock(taskId))) {
+              scheduleDependencyRecheck();
+              continue;
+            }
+          } else {
+            continue;
+          }
+        } else {
+          // 缺失 / 循环 / 前置不可满足：幂等写入结构化阻断原因。
+          // 任务始终保持 queued，依赖恢复后仍会被本调度器重新评估。
+          const message = dependency.message || '依赖状态异常';
+          const code = dependency.code || 'dependency_failed';
+          const blockedByTaskIds = dependency.blockedByTaskIds || [];
+          // 先成功写盘并回读，再让界面呈现阻断；写失败保持原状态。
+          await get().markDependencyBlock(taskId, { code, message, blockedByTaskIds });
+          scheduleDependencyRecheck();
+          // 阻断任务绝不能在本轮继续走到启动分支。
           continue;
         }
-        if (dependency.state !== 'ready') continue;
-        const accountId = task.assignedAccountId!;
-        const accountHasObservation = state.tasks.some((item) =>
-          item.id !== task.id && item.assignedAccountId === accountId &&
+
+        const latestTask = get().tasks.find((item) => item.id === taskId);
+        if (!latestTask || latestTask.status !== 'queued' || !latestTask.assignedAccountId) continue;
+        const accountId = latestTask.assignedAccountId;
+        const accountHasObservation = get().tasks.some((item) =>
+          item.id !== taskId && item.assignedAccountId === accountId &&
           item.runtime?.acceptanceObservation?.outcome === 'observing',
         );
         if (accountHasObservation) continue;
         const account = useAccountStore.getState().accounts.find((item) => item.id === accountId);
-        // 启动后账号会进入“待复检”。若依赖已满足但因为未知可用性被挡住，
-        // 应主动请求一次复检并做有界退避，而不是永久跳过该账号。
         const availabilityState = account?.health?.availability?.state;
         if (availabilityState === 'unknown') {
           const attempts = availabilityRetryAttempts.get(accountId) || 0;
@@ -851,7 +1112,7 @@ export const useTaskStore = create<TaskState>((set, get) => ({
               const delay = Math.min(30_000, 2_000 * 2 ** Math.min(attempts, 4));
               const timer = setTimeout(() => {
                 availabilityRetryTimers.delete(accountId);
-                get().processQueue();
+                void get().processQueue();
               }, delay);
               availabilityRetryTimers.set(accountId, timer);
             }
@@ -860,19 +1121,16 @@ export const useTaskStore = create<TaskState>((set, get) => ({
         }
         availabilityRetryAttempts.delete(accountId);
 
-        if (getAssignedAccountBlockReason(account, task)) {
-          // 用户已明确指派的任务必须保持绑定，不得因冷却/额度/登录状态而静默改派。
-          // 自动指派只发生在任务创建或 CSV 导入阶段。
+        if (getAssignedAccountBlockReason(account, latestTask)) {
           continue;
         }
-        if (!state.accountBusy[accountId]) {
-          console.log('[TaskStore] 队列调度：启动任务', task.id, '在账号', accountId);
-          handedOff = true;
-          void state.startAutomation(task.id).finally(() => {
-            queueProcessing = false;
-            get().processQueue();
-          });
-          return; // 每次只启动一个，完成锁定后继续调度其他空闲账号
+        if (!get().accountBusy[accountId]) {
+          console.log('[TaskStore] 队列调度：启动任务', taskId, '在账号', accountId);
+          const started = await get().startAutomation(taskId);
+          if (started) {
+            setTimeout(() => { void get().processQueue(); }, 0);
+            return;
+          }
         }
       }
     } catch (err: unknown) {
@@ -880,15 +1138,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       console.error('[TaskStore] 队列调度异常：', err);
       set({ error: `任务调度异常：${error}` });
     } finally {
-      // assign/startAutomation 已接管后，由其 finally 释放调度锁；其余路径必须立即释放。
-      if (!handedOff) queueProcessing = false;
+      queueProcessing = false;
     }
   },
 
   getNextTaskForAccount: (accountId: string) => {
     const tasks = get().tasks;
     return tasks.find(
-      (t) => t.status === 'queued' && t.assignedAccountId === accountId
+        (t) => t.status === 'queued' && t.assignedAccountId === accountId && t.executionIntent === 'armed'
     ) || null;
   },
 }));

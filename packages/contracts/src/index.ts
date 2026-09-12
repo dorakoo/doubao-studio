@@ -16,6 +16,10 @@ export type {
   VideoDuration,
   VideoAspectRatio,
   DependencyPolicy,
+  TaskExecutionIntent,
+  QualityVerdictStatus,
+  QualityRejectionTag,
+  QualityVerdict,
 } from './enums';
 
 export type {
@@ -62,6 +66,7 @@ export type {
   TaskAssignParams,
   TaskUpdateStatusParams,
   TaskUpdateRuntimeParams,
+  TaskSetQualityVerdictParams,
   TaskAcquireLockParams,
   TaskRenewLockParams,
   TaskReleaseLockParams,

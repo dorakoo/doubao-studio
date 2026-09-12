@@ -13,8 +13,13 @@ import { app, BrowserWindow, ipcMain, session, shell } from 'electron';
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { registerAccountIPC } from './ipc/accounts';
-import { listTasksForLocalControl, registerTaskIPC } from './ipc/tasks';
+import { listAccountsForLocalControl, registerAccountIPC } from './ipc/accounts';
+import {
+  assignTaskForLocalControl,
+  downloadArtifactForLocalControl,
+  listTasksForLocalControl,
+  registerTaskIPC,
+} from './ipc/tasks';
 import { loadProjects, registerProjectIPC } from './ipc/projects';
 import { registerSystemIPC } from './ipc/system';
 import { writeCrashLog } from './utils/logger';
@@ -104,8 +109,11 @@ async function startLocalControl(requestedPort: number | null): Promise<void> {
     expiresAtMs,
     listProjects: loadProjects,
     listTasks: listTasksForLocalControl,
+    listAccounts: listAccountsForLocalControl,
     isRendererReady: () => broker.isReady(),
     dispatch: (command) => broker.dispatch(command),
+    assign: async (command) => assignTaskForLocalControl(command),
+    downloadArtifact: (command) => downloadArtifactForLocalControl(command),
   });
   const port = await localControlServer.start(requestedPort);
   fs.writeFileSync(tokenPath, token, { encoding: 'utf8', mode: 0o600 });

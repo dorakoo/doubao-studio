@@ -93,6 +93,7 @@ function makeValidTask(): Task {
     runHistory: [],
     dependsOnTaskIds: [],
     source: 'manual',
+    executionIntent: 'hold',
     projectId: DEFAULT_PROJECT_ID,
     createdAt: '2025-01-01T00:00:00.000Z',
     updatedAt: NOW,
@@ -1002,5 +1003,26 @@ describe('normalizeDownloadJobs', () => {
     delete (job as Partial<DownloadJob>).status;
     const result = normalizeDownloadJobs([job], NOW);
     expect(result.changed).toBe(true);
+  });
+});
+
+describe('executionIntent normalization', () => {
+  it('历史 queued 任务缺失字段默认迁移为 hold', () => {
+    const task = makeValidTask() as unknown as Record<string, unknown>;
+    delete task.executionIntent;
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.executionIntent).toBe('hold');
+  });
+  it('armed 显式字段跨重启保留', () => {
+    const task = makeValidTask();
+    task.executionIntent = 'armed';
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.executionIntent).toBe('armed');
+  });
+  it('非法或缺失值一律回退 hold', () => {
+    const task = makeValidTask() as unknown as Record<string, unknown>;
+    task.executionIntent = 'submit-now';
+    const normalized = normalizeTasks([task], DEFAULT_PROJECT_ID, NOW).data[0];
+    expect(normalized.executionIntent).toBe('hold');
   });
 });

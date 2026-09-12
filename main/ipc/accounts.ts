@@ -107,6 +107,11 @@ function loadAccounts(): Account[] {
   return result.data;
 }
 
+/** 仅供同进程本机控制面读取；敏感字段由控制面投影时剔除。 */
+export function listAccountsForLocalControl(): Account[] {
+  return loadAccounts();
+}
+
 /** 保存所有账号 */
 function saveAccounts(accounts: Account[]): boolean {
   return writeJSON(STORE_FILE, accounts);
