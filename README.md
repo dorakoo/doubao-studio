@@ -6,7 +6,7 @@
 
 把提示词、素材、账号、队列、网页生成、产物绑定与下载，连接成一条可追踪、可暂停、可恢复的生产链。
 
-[![Source Version](https://img.shields.io/badge/source-2.3.7-6d5dfc)](CHANGELOG.md)
+[![Source Version](https://img.shields.io/badge/source-2.3.8-6d5dfc)](CHANGELOG.md)
 [![Latest Release](https://img.shields.io/github/v/release/dorakoo/doubao-studio?label=release)](https://github.com/dorakoo/doubao-studio/releases/latest)
 [![CI](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/dorakoo/doubao-studio/actions/workflows/ci.yml)
 [![Electron](https://img.shields.io/badge/Electron-33-47848f?logo=electron)](https://www.electronjs.org/)
@@ -24,8 +24,8 @@
 
 | 渠道 | 当前状态 |
 | --- | --- |
-| 当前源码 | `2.3.7`；视频控件就绪与受理后观察流水线已完成稳定性收口 |
-| GitHub Release | [`v2.3.7`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.7) |
+| 当前源码 | `2.3.8`；四包集成：执行意图安全、原会话定位、本机指派/产物下载、依赖与下载收口 |
+| GitHub Release | [`v2.3.8`](https://github.com/dorakoo/doubao-studio/releases/tag/v2.3.8) |
 | 自动化验收 | `main` 每次推送由 Windows CI 执行统一 `pnpm run validate` |
 
 > [!IMPORTANT]
