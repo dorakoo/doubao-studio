@@ -25,15 +25,45 @@ jobs:
       - run: pnpm run dist:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract CHANGELOG notes for release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v',''
+          $lines = Get-Content CHANGELOG.md
+          $notes = New-Object System.Collections.Generic.List[string]
+          $inSection = $false
+          foreach ($line in $lines) {
+            if ($line -match ("^##\s+\[?" + [regex]::Escape($version) + "\]?(\s|\(|$)")) {
+              $inSection = $true
+              continue
+            }
+            if ($inSection -and $line -match '^##\s+') { break }
+            if ($inSection) { $notes.Add($line) }
+          }
+          $notesText = ($notes -join "`n").Trim()
+          if ([string]::IsNullOrWhiteSpace($notesText)) {
+            Write-Error "CHANGELOG.md is missing release notes for $version. Every new release must document what changed."
+            exit 1
+          }
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes-$version.md"
+          Set-Content -Path $notesPath -Value $notesText -Encoding utf8
+          Write-Host "Wrote release notes for $version to $notesPath"
       - name: Upload release assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v',''
+          $notesPath = Join-Path $env:RUNNER_TEMP "release-notes-$version.md"
+          if (-not (Test-Path $notesPath)) {
+            Write-Error "Release notes file missing for $tag"
+            exit 1
+          }
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "豆包工作室 $tag" --generate-notes
+            gh release create $tag --title "豆包工作室 $tag" --notes-file $notesPath
           }
           Get-ChildItem release -File | Where-Object {
             $_.Extension -in '.exe', '.blockmap' -or $_.Name -eq 'latest.yml'

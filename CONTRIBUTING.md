@@ -56,6 +56,15 @@ feat(csv): add guarded drag-and-drop import
 docs: refresh repository usage guide
 ```
 
+## 版本发布与更新说明
+
+准备新版本（修改 `package.json` version、打 `v*` Tag 或创建 GitHub Release）时：
+
+1. **必须**在 `CHANGELOG.md` 增加该版本章节，写清完成了什么更新（能力、操作方式、修复、明确未做项）。
+2. CI Release 工作流会把该章节写入 GitHub Release 正文；章节缺失会导致发布失败。
+3. 不要把自动化测试通过写成“人工验收完成”或“生产可用”；Dola、签名、图标等未验证项保持如实标注。
+4. 详细规则见 `AGENTS.md` 的「发布与更新说明」。
+
 ## 报告页面适配问题
 
 请使用 Bug Report 模板，提供豆包页面模式、模型、比例、时长、失败阶段和可复现步骤。只上传脱敏日志；删除 Cookie、Token、完整提示词、私人素材路径、账号名和媒体 URL。
