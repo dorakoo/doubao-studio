@@ -43,6 +43,10 @@
     "cli:list": "node dist/main/cli/doubaoCliEntry.js list",
     "cli:import": "node dist/main/cli/doubaoCliEntry.js import-csv",
     "cli:migrate-project": "node dist/main/cli/doubaoCliEntry.js migrate-project-tasks",
+    "cli:parse-video": "node dist/main/cli/doubaoCliEntry.js parse-video",
+    "cli:download-nomark-video": "node dist/main/cli/doubaoCliEntry.js download-nomark-video",
+    "cli:parse-images": "node dist/main/cli/doubaoCliEntry.js parse-images",
+    "cli:download-nomark-images": "node dist/main/cli/doubaoCliEntry.js download-nomark-images",
     "mcp:server": "node dist/main/mcp/doubaoMcpServer.js",
     "mcp:client": "node dist/main/mcp/mcpClientCli.js"
   },

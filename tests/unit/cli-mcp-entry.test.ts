@@ -33,38 +33,49 @@ afterEach(() => {
 });
 
 describe('CLI 入口接线', () => {
-  it('list：读取 JSON 任务文件并输出稳定 JSON（exit 0）', () => {
+  it('list：读取 JSON 任务文件并输出稳定 JSON（exit 0）', async () => {
     const file = join(dir, 'tasks.json');
     writeFileSync(file, JSON.stringify([fixtureTask('a', 'queued'), fixtureTask('b', 'done')]), 'utf8');
     const out: string[] = [];
-    const result = runCli(['list', '--tasks-file', file], (s) => out.push(s));
+    const result = await runCli(['list', '--tasks-file', file], (s) => out.push(s));
     expect(result.exitCode).toBe(0);
     const parsed = JSON.parse(out[0]);
     expect(parsed.ok).toBe(true);
     expect((parsed.data as { id: string }[]).map((t) => t.id).sort()).toEqual(['a', 'b']);
   });
 
-  it('task：不存在任务 exit 1 + TASK_NOT_FOUND', () => {
+  it('task：不存在任务 exit 1 + TASK_NOT_FOUND', async () => {
     const file = join(dir, 'tasks.json');
     writeFileSync(file, '[]', 'utf8');
     const out: string[] = [];
-    const result = runCli(['task', 'nope', '--tasks-file', file], (s) => out.push(s));
+    const result = await runCli(['task', 'nope', '--tasks-file', file], (s) => out.push(s));
     expect(result.exitCode).toBe(1);
     expect(JSON.parse(out[0]).error).toBe('TASK_NOT_FOUND');
   });
 
-  it('outputs/diagnostics 命令可用且零写入', () => {
+  it('outputs/diagnostics 命令可用且零写入', async () => {
     const file = join(dir, 'tasks.json');
     writeFileSync(file, JSON.stringify([fixtureTask('d', 'done')]), 'utf8');
     const out1: string[] = [];
-    expect(runCli(['outputs', '--tasks-file', file], (s) => out1.push(s)).exitCode).toBe(0);
+    expect((await runCli(['outputs', '--tasks-file', file], (s) => out1.push(s))).exitCode).toBe(0);
     expect((JSON.parse(out1[0]).data as { taskId: string }[])[0].taskId).toBe('d');
     const out2: string[] = [];
-    expect(runCli(['diagnostics', '--tasks-file', file], (s) => out2.push(s)).exitCode).toBe(0);
+    expect((await runCli(['diagnostics', '--tasks-file', file], (s) => out2.push(s))).exitCode).toBe(0);
     expect((JSON.parse(out2[0]).data as Task[])[0].prompt).toContain('已脱敏');
     // 零写入：replace 恒 false，文件内容不变
     const after = JSON.parse(readFileSync(file, 'utf8'));
     expect(after.length).toBe(1);
+  });
+
+  it('parse-video / parse-images 命令已注册（缺 url 返回 INVALID_ARGUMENTS）', async () => {
+    const out: string[] = [];
+    const result = await runCli(['parse-video'], (s) => out.push(s));
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(out[0]).error).toBe('INVALID_ARGUMENTS');
+    const out2: string[] = [];
+    const result2 = await runCli(['parse-images'], (s) => out2.push(s));
+    expect(result2.exitCode).toBe(1);
+    expect(JSON.parse(out2[0]).error).toBe('INVALID_ARGUMENTS');
   });
 });
 

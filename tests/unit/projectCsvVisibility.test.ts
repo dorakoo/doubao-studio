@@ -47,16 +47,16 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('CLI CSV 项目完整性', () => {
-  it('未知 projectId 返回 PROJECT_NOT_FOUND 且台账原文不变', () => {
+  it('未知 projectId 返回 PROJECT_NOT_FOUND 且台账原文不变', async () => {
     const before = readFileSync(tasksFile, 'utf8');
-    const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', 'missing'], () => {});
+    const result = await runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', 'missing'], () => {});
     expect(JSON.parse(result.output)).toEqual({ ok: false, error: 'PROJECT_NOT_FOUND' });
     expect(readFileSync(tasksFile, 'utf8')).toBe(before);
   });
 
-  it('已存在项目导入成功，机器输出不含任务、提示词或素材路径', () => {
+  it('已存在项目导入成功，机器输出不含任务、提示词或素材路径', async () => {
     const output: string[] = [];
-    const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', FROZEN_MIGRATION.targetProjectId], (line) => output.push(line));
+    const result = await runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', FROZEN_MIGRATION.targetProjectId], (line) => output.push(line));
     expect(result.exitCode).toBe(0);
     const parsed = JSON.parse(output[0]);
     expect(parsed.data).toMatchObject({ imported: 1, skipped: 0, projectId: FROZEN_MIGRATION.targetProjectId });
@@ -73,17 +73,17 @@ describe('CLI CSV 项目完整性', () => {
     expect(first.name).toBe(second.name);
   });
 
-  it('--project-name 创建项目后导入并返回真实项目 ID', () => {
-    const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-name', '新项目'], () => {});
+  it('--project-name 创建项目后导入并返回真实项目 ID', async () => {
+    const result = await runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-name', '新项目'], () => {});
     const parsed = JSON.parse(result.output);
     expect(parsed.ok).toBe(true);
     expect(parsed.data.projectId).toMatch(/^[0-9a-f-]{36}$/);
     expect((JSON.parse(readFileSync(tasksFile, 'utf8')) as Task[])[0].projectId).toBe(parsed.data.projectId);
   });
 
-  it('project-id 与 project-name 同时出现时 fail-closed', () => {
+  it('project-id 与 project-name 同时出现时 fail-closed', async () => {
     const before = readFileSync(tasksFile, 'utf8');
-    const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', 'default-project', '--project-name', '冲突'], () => {});
+    const result = await runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile, '--projects-file', projectsFile, '--project-id', 'default-project', '--project-name', '冲突'], () => {});
     expect(JSON.parse(result.output).error).toBe('INVALID_ARGUMENTS');
     expect(readFileSync(tasksFile, 'utf8')).toBe(before);
   });

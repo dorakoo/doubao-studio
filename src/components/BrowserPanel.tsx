@@ -1065,7 +1065,12 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       setPublicShareDialogOpen(false);
       setPublicShareUrl('');
       const size = download.contentLength ? `，${Math.ceil(download.contentLength / 1024 / 1024)} MB` : '';
-      message.success(`已下载页面公开媒体流（${download.sourceHost || '公开来源'}${size}）。该文件保留平台可能附带的水印。`);
+      if (download.watermarkFree) {
+        const kindLabel = download.kind === 'image' ? '原图' : '无水印视频';
+        message.success(`已下载 ${download.count} 个${kindLabel}（${download.sourceHost || 'nomark'}${size}）。`);
+      } else {
+        message.success(`已下载页面公开媒体流（${download.sourceHost || '公开来源'}${size}）。该文件保留平台可能附带的水印。`);
+      }
     } catch (err: unknown) {
       message.error(`公开媒体下载失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
@@ -2142,17 +2147,19 @@ const BrowserPanel: React.FC<BrowserPanelProps> = ({
       <Modal
         open={publicShareDialogOpen}
         title="解析公开分享链接"
-        okText="解析并下载公开流"
+        okText="解析并下载"
         cancelText="取消"
         confirmLoading={manualVideoExtracting}
         onOk={() => void handleDownloadPublicShareMedia()}
         onCancel={() => !manualVideoExtracting && setPublicShareDialogOpen(false)}
       >
-        <p style={{ color: '#9898b8' }}>仅解析豆包公开分享页实际声明的媒体流，不使用账号 Cookie，不探测隐藏接口，也不会移除水印。</p>
+        <p style={{ color: '#9898b8' }}>
+          优先从 <code>/thread/</code> 分享链提取无水印视频或原图（fallback_api / image_ori_raw）；失败时回退页面公开声明的视频流（可能仍带水印）。不使用账号 Cookie。
+        </p>
         <Input
           value={publicShareUrl}
           onChange={(event) => setPublicShareUrl(event.target.value)}
-          placeholder="粘贴 https://www.doubao.com/... 公开分享链接"
+          placeholder="粘贴 https://www.doubao.com/thread/... 或 /share/ 链接"
           autoFocus
         />
       </Modal>

@@ -42,6 +42,8 @@ import {
   VIDEO_MODEL_LABELS,
   VIDEO_MODEL_COST,
   DEFAULT_VIDEO_CONFIG,
+  listVideoDurationOptions,
+  requiresMembershipDuration,
   type GenerationMode,
   type VideoModel,
   type VideoDuration,
@@ -170,6 +172,8 @@ const TaskConsole: React.FC = () => {
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [selectedMode, setSelectedMode] = useState<GenerationMode>('chat');
   const [videoConfig, setVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
+  /** 会员时长（11–15s）默认隐藏；仅在用户显式展开或任务已是会员时长时展示。 */
+  const [showMembershipDurations, setShowMembershipDurations] = useState(false);
   const [attachments, setAttachments] = useState<string[]>([]);
   const [attachmentBase64s, setAttachmentBase64s] = useState<Record<string, string>>({});
   const [audioAttachment, setAudioAttachment] = useState<string>('');
@@ -180,6 +184,7 @@ const TaskConsole: React.FC = () => {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [editingPrompt, setEditingPrompt] = useState('');
   const [editingVideoConfig, setEditingVideoConfig] = useState({ ...DEFAULT_VIDEO_CONFIG });
+  const [showEditingMembershipDurations, setShowEditingMembershipDurations] = useState(false);
   const [editingAttachments, setEditingAttachments] = useState<string[]>([]);
   const [editingAttachmentBase64s, setEditingAttachmentBase64s] = useState<Record<string, string>>({});
   const [editingAudioAttachment, setEditingAudioAttachment] = useState('');
@@ -228,6 +233,7 @@ const TaskConsole: React.FC = () => {
     setInputText(template.prompt);
     setSelectedMode(template.mode);
     setVideoConfig({ ...(template.videoConfig || DEFAULT_VIDEO_CONFIG) });
+    setShowMembershipDurations(requiresMembershipDuration(template.videoConfig?.duration));
     setAttachments([...template.attachments]);
     setAudioAttachment(template.audioAttachment || '');
     setAttachmentBase64s({});
@@ -400,6 +406,8 @@ const TaskConsole: React.FC = () => {
     setEditingTask(task);
     setEditingPrompt(task.prompt);
     setEditingVideoConfig({ ...(task.videoConfig || DEFAULT_VIDEO_CONFIG) });
+    // CSV/历史任务若已是 11–15s，自动展开会员时长，避免会员账号无法编辑。
+    setShowEditingMembershipDurations(requiresMembershipDuration(task.videoConfig?.duration));
     setEditingAttachments([...(task.attachments || [])]);
     setEditingAudioAttachment(task.audioAttachment || '');
     setEditingAttachmentBase64s({});
@@ -416,6 +424,7 @@ const TaskConsole: React.FC = () => {
     setEditingTask(null);
     setEditingPrompt('');
     setEditingVideoConfig({ ...DEFAULT_VIDEO_CONFIG });
+    setShowEditingMembershipDurations(false);
     setEditingAttachments([]);
     setEditingAttachmentBase64s({});
     setEditingAudioAttachment('');
@@ -834,6 +843,7 @@ const TaskConsole: React.FC = () => {
           setInputText('');
           setSelectedMode('chat');
           setVideoConfig({ ...DEFAULT_VIDEO_CONFIG });
+          setShowMembershipDurations(false);
           setAttachments([]);
           setVariableRows('');
         }}
@@ -894,18 +904,33 @@ const TaskConsole: React.FC = () => {
               style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
             />
 
-            {/* 时长选择 */}
+            {/* 时长选择：默认 4–10 秒；11–15 秒属会员权益，默认隐藏 */}
             <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>视频时长</div>
             <Segmented
               value={videoConfig.duration}
               onChange={(val) => setVideoConfig({ ...videoConfig, duration: val as VideoDuration })}
-              options={Array.from({ length: 12 }, (_, index) => {
-                const seconds = index + 4;
-                return { label: `${seconds} 秒`, value: `${seconds}s` };
-              })}
+              options={listVideoDurationOptions(showMembershipDurations).map((item) => ({
+                label: item.label,
+                value: item.value,
+              }))}
               block
-              style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 12 }}
+              style={{ background: '#1a1a24', padding: '4px', borderRadius: 8, marginBottom: 8 }}
             />
+            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Switch
+                size="small"
+                checked={showMembershipDurations}
+                onChange={(checked) => {
+                  setShowMembershipDurations(checked);
+                  if (!checked && requiresMembershipDuration(videoConfig.duration)) {
+                    setVideoConfig({ ...videoConfig, duration: '10s' });
+                  }
+                }}
+              />
+              <span style={{ color: '#6b6b88', fontSize: 12 }}>
+                显示会员时长（11–15 秒）· 需账号具备会员权益且页面可选；无会员无法生成，历史“强制 15s”已禁用
+              </span>
+            </div>
 
             {/* 比例选择 */}
             <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>画面比例</div>
@@ -1244,13 +1269,28 @@ const TaskConsole: React.FC = () => {
             <Segmented
               value={editingVideoConfig.duration}
               onChange={(value) => setEditingVideoConfig({ ...editingVideoConfig, duration: value as VideoDuration })}
-              options={Array.from({ length: 12 }, (_, index) => {
-                const seconds = index + 4;
-                return { label: `${seconds} 秒`, value: `${seconds}s` };
-              })}
+              options={listVideoDurationOptions(showEditingMembershipDurations).map((item) => ({
+                label: item.label,
+                value: item.value,
+              }))}
               block
-              style={{ background: '#1a1a24', padding: 4, marginBottom: 12 }}
+              style={{ background: '#1a1a24', padding: 4, marginBottom: 8 }}
             />
+            <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Switch
+                size="small"
+                checked={showEditingMembershipDurations}
+                onChange={(checked) => {
+                  setShowEditingMembershipDurations(checked);
+                  if (!checked && requiresMembershipDuration(editingVideoConfig.duration)) {
+                    setEditingVideoConfig({ ...editingVideoConfig, duration: '10s' });
+                  }
+                }}
+              />
+              <span style={{ color: '#6b6b88', fontSize: 12 }}>
+                会员时长 11–15 秒 · 无会员请保持关闭；执行仍以页面实时可选证据为准
+              </span>
+            </div>
             <div style={{ color: '#9898b8', marginBottom: 8, fontSize: 13 }}>画面比例</div>
             <Segmented
               value={editingVideoConfig.aspectRatio}

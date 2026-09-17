@@ -113,6 +113,46 @@ export const VIDEO_MODEL_COST: Record<VideoModel, string> = {
   'seedance-2.0-mini': '每 5 秒 1 单位',
 };
 
+/** 普通账号默认可展示时长上限；11–15 秒属会员权益，不作为无探测默认选项。 */
+export const MEMBERSHIP_DURATION_THRESHOLD_SECONDS = 11;
+
+/**
+ * 构建视频时长选项。
+ * - 默认只展示 4–10 秒，避免无会员账号误选 15 秒后失败。
+ * - 会员时长（11–15 秒）仅在 `includeMembershipDurations` 为 true 时出现，
+ *   且带“会员”标签；执行时仍须页面实时可选证据，否则 fail-closed。
+ * - 历史“强制 15s / 请求改写”入口已永久禁用，此处不再提供。
+ */
+export function listVideoDurationOptions(includeMembershipDurations = false): Array<{
+  seconds: number;
+  value: VideoDuration;
+  label: string;
+  membershipOnly: boolean;
+}> {
+  const options: Array<{ seconds: number; value: VideoDuration; label: string; membershipOnly: boolean }> = [];
+  for (let seconds = 4; seconds <= 10; seconds += 1) {
+    options.push({ seconds, value: `${seconds}s` as VideoDuration, label: `${seconds} 秒`, membershipOnly: false });
+  }
+  if (includeMembershipDurations) {
+    for (let seconds = 11; seconds <= 15; seconds += 1) {
+      options.push({
+        seconds,
+        value: `${seconds}s` as VideoDuration,
+        label: `${seconds} 秒·会员`,
+        membershipOnly: true,
+      });
+    }
+  }
+  return options;
+}
+
+/** 当前配置是否落在需要会员权益的 11–15 秒区间。 */
+export function requiresMembershipDuration(duration: VideoDuration | string | undefined): boolean {
+  if (!duration) return false;
+  const seconds = Number.parseInt(String(duration), 10);
+  return Number.isFinite(seconds) && seconds >= MEMBERSHIP_DURATION_THRESHOLD_SECONDS;
+}
+
 /** 生成模式配置 */
 export const GENERATION_MODE_CONFIG: Record<GenerationMode, {
   label: string;

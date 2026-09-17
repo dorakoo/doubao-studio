@@ -40,13 +40,14 @@ const MAX_SHARE_HTML_BYTES = 1_500_000;
 export function isAllowedPublicShareUrl(value: string): boolean {
   try {
     const url = new URL(value);
-    return isHttpUrl(url) && isDoubaoHost(url.hostname) && !url.username && !url.password;
+    if (!isHttpUrl(url) || !isDoubaoHost(url.hostname) || url.username || url.password) return false;
+    return url.pathname.includes('/thread/') || url.pathname.includes('/share/');
   } catch {
     return false;
   }
 }
 
-/** 只允许豆包公开页面作为解析入口；媒体 CDN 必须为公网 HTTP(S) 地址。 */
+/** 只允许豆包/Dola 公开页面作为解析入口（/thread/ 或 /share/）；媒体 CDN 必须为公网 HTTP(S) 地址。 */
 export function isPublicMediaUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -181,7 +182,12 @@ function isHttpUrl(url: URL): boolean {
 
 function isDoubaoHost(hostname: string): boolean {
   const host = hostname.toLowerCase();
-  return host === 'doubao.com' || host.endsWith('.doubao.com');
+  return (
+    host === 'doubao.com' ||
+    host.endsWith('.doubao.com') ||
+    host === 'dola.com' ||
+    host.endsWith('.dola.com')
+  );
 }
 
 function isPrivateHost(hostname: string): boolean {

@@ -161,7 +161,7 @@ export interface TaskDownloadOutputsResult {
   jobIds?: string[];
 }
 
-/** 公开分享页媒体下载：不使用账号 Cookie，只接受豆包页面实际公开声明的媒体流。 */
+/** 公开分享页媒体下载：不使用账号 Cookie。优先 nomark 无水印链路，失败再回退页面声明流。 */
 export interface PublicShareMediaDownloadResult {
   success: boolean;
   count: number;
@@ -170,6 +170,11 @@ export interface PublicShareMediaDownloadResult {
   contentType?: string;
   contentLength?: number;
   error?: string;
+  /** true=走 nomark 无水印原图/视频；false=回退 og:video（可能仍带水印） */
+  watermarkFree?: boolean;
+  kind?: 'video' | 'image';
+  filePath?: string;
+  files?: string[];
 }
 
 // ==================== 文件选择 ====================

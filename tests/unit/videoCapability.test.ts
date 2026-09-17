@@ -14,6 +14,7 @@ import {
 } from '../../src/utils/videoCapability';
 import type { VideoCapabilityInput } from '../../src/utils/videoCapability';
 import type { SeedanceQuota, AccountHealth, AccountScheduling, AccountStatus } from '../../src/types';
+import { listVideoDurationOptions, requiresMembershipDuration } from '../../src/types';
 import { buildDoubaoCapabilitySnapshot, evaluateDryRunSelection } from '../../src/automation/doubaoCapability';
 import {
   getVideoCompositeLabel,
@@ -659,5 +660,82 @@ describe('新版视频控件适配契约', () => {
     ['9:16', false],
   ])('组合控件文本 %j 的结构判定为 %s', (text, matched) => {
     expect(isVideoCompositeControlText(text)).toBe(matched);
+  });
+});
+
+describe('会员时长 UI 选项与 15s 误导入口收敛', () => {
+  it('默认只暴露 4–10 秒，隐藏 11–15 秒（无会员不展示“强制 15s”）', () => {
+    const options = listVideoDurationOptions(false);
+    expect(options.map((item) => item.value)).toEqual(['4s', '5s', '6s', '7s', '8s', '9s', '10s']);
+    expect(options.some((item) => item.membershipOnly)).toBe(false);
+  });
+
+  it('展开会员时长后出现 11–15 秒并带会员标签', () => {
+    const options = listVideoDurationOptions(true);
+    expect(options.map((item) => item.value)).toEqual([
+      '4s', '5s', '6s', '7s', '8s', '9s', '10s', '11s', '12s', '13s', '14s', '15s',
+    ]);
+    const membership = options.filter((item) => item.membershipOnly);
+    expect(membership.map((item) => item.value)).toEqual(['11s', '12s', '13s', '14s', '15s']);
+    expect(membership.every((item) => item.label.includes('会员'))).toBe(true);
+  });
+
+  it('requiresMembershipDuration 识别 11–15 秒', () => {
+    expect(requiresMembershipDuration('10s')).toBe(false);
+    expect(requiresMembershipDuration('11s')).toBe(true);
+    expect(requiresMembershipDuration('15s')).toBe(true);
+    expect(requiresMembershipDuration(undefined)).toBe(false);
+  });
+
+  it('历史强制 15s 请求改写入口仍固定拒绝', async () => {
+    const forbiddenWebview = {
+      executeJavaScript: async () => {
+        throw new Error('forbidden');
+      },
+    };
+    expect(await inject15sVideoPatch(forbiddenWebview as never)).toBe(false);
+    expect(await set15sVideoPatchEnabled(forbiddenWebview as never, true)).toBe(false);
+  });
+
+  it('会员账号页面可选证据时 15s 预检放行（不影响 10s+ 正常生成）', () => {
+    const result = evaluateVideoCapability(
+      makeBaseInput({
+        duration: '15s',
+        platformAvailability: 'selectable',
+        seedanceQuota: healthySeedanceQuota,
+        health: healthyHealth,
+        scheduling: healthyScheduling,
+      })
+    );
+    expect(result.state).toBe('allowed');
+    expect(result.canSubmit).toBe(true);
+  });
+
+  it('无会员/无实时证据时 15s 仍 blocked', () => {
+    const result = evaluateVideoCapability(
+      makeBaseInput({
+        duration: '15s',
+        platformAvailability: 'membership_required',
+        seedanceQuota: healthySeedanceQuota,
+        health: healthyHealth,
+        scheduling: healthyScheduling,
+      })
+    );
+    expect(result.state).toBe('blocked');
+    expect(result.issues.some((issue) => issue.code === 'membership_required')).toBe(true);
+  });
+
+  it('10s 在无会员时不受会员门禁影响', () => {
+    const result = evaluateVideoCapability(
+      makeBaseInput({
+        duration: '10s',
+        platformAvailability: 'membership_required',
+        seedanceQuota: healthySeedanceQuota,
+        health: healthyHealth,
+        scheduling: healthyScheduling,
+      })
+    );
+    expect(result.state).toBe('allowed');
+    expect(result.canSubmit).toBe(true);
   });
 });

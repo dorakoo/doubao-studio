@@ -9,6 +9,66 @@ import { readJSON, writeJSON } from '../utils/store';
 import { normalizeTasks, normalizeDownloadJobs } from '../utils/persistenceNormalization';
 import { validateDownloadResponse, classifyDownloadException } from '../utils/downloadValidation';
 import { resolvePublicShareMedia } from '../utils/publicShareMedia';
+import { downloadNomarkVideo, parseNomarkVideos } from '../utils/nomarkVideo';
+import { downloadNomarkImage, parseNomarkImages } from '../utils/nomarkImage';
+import type { PublicShareMediaDownloadResult } from '@doubao-studio/contracts';
+
+async function tryDownloadNomarkShareMedia(
+  shareUrl: string,
+  saveDir: string,
+): Promise<PublicShareMediaDownloadResult | null> {
+  const fs = require('fs') as typeof import('fs');
+  const fetchPublic = (url: string, init?: RequestInit) => fetch(url, init);
+  const videos = await parseNomarkVideos(shareUrl, fetchPublic);
+  if (videos.status === 'ok' && videos.videos.length > 0) {
+    const saved = await downloadNomarkVideo(videos.videos[0], saveDir, fetchPublic);
+    if (saved.status === 'saved' && saved.filePath) {
+      return {
+        success: true,
+        count: 1,
+        saveDir,
+        filePath: saved.filePath,
+        sourceHost: saved.video?.url ? new URL(saved.video.url).hostname : 'nomark',
+        contentType: saved.contentType || 'video/mp4',
+        contentLength: saved.bytes || 0,
+        watermarkFree: true,
+        kind: 'video',
+      };
+    }
+  }
+  const images = await parseNomarkImages(shareUrl, fetchPublic);
+  if (images.status !== 'ok' || images.images.length === 0) return null;
+  if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
+  const files: string[] = [];
+  let bytes = 0;
+  let index = 0;
+  for (const image of images.images.slice(0, 20)) {
+    index += 1;
+    const one = await downloadNomarkImage(
+      image,
+      saveDir,
+      `nomark-image-${Date.now()}-${String(index).padStart(3, '0')}`,
+      fetchPublic,
+    );
+    if (one.status === 'saved' && one.filePath) {
+      files.push(one.filePath);
+      bytes += one.bytes || 0;
+    }
+  }
+  if (files.length === 0) return null;
+  return {
+    success: true,
+    count: files.length,
+    saveDir,
+    filePath: files[0],
+    files,
+    sourceHost: 'nomark-image',
+    contentType: 'image/*',
+    contentLength: bytes,
+    watermarkFree: true,
+    kind: 'image',
+  };
+}
 import { v4 as uuidv4 } from 'uuid';
 import { getDefaultProjectId } from './projects';
 import { replaceIpcHandlers } from './lifecycle';
@@ -401,19 +461,34 @@ export function registerTaskIPC(): () => void {
   );
 
   // ---- 公开分享页媒体下载（独立临时会话，不复用账号 Cookie） ----
+  // 优先 nomark 无水印链路（/thread/ fallback_api + qAAB / image_ori_raw）；
+  // 失败再回退 og:video 公开声明流（可能仍带平台水印）。
   ipcMain.handle(
     'tasks:downloadPublicShareMedia',
     async (_event, params: { shareUrl?: unknown; saveDir?: unknown }) => {
       if (typeof params?.shareUrl !== 'string') {
         return { success: false, count: 0, error: '公开分享链接无效' };
       }
+      const shareUrl = params.shareUrl.trim();
       const fs = require('fs') as typeof import('fs');
       const path = require('path') as typeof import('path');
       const { app } = require('electron') as typeof import('electron');
+      const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
+      const saveDir = typeof params.saveDir === 'string' && params.saveDir.trim() ? params.saveDir : defaultDir;
+
+      // ---- 1) nomark 无水印视频 / 原图 ----
+      try {
+        const nomark = await tryDownloadNomarkShareMedia(shareUrl, saveDir);
+        if (nomark) return nomark;
+      } catch {
+        // fall through to legacy public share resolver
+      }
+
+      // ---- 2) 回退：页面公开声明的 og:video（可能带水印） ----
       const transientSession = session.fromPartition(`public-share-${uuidv4()}`);
       try {
         const fetchPublic = (url: string, init?: Record<string, unknown>) => transientSession.fetch(url, init as RequestInit);
-        const resolution = await resolvePublicShareMedia(params.shareUrl, fetchPublic);
+        const resolution = await resolvePublicShareMedia(shareUrl, fetchPublic);
         if (resolution.status !== 'resolved' || !resolution.mediaUrl || !resolution.finalShareUrl) {
           return { success: false, count: 0, error: resolution.error || '未找到公开媒体流' };
         }
@@ -435,8 +510,6 @@ export function registerTaskIPC(): () => void {
           return { success: false, count: 0, error: validation.message || '公开媒体流下载验证失败' };
         }
 
-        const defaultDir = path.join(app.getPath('downloads'), '豆包工作室产物');
-        const saveDir = typeof params.saveDir === 'string' && params.saveDir.trim() ? params.saveDir : defaultDir;
         if (!fs.existsSync(saveDir)) fs.mkdirSync(saveDir, { recursive: true });
         const ext = path.extname(new URL(resolution.mediaUrl).pathname).toLowerCase() || '.mp4';
         const filePath = getAvailableDownloadPath(fs, path, saveDir, `public-share-${Date.now()}${ext.length <= 6 ? ext : '.mp4'}`);
@@ -450,6 +523,8 @@ export function registerTaskIPC(): () => void {
           sourceHost: resolution.sourceHost,
           contentType,
           contentLength: buffer.length,
+          watermarkFree: false,
+          kind: 'video',
         };
       } catch (error: unknown) {
         const classified = classifyDownloadException(error instanceof Error ? error : {});

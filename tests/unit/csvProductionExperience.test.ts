@@ -26,7 +26,7 @@ describe('CSV 拖放与显式 CLI 导入', () => {
     expect(decideCsvDrop(files).ok).toBe(ok);
   });
 
-  it('import-csv 复用 TaskService 写入任务，并保持完整提示词', () => {
+  it('import-csv 复用 TaskService 写入任务，并保持完整提示词', async () => {
     const tasksFile = join(dir, 'tasks.json');
     const projectsFile = join(dir, 'projects.json');
     const csvFile = join(dir, 'batch.csv');
@@ -34,7 +34,7 @@ describe('CSV 拖放与显式 CLI 导入', () => {
     writeFileSync(projectsFile, JSON.stringify([{ id: 'default-project', name: '默认项目', description: '', color: '#fff', archived: false, createdAt: '', updatedAt: '' }]), 'utf8');
     writeFileSync(csvFile, 'prompt,mode\n"Line 1, spoken: ""Hello""",video', 'utf8');
     const output: string[] = [];
-    const result = runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile], (line) => output.push(line));
+    const result = await runCli(['import-csv', '--csv', csvFile, '--tasks-file', tasksFile], (line) => output.push(line));
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(output[0]).ok).toBe(true);
     const tasks = JSON.parse(readFileSync(tasksFile, 'utf8')) as Task[];
@@ -46,8 +46,8 @@ describe('CSV 拖放与显式 CLI 导入', () => {
     ['import-csv', '--csv', 'a.csv'],
     ['import-csv', '--foo', 'x', '--tasks-file', 'tasks.json', '--csv', 'a.csv'],
     ['import-csv', '--csv', 'a.csv', '--csv', 'b.csv', '--tasks-file', 'tasks.json'],
-  ])('缺少、未知或重复参数一律 fail-closed', (...args) => {
-    expect(runCli(args, () => {}).exitCode).toBe(1);
+  ])('缺少、未知或重复参数一律 fail-closed', async (...args) => {
+    expect((await runCli(args, () => {})).exitCode).toBe(1);
   });
 
   it('任务文件在读取后漂移时拒绝覆盖', () => {

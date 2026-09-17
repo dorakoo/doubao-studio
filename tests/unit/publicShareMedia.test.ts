@@ -22,9 +22,12 @@ function response(overrides: Partial<PublicShareFetchResponse> = {}): PublicShar
 describe('public share media resolver', () => {
   it('只接受豆包 http(s) 分享页，不接受私有地址或凭据 URL', () => {
     expect(isAllowedPublicShareUrl('https://www.doubao.com/share/a')).toBe(true);
+    expect(isAllowedPublicShareUrl('https://www.doubao.com/thread/a')).toBe(true);
+    expect(isAllowedPublicShareUrl('https://www.dola.com/thread/a')).toBe(true);
     expect(isAllowedPublicShareUrl('http://doubao.com/share/a')).toBe(true);
     expect(isAllowedPublicShareUrl('https://evil.example/share/a')).toBe(false);
     expect(isAllowedPublicShareUrl('https://user:pass@www.doubao.com/share/a')).toBe(false);
+    expect(isAllowedPublicShareUrl('https://www.doubao.com/chat/a')).toBe(false);
   });
 
   it('只接收页面公开声明的公网媒体 URL', () => {
